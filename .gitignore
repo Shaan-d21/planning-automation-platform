@@ -1,0 +1,42 @@
+# Credentials and local configuration
+.env
+*.epw
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.pytest*/
+.test-deps/
+.test-temp*/
+.test-tmp*/
+.codex_test_tmp/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# IDE and operating system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Runtime output
+logs/
+*.log
+var/
+*.sqlite3
+reports/
+
+# React frontend
+frontend/node_modules/
+frontend/dist/
+frontend/coverage/
+
+# Local spreadsheet QA dependencies and generated inspection output
+qa/
+*.inspect.ndjson
+
+outputs/

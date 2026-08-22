@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "processes": [
+    {
+      "code": "MONTHLY_FORECAST_PROCESS",
+      "displayName": "Monthly Forecast End-to-End Process",
+      "cycleCode": "MONTHLY_FORECAST",
+      "contextMode": "PROMPT_EACH_RUN",
+      "steps": [
+        {
+          "type": "PREFLIGHT",
+          "name": "Validate Process Inputs"
+        },
+        {
+          "type": "UPDATE_VARIABLES",
+          "name": "Update Planning Cycle Variables"
+        },
+        {
+          "type": "REFRESH_CUBE",
+          "name": "Refresh Planning Cube",
+          "enabled": false,
+          "parameters": {
+            "jobName": "Refresh_Cube"
+          }
+        },
+        {
+          "type": "RUN_PIPELINE",
+          "name": "Run Planning Pipeline"
+        },
+        {
+          "type": "RUN_DATA_MAP",
+          "name": "Publish Reporting Data Map"
+        },
+        {
+          "type": "VALIDATE_DATA",
+          "name": "Validate Source and Target"
+        },
+        {
+          "type": "GENERATE_REPORT",
+          "name": "Generate Planning Report",
+          "parameters": {
+            "reportName": "Product_Revenue_Forecast_Reporting"
+          }
+        }
+      ]
+    }
+  ]
+}

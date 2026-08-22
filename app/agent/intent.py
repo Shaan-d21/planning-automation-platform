@@ -1,0 +1,190 @@
+"""Deterministic intent routing for least-privilege agent tool exposure."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import StrEnum
+
+
+class AgentIntent(StrEnum):
+    """Stable user-intent categories used before model invocation."""
+
+    PLATFORM_DISCOVERY = "PLATFORM_DISCOVERY"
+    HISTORY_REVIEW = "HISTORY_REVIEW"
+    DATA_REVIEW = "DATA_REVIEW"
+    OPERATION_PREPARATION = "OPERATION_PREPARATION"
+    GENERAL_GUIDANCE = "GENERAL_GUIDANCE"
+
+
+@dataclass(frozen=True, slots=True)
+class AgentIntentDecision:
+    """Classified intent and the resulting permitted capability subset."""
+
+    intent: AgentIntent
+    tool_names: frozenset[str]
+
+
+class AgentIntentRouter:
+    """Constrain model tools using conservative, explainable text matching."""
+
+    _BASE = frozenset(
+        {"get_environment_summary", "list_platform_operations"}
+    )
+    _HISTORY_TERMS = (
+        "history",
+        "recent run",
+        "recent execution",
+        "last run",
+        "failed run",
+        "completed run",
+        "status of",
+        "job status",
+        "execution status",
+        "why did",
+        "why has",
+        "job error",
+        "execution error",
+        "failed step",
+        "records read",
+        "records processed",
+        "records rejected",
+        "load statistics",
+    )
+    _DATA_TERMS = (
+        "cube",
+        "slice",
+        "data review",
+        "show data",
+        "planning data",
+        "data for",
+        "validate data",
+        "validation",
+        "reconcile",
+        "compare data",
+        "source and target",
+        "actual vs",
+        "forecast vs",
+    )
+    _PREPARATION_TERMS = (
+        "prepare",
+        "run",
+        "execute",
+        "import",
+        "load",
+        "refresh",
+        "calculate",
+        "push",
+        "generate",
+        "update",
+        "set",
+        "change",
+        "assign",
+        "create",
+    )
+    _DATA_REFINEMENT_TERMS = (
+        "change",
+        "replace",
+        "add",
+        "remove",
+        "instead",
+        "swap",
+        "put",
+        "show",
+        "compare",
+        "actual",
+        "forecast",
+        "year",
+        "period",
+        "month",
+        "pov",
+        "row",
+        "column",
+        "member",
+        "this",
+        "previous",
+        "same",
+        "export",
+    )
+    _EXPLICIT_OPERATION_TERMS = (
+        "business rule",
+        "pipeline",
+        "data integration",
+        "data import",
+        "metadata import",
+        "data map",
+        "smart push",
+        "cube refresh",
+        "substitution variable",
+        "user variable",
+        "planning job",
+    )
+
+    @classmethod
+    def route(
+        cls,
+        prompt: str,
+        permitted_tool_names: frozenset[str],
+        *,
+        has_data_review_context: bool = False,
+    ) -> AgentIntentDecision:
+        """Return the smallest useful permitted tool set for this prompt."""
+        normalized = " ".join(str(prompt).casefold().split())
+        selected = set(cls._BASE)
+        matches: list[AgentIntent] = []
+        explicit_operation = any(
+            term in normalized for term in cls._EXPLICIT_OPERATION_TERMS
+        )
+        contextual_refinement = (
+            has_data_review_context
+            and not explicit_operation
+            and any(
+                term in normalized for term in cls._DATA_REFINEMENT_TERMS
+            )
+        )
+        if any(term in normalized for term in cls._HISTORY_TERMS):
+            selected.add("get_recent_execution_history")
+            selected.add("get_execution_evidence")
+            matches.append(AgentIntent.HISTORY_REVIEW)
+        if contextual_refinement or any(
+            term in normalized for term in cls._DATA_TERMS
+        ):
+            selected.update(
+                {
+                    "list_planning_cubes",
+                    "list_cube_dimensions",
+                    "search_dimension_members",
+                    "review_data_slice",
+                    "compare_data_slices",
+                }
+            )
+            matches.append(AgentIntent.DATA_REVIEW)
+        if explicit_operation or (
+            not contextual_refinement
+            and any(term in normalized for term in cls._PREPARATION_TERMS)
+        ):
+            selected.update(
+                {
+                    "list_operation_artifacts",
+                    "plan_multi_step_request",
+                    "prepare_operation_action",
+                    "prepare_standalone_flow_action",
+                }
+            )
+            matches.append(AgentIntent.OPERATION_PREPARATION)
+        if not matches:
+            return AgentIntentDecision(
+                intent=AgentIntent.GENERAL_GUIDANCE,
+                # General questions need only the two lightweight discovery
+                # tools. Sending every operation schema wastes provider TPM
+                # and exposes capabilities unrelated to the current request.
+                tool_names=cls._BASE & permitted_tool_names,
+            )
+        intent = (
+            matches[0]
+            if len(matches) == 1
+            else AgentIntent.PLATFORM_DISCOVERY
+        )
+        return AgentIntentDecision(
+            intent=intent,
+            tool_names=frozenset(selected) & permitted_tool_names,
+        )

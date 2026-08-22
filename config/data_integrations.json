@@ -1,0 +1,12 @@
+{
+  "integrations": [
+    {
+      "name": "Test_Load_Product_Revenue",
+      "description": "Product revenue load"
+    },
+    {
+      "name": "Test_Product_Data_Load",
+      "description": "Product revenue load"
+    }
+  ]
+}

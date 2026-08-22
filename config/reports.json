@@ -1,0 +1,145 @@
+{
+  "version": 1,
+  "reports": [
+    {
+      "name": "Product_Revenue_Forecast_Reporting",
+      "title": "Product Revenue Forecast Reporting",
+      "cube": "VisASO",
+      "pov": {
+        "HSP_View": "BaseData",
+        "Scenario": "Actual",
+        "Version": "Working",
+        "Entity": "Vision Operations Inventory",
+        "Year": "FY22"
+      },
+      "columns": [
+        {
+          "dimensions": [
+            "Period",
+            "Product"
+          ],
+          "members": [
+            [
+              "Jan",
+              "Feb",
+              "Mar"
+            ],
+            [
+              "iPhone 15",
+              "Galaxy S24",
+              "MacBook Pro",
+              "Smart TVs"
+            ]
+          ]
+        }
+      ],
+      "rows": [
+        {
+          "dimensions": [
+            "Account"
+          ],
+          "members": [
+            [
+              "4110",
+              "4150",
+              "Total Revenue",
+              "5110",
+              "5300",
+              "Total Cost of Sales and Service",
+              "Gross Profit"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Revenue Trends Forecast",
+      "title": "Revenue Trends Forecast Report",
+      "cube": "Plan1",
+      "pov": {
+        "HSP_View": "BaseData",
+        "Version": "Working",
+        "Scenario": "Forecast",
+        "Account": "Units",
+        "Year": "FY24",
+        "Entity": "International Sales"
+      },
+      "columns": [
+        {
+          "dimensions": [
+            "Period"
+          ],
+          "members": [
+            [
+              "Q1",
+              "Q2"
+            ]
+          ]
+        }
+      ],
+      "rows": [
+        {
+          "dimensions": [
+            "Product"
+          ],
+          "members": [
+            [
+              "Product X",
+              "Sentinal Standard Notebook",
+              "Sentinal Custom Notebook",
+              "Envoy Standard Netbook",
+              "Envoy Custom Netbook",
+              "Other Computer",
+              "Tablet Computer"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Forecast Variances",
+      "title": "Forecast Variances",
+      "cube": "Plan1",
+      "pov": {
+        "HSP_View": "BaseData",
+        "Period": "IDescendants(YearTotal)",
+        "Year": "FY24",
+        "Entity": "IChildren(403)",
+        "Scenario": "Forecast"
+      },
+      "columns": [
+        {
+          "dimensions": [
+            "Version"
+          ],
+          "members": [
+            [
+              "Prior Fcst",
+              "Working",
+              "Forecast vs Prior Fcst"
+            ]
+          ]
+        }
+      ],
+      "rows": [
+        {
+          "dimensions": [
+            "Account",
+            "Product"
+          ],
+          "members": [
+            [
+              "Total Revenue",
+              "Total Cost of Sales and Service",
+              "Gross Profit",
+              "Total Employee Expenses"
+            ],
+            [
+              "P_000"
+            ]
+          ]
+        }
+      ]
+    }
+  ]
+}

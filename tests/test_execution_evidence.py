@@ -1,0 +1,177 @@
+"""Tests for user-facing Oracle execution evidence projections."""
+
+from datetime import UTC, datetime, timedelta
+
+from app.application.execution_evidence import (
+    agent_execution_evidence,
+    aggregate_record_statistics,
+    workflow_failure_details,
+)
+from app.models.access_control import TriggerSource
+from app.models.job import JobDiagnostics, JobResult
+from app.models.workflow import (
+    WorkflowRun,
+    WorkflowStatus,
+    WorkflowStepResult,
+    WorkflowStepStatus,
+)
+from app.utils.exceptions import JobFailedError
+
+
+def test_record_statistics_are_combined_across_compatible_steps() -> None:
+    statistics = aggregate_record_statistics(
+        (
+            {
+                "record_statistics": {
+                    "records_read": 10,
+                    "records_processed": 9,
+                    "records_rejected": 1,
+                    "details": [{"dimension_name": "Account"}],
+                }
+            },
+            {"status": "Completed"},
+            {
+                "record_statistics": {
+                    "records_read": 5,
+                    "records_processed": 5,
+                    "records_rejected": 0,
+                    "details": [{"dimension_name": "Entity"}],
+                }
+            },
+        )
+    )
+
+    assert statistics == {
+        "source": "ORACLE_JOB_DETAILS",
+        "records_read": 15,
+        "records_processed": 14,
+        "records_rejected": 1,
+        "details": [
+            {"dimension_name": "Account"},
+            {"dimension_name": "Entity"},
+        ],
+    }
+
+
+def test_record_statistics_are_absent_for_unsupported_operations() -> None:
+    assert aggregate_record_statistics(({"job_id": 42},)) is None
+
+
+def test_failed_load_retains_oracle_record_statistics() -> None:
+    job = JobResult(
+        job_id=42,
+        status=1,
+        descriptive_status="Error",
+    )
+    error = JobFailedError(
+        job,
+        diagnostics=JobDiagnostics(
+            job=job,
+            details={
+                "items": [
+                    {
+                        "dimensionName": "Entity",
+                        "recordsRead": 10,
+                        "recordsProcessed": 8,
+                        "recordsRejected": 2,
+                    }
+                ]
+            },
+        ),
+    )
+
+    evidence = workflow_failure_details(error)
+
+    assert evidence["job_id"] == 42
+    assert evidence["record_statistics"]["records_read"] == 10
+    assert evidence["record_statistics"]["records_rejected"] == 2
+
+
+def test_agent_execution_evidence_explains_failure_and_load_counts() -> None:
+    started = datetime(2026, 8, 18, 10, 0, tzinfo=UTC)
+    run = WorkflowRun(
+        execution_id="run-42",
+        workflow_name="Metadata Import - Import Products",
+        status=WorkflowStatus.FAILED,
+        started_at=started,
+        completed_at=started + timedelta(seconds=15),
+        initiated_by="planner",
+        initiated_by_display="Planning User",
+        trigger_source=TriggerSource.AI_AGENT,
+        error_message="Metadata import failed.",
+        steps=(
+            WorkflowStepResult(
+                name="Run metadata import",
+                sequence=1,
+                status=WorkflowStepStatus.FAILED,
+                started_at=started,
+                completed_at=started + timedelta(seconds=15),
+                error_message="Invalid member in Entity dimension.",
+                details={
+                    "job_id": 917,
+                    "password": "must-not-leak",
+                    "output_path": "C:/private/import-errors.csv",
+                    "record_statistics": {
+                        "records_read": 10,
+                        "records_processed": 8,
+                        "records_rejected": 2,
+                        "details": [
+                            {
+                                "dimension_name": "Entity",
+                                "records_read": 10,
+                                "records_processed": 8,
+                                "records_rejected": 2,
+                                "token": "must-not-leak",
+                            }
+                        ],
+                    },
+                },
+            ),
+        ),
+    )
+
+    evidence = agent_execution_evidence(run)
+
+    assert evidence["execution_id"] == "run-42"
+    assert evidence["status"] == "FAILED"
+    assert evidence["record_statistics"]["records_rejected"] == 2
+    assert evidence["steps"][0]["evidence"]["job_id"] == 917
+    assert "password" not in evidence["steps"][0]["evidence"]
+    assert evidence["artifacts"] == ["import-errors.csv"]
+    assert evidence["diagnosis"] == (
+        "Failed at Run metadata import. Oracle reported: "
+        "Invalid member in Entity dimension."
+    )
+    assert "must-not-leak" not in str(evidence)
+
+
+def test_agent_execution_evidence_reports_success_with_rejections() -> None:
+    started = datetime(2026, 8, 18, 10, 0, tzinfo=UTC)
+    run = WorkflowRun(
+        execution_id="run-43",
+        workflow_name="Planning Data Import - Forecast",
+        status=WorkflowStatus.SUCCESS,
+        started_at=started,
+        completed_at=started + timedelta(seconds=5),
+        steps=(
+            WorkflowStepResult(
+                name="Import data",
+                sequence=1,
+                status=WorkflowStepStatus.SUCCESS,
+                details={
+                    "record_statistics": {
+                        "records_read": 100,
+                        "records_processed": 99,
+                        "records_rejected": 1,
+                        "details": [],
+                    }
+                },
+            ),
+        ),
+    )
+
+    evidence = agent_execution_evidence(run)
+
+    assert evidence["diagnosis"] == (
+        "Completed, but Oracle reported 1 rejected record."
+    )

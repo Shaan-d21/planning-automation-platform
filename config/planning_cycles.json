@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "cycles": [
+    {
+      "code": "MONTHLY_FORECAST",
+      "displayName": "Monthly Forecast",
+      "pipelineCode": "PIPE01",
+      "dataMapName": "Product_Revenue_to_Reporting",
+      "variableBindings": [
+        {
+          "role": "YEAR",
+          "variableName": "CurYr",
+          "scope": "ALL"
+        },
+        {
+          "role": "START_PERIOD",
+          "variableName": "CurMonth",
+          "scope": "ALL"
+        },
+        {
+          "role": "END_PERIOD",
+          "variableName": "EndMonth",
+          "scope": "ALL"
+        },
+        {
+          "role": "SCENARIO",
+          "variableName": "CurScenario",
+          "scope": "ALL"
+        },
+        {
+          "role": "VERSION",
+          "variableName": "CurVersion",
+          "scope": "ALL"
+        }
+      ]
+    }
+  ]
+}

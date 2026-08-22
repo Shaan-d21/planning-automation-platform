@@ -1,0 +1,9 @@
+{
+  "pipelines": [
+    {
+      "code": "PIPE01",
+      "name": "PL_ProductRevenueForecast",
+      "description": "Product revenue forecast pipeline"
+    }
+  ]
+}
