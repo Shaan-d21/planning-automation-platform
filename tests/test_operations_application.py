@@ -781,7 +781,7 @@ def test_metadata_import_can_refresh_after_success(
     start_import.assert_called_once_with(
         "Products.csv",
         "Import Products",
-        error_file_name="Products_Errors.csv",
+        error_file_name="Products_Errors-metadata.csv",
     )
     start_refresh.assert_called_once_with("RefreshCube")
     notification_factory.return_value.publish.assert_called_once()
@@ -850,7 +850,7 @@ def test_native_data_import_reuses_an_inbox_file(
     start_import.assert_called_once_with(
         "Forecast_Data.csv",
         "Import Forecast Data",
-        error_file_name="Forecast_Errors.log",
+        error_file_name="Forecast_Errors-dataimpo.log",
     )
     execution_details = run.steps[2].details
     assert execution_details["record_statistics"]["records_read"] == 100
@@ -865,20 +865,34 @@ def test_native_data_import_reuses_an_inbox_file(
 
 
 @patch("app.application.operations.create_notification_service")
-@patch("app.application.operations.EPMAutomateDataService")
-@patch("app.application.operations.EPMAutomateRunner")
+@patch("app.application.operations.JobMonitor")
+@patch("app.application.operations.DataService.start_import")
+@patch("app.application.operations.JobService")
 @patch("app.application.operations.EPMClient")
 def test_native_data_import_uses_file_configured_in_saved_job(
     client_class: Mock,
-    runner_class: Mock,
-    data_service_class: Mock,
+    job_service_class: Mock,
+    start_import: Mock,
+    monitor_class: Mock,
     notification_factory: Mock,
     tmp_path: Path,
 ) -> None:
-    configured_result = Mock()
-    configured_result.job_name = "Import Forecast Data"
-    configured_result.file_name = None
-    data_service_class.return_value.load_data.return_value = configured_result
+    client_class.return_value.application_name = "Vision"
+    client_class.return_value.planning_api_root = (
+        "https://example.oraclecloud.com/rest/v3"
+    )
+    start_import.return_value = DataJobSubmission(
+        job_id=302,
+        job_name="Import Forecast Data",
+        file_name=None,
+        error_file_name="data-import-errors-configur.zip",
+    )
+    monitor_class.return_value.wait_for_completion.return_value = JobResult(
+        job_id=302,
+        status=0,
+        descriptive_status="Completed",
+    )
+    job_service_class.return_value.get_record_statistics.return_value = None
 
     run = OperationCommandExecutor(_settings(tmp_path)).execute(
         DataImportOperationInput(
@@ -890,13 +904,12 @@ def test_native_data_import_uses_file_configured_in_saved_job(
     )
 
     assert run.status is WorkflowStatus.SUCCESS
-    runner_class.assert_called_once()
-    data_service_class.return_value.load_data.assert_called_once_with(
-        data_file=None,
-        inbox_file_name=None,
-        job_name="Import Forecast Data",
-        error_file_name=None,
+    start_import.assert_called_once_with(
+        None,
+        "Import Forecast Data",
+        error_file_name="data-import-errors-configur.zip",
     )
+    monitor_class.return_value.wait_for_completion.assert_called_once_with(302)
     notification_factory.return_value.publish.assert_called_once()
 
 

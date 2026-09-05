@@ -11,9 +11,16 @@ from app.models.access_control import RoleCode
 
 
 class SessionLoginRequest(BaseModel):
-    """Credentials used for a platform session, never Oracle credentials."""
+    """Credentials used for an existing local platform account."""
 
     username: str = Field(min_length=1, max_length=80)
+    password: str = Field(min_length=1, max_length=512)
+
+
+class OracleSessionLoginRequest(BaseModel):
+    """Transient credentials validated directly by Oracle Cloud EPM."""
+
+    username: str = Field(min_length=1, max_length=254)
     password: str = Field(min_length=1, max_length=512)
 
 
@@ -46,12 +53,50 @@ class EnvironmentSummary(BaseModel):
 
     application_name: str
     deployment_mode: str
+    base_url: str
+    configured: bool
+    execution_account: str
+
+
+class EnvironmentApplicationSummary(BaseModel):
+    """One application returned by supported Oracle discovery."""
+
+    name: str
+    product_type: str | None = None
+    application_type: str | None = None
+    admin_mode: bool | None = None
+
+
+class EnvironmentConfigurationResponse(BaseModel):
+    """Non-secret persisted connection configuration for administrators."""
+
+    status: str = "success"
+    base_url: str
+    deployment_mode: str
+    active_application: str | None
+    selected_application: str | None
+    selection_source: str | None
+    configured: bool
+    restart_required: bool
+    applications: list[EnvironmentApplicationSummary] = Field(
+        default_factory=list
+    )
+    last_discovered_at: datetime | None = None
+    last_discovery_error: str | None = None
+    message: str | None = None
+
+
+class EnvironmentApplicationSelectionRequest(BaseModel):
+    """Administrator selection from the live Oracle application list."""
+
+    application_name: str = Field(min_length=1, max_length=128)
 
 
 class IdentityAuthenticationSummary(BaseModel):
     """Safe unauthenticated sign-in options exposed to the browser."""
 
     federated_enabled: bool
+    oracle_credentials_enabled: bool = False
     provider_name: str
     login_url: str | None = None
     local_recovery_enabled: bool = True
@@ -231,6 +276,6 @@ class IdentityRoleMappingRequest(BaseModel):
 
 
 class IdentityProvisioningRequest(BaseModel):
-    """Apply the exact shadow-account plan previously reviewed."""
+    """Apply the exact linked-profile plan previously reviewed."""
 
     provisioning_checksum: str = Field(min_length=64, max_length=64)

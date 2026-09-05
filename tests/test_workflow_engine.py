@@ -122,6 +122,7 @@ def test_workflow_persists_actor_and_trigger_source(tmp_path: Path) -> None:
             display_name="Forecast Planner",
             trigger_source=TriggerSource.MANUAL,
         ),
+        oracle_execution_username="epm.integration",
     )
 
     stored = repository.get(run.execution_id)
@@ -129,6 +130,7 @@ def test_workflow_persists_actor_and_trigger_source(tmp_path: Path) -> None:
     assert stored.initiated_by == "planner"
     assert stored.initiated_by_display == "Forecast Planner"
     assert stored.trigger_source is TriggerSource.MANUAL
+    assert stored.oracle_execution_username == "epm.integration"
 
 
 def test_workflow_persists_failed_oracle_load_counts(tmp_path: Path) -> None:

@@ -12,10 +12,13 @@ from types import SimpleNamespace
 from unittest.mock import ANY, Mock, call
 
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import OperationalError
 
 from app.agent.models import AgentMessageRole
 from app.agent.repository import SQLiteAgentRepository
 from app.application.connection import ConnectionResult
+from app.models.environment import ApplicationInfo
+from app.models.environment_configuration import EnvironmentConfiguration
 from app.application.data_review import (
     DataReviewComparison,
     DataReviewCube,
@@ -79,11 +82,16 @@ from app.models.oracle_artifact import (
     OracleArtifactStatus,
     OracleArtifactType,
 )
-from app.models.process_schedule import (
-    ProcessSchedule,
-    ScheduleContextMode,
-    ScheduleFrequency,
-    ScheduleRunOutcome,
+from app.models.automation_schedule import (
+    AutomationConcurrencyPolicy,
+    AutomationInputPolicy,
+    AutomationMisfirePolicy,
+    AutomationSchedule,
+    AutomationScheduleFrequency,
+    AutomationScheduleRun,
+    AutomationScheduleRunEvidence,
+    AutomationScheduleRunStatus,
+    AutomationTargetType,
 )
 from app.models.substitution_variable import SubstitutionVariable
 from app.utils.exceptions import AuthenticationError
@@ -259,6 +267,74 @@ def test_first_run_bootstrap_does_not_expose_oracle_password(
     assert response.headers["x-frame-options"] == "DENY"
 
 
+def test_environment_configuration_exposes_only_non_secret_selection(
+    tmp_path: Path,
+) -> None:
+    app = create_app(_settings(tmp_path), session_secret="test-secret")
+    client = TestClient(app)
+    _login(client)
+
+    response = client.get("/api/v1/environment/configuration")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["base_url"] == "http://epm.internal/HyperionPlanning"
+    assert payload["active_application"] == "Vision"
+    assert payload["selected_application"] == "Vision"
+    assert payload["selection_source"] == "ENVIRONMENT"
+    assert payload["restart_required"] is False
+    assert "secret" not in response.text
+    assert "administrator" not in response.text
+
+
+def test_environment_application_discovery_and_selection_are_governed(
+    tmp_path: Path,
+) -> None:
+    app = create_app(_settings(tmp_path), session_secret="test-secret")
+    client = TestClient(app)
+    _login(client)
+    discovered = EnvironmentConfiguration(
+        base_url="http://epm.internal/HyperionPlanning",
+        deployment_mode="on_premises",
+        selected_application="Vision",
+        selection_source="ENVIRONMENT",
+        applications=(
+            ApplicationInfo(name="Forecast", product_type="HP"),
+            ApplicationInfo(name="Vision", product_type="HP"),
+        ),
+        last_discovered_at=datetime.now(UTC),
+        last_discovery_error=None,
+        selected_at=datetime.now(UTC),
+        selected_by_user_id=None,
+    )
+    selected = replace(
+        discovered,
+        selected_application="Forecast",
+        selection_source="ADMIN_SELECTION",
+    )
+    service = Mock()
+    service.discover.return_value = discovered
+    service.select_application.return_value = selected
+    app.state.environment_configuration = service
+
+    refreshed = client.post("/api/v1/environment/applications/discover")
+    saved = client.put(
+        "/api/v1/environment/application",
+        json={"application_name": "Forecast"},
+    )
+
+    assert refreshed.status_code == 200
+    assert [item["name"] for item in refreshed.json()["applications"]] == [
+        "Forecast",
+        "Vision",
+    ]
+    assert saved.status_code == 200
+    assert saved.json()["selected_application"] == "Forecast"
+    assert saved.json()["restart_required"] is True
+    assert "Restart the API and worker" in saved.json()["message"]
+    service.select_application.assert_called_once()
+
+
 def test_react_entry_is_available_before_authentication(tmp_path: Path) -> None:
     app = create_app(_settings(tmp_path), session_secret="test-secret")
 
@@ -338,6 +414,57 @@ def test_v1_bootstrap_supports_an_independent_unauthenticated_client(
     assert payload["navigation"] == []
 
 
+def test_public_service_probes_do_not_require_a_browser_session(
+    tmp_path: Path,
+) -> None:
+    app = create_app(_settings(tmp_path), session_secret="test-secret")
+    client = TestClient(app)
+
+    live = client.get("/health/live")
+    ready = client.get("/health/ready")
+
+    assert live.status_code == 200
+    assert live.json() == {
+        "status": "alive",
+        "service": "bisp-epm-api",
+        "version": "0.1.0",
+    }
+    assert ready.status_code == 200
+    assert ready.json() == {
+        "status": "ready",
+        "service": "bisp-epm-api",
+        "version": "0.1.0",
+        "components": {"database": "available"},
+        "environment_configured": True,
+    }
+
+
+def test_readiness_probe_hides_database_failure_details(
+    tmp_path: Path,
+) -> None:
+    app = create_app(_settings(tmp_path), session_secret="test-secret")
+
+    class UnavailableDatabase:
+        def connect(self):
+            raise OperationalError(
+                "SELECT 1",
+                {},
+                Exception("password authentication failed: secret-value"),
+            )
+
+    app.state.platform_database = UnavailableDatabase()
+    response = TestClient(app).get("/health/ready")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "status": "unavailable",
+        "service": "bisp-epm-api",
+        "version": "0.1.0",
+        "components": {"database": "unavailable"},
+    }
+    assert "secret-value" not in response.text
+
+
 def test_v1_bootstrap_returns_effective_user_and_navigation(
     tmp_path: Path,
 ) -> None:
@@ -353,7 +480,10 @@ def test_v1_bootstrap_returns_effective_user_and_navigation(
     assert payload["requires_bootstrap"] is False
     assert payload["environment"] == {
         "application_name": "Vision",
-        "deployment_mode": "auto",
+        "deployment_mode": "on_premises",
+        "base_url": "http://epm.internal/HyperionPlanning",
+        "configured": True,
+        "execution_account": "administrator",
     }
     assert payload["user"]["username"] == "admin"
     assert payload["user"]["platform_roles"] == [
@@ -453,6 +583,45 @@ def test_v1_session_login_and_logout_rotate_browser_security_state(
     assert payload["csrf_token"] != anonymous["csrf_token"]
     assert payload["user"]["username"] == "admin"
     assert client.get("/api/v1/bootstrap").json()["authenticated"] is True
+
+
+def test_oracle_credentials_are_advertised_and_start_a_platform_session(
+    tmp_path: Path,
+) -> None:
+    settings = replace(
+        _settings(tmp_path),
+        epm_base_url="https://example.epm.oraclecloud.com",
+        deployment_mode="cloud",
+    )
+    app = create_app(settings, session_secret="test-secret")
+    client = TestClient(app)
+    _login(client)
+    administrator = app.state.access_control.list_users()[0]
+    oracle_authentication = Mock(return_value=administrator)
+    app.state.oracle_password_authentication = SimpleNamespace(
+        authenticate=oracle_authentication
+    )
+    client.delete("/api/v1/session")
+    anonymous = client.get("/api/v1/bootstrap").json()
+
+    response = client.post(
+        "/api/v1/session/oracle",
+        headers={"X-CSRF-Token": anonymous["csrf_token"]},
+        json={
+            "username": "planner@example.com",
+            "password": "temporary-oracle-password",
+        },
+    )
+
+    assert anonymous["identity_authentication"]["oracle_credentials_enabled"] is True
+    assert response.status_code == 200
+    assert response.json()["user"]["username"] == administrator.username
+    assert client.get("/api/v1/bootstrap").json()["authenticated"] is True
+    oracle_authentication.assert_called_once_with(
+        "planner@example.com",
+        "temporary-oracle-password",
+        ip_address="testclient",
+    )
 
 
 def test_v1_planning_cycle_drives_dependency_aware_homepage(
@@ -916,6 +1085,7 @@ def test_v1_jobs_activity_returns_safe_step_evidence(tmp_path: Path) -> None:
             initiated_by="admin",
             initiated_by_display="Test Administrator",
             trigger_source=TriggerSource.MANUAL,
+            oracle_execution_username="epm.integration",
             steps=(
                 WorkflowStepResult(
                     name="Import data",
@@ -944,10 +1114,12 @@ def test_v1_jobs_activity_returns_safe_step_evidence(tmp_path: Path) -> None:
     assert catalog.status_code == 200
     assert catalog.json()["summary"]["failed"] == 1
     assert catalog.json()["jobs"][0]["name"] == "Load July Actuals"
+    assert catalog.json()["jobs"][0]["executed_by"] == "epm.integration"
 
     detail = client.get("/api/v1/jobs/job-test-001")
     assert detail.status_code == 200
     payload = detail.json()["job"]
+    assert payload["executed_by"] == "epm.integration"
     assert payload["steps"][0]["details"]["job_id"] == 917
     assert payload["steps"][0]["details"]["token"] == "[redacted]"
     assert payload["record_statistics"] == {
@@ -959,7 +1131,7 @@ def test_v1_jobs_activity_returns_safe_step_evidence(tmp_path: Path) -> None:
     }
 
 
-def test_schedule_workspace_and_catalog_require_verified_session(
+def test_schedule_workspace_and_list_require_verified_session(
     tmp_path: Path,
 ) -> None:
     app = create_app(
@@ -971,26 +1143,25 @@ def test_schedule_workspace_and_catalog_require_verified_session(
 
     blocked = client.get("/app/schedules", follow_redirects=False)
     _login(client)
-    app.state.schedule_service = Mock()
-    app.state.schedule_service.catalog.return_value = ()
-    app.state.schedule_service.list_schedules.return_value = ()
+    app.state.automation_schedule_service = Mock()
+    app.state.automation_schedule_service.list_schedules.return_value = ()
     page = client.get("/app/schedules")
-    catalog = client.get("/api/v1/schedules/catalog")
-    legacy_catalog = client.get("/api/schedules/catalog")
+    schedules = client.get("/api/v1/schedules")
+    legacy_schedules = client.get("/api/schedules")
 
     assert blocked.status_code == 303
     assert page.status_code == 200
     assert '<div id="root"></div>' in page.text
-    assert catalog.status_code == 200
-    assert catalog.headers["x-api-version"] == "1"
-    assert catalog.json()["processes"] == []
-    assert legacy_catalog.headers["deprecation"] == "true"
-    assert legacy_catalog.headers["link"] == (
-        '</api/v1/schedules/catalog>; rel="successor-version"'
+    assert schedules.status_code == 200
+    assert schedules.headers["x-api-version"] == "1"
+    assert schedules.json()["schedules"] == []
+    assert legacy_schedules.headers["deprecation"] == "true"
+    assert legacy_schedules.headers["link"] == (
+        '</api/v1/schedules>; rel="successor-version"'
     )
 
 
-def test_schedule_creation_and_run_now_use_schedule_service(
+def test_pipeline_schedule_preview_and_creation_use_automation_coordinator(
     tmp_path: Path,
 ) -> None:
     app = create_app(
@@ -999,56 +1170,105 @@ def test_schedule_creation_and_run_now_use_schedule_service(
         connection_use_case_factory=lambda settings: _SuccessfulConnection(),
     )
     now = datetime.now(UTC)
-    saved = ProcessSchedule(
+    saved = AutomationSchedule(
         schedule_id=11,
+        environment_key="test-environment",
         name="Daily Forecast",
-        process_code="MONTHLY_FORECAST_PROCESS",
-        frequency=ScheduleFrequency.DAILY,
+        target_type=AutomationTargetType.ORACLE_PIPELINE,
+        target_key="PIPE01",
+        frequency=AutomationScheduleFrequency.DAILY,
         timezone="UTC",
         first_run_local=datetime(2027, 1, 1, 9, 0),
-        context_mode=ScheduleContextMode.PIPELINE_DEFAULTS,
-        preset_id=None,
+        input_policy=AutomationInputPolicy.FIXED,
+        configuration={"variables": {"YEAR": "FY27"}, "inbox_files": {}},
+        concurrency_policy=AutomationConcurrencyPolicy.SKIP_IF_ACTIVE,
+        misfire_policy=AutomationMisfirePolicy.RUN_ONCE,
         enabled=True,
         next_run_at=datetime(2027, 1, 1, 9, 0, tzinfo=UTC),
         created_at=now,
         updated_at=now,
     )
-    app.state.schedule_service = Mock()
-    app.state.schedule_service.create.return_value = saved
-    app.state.schedule_service.preview.return_value = SimpleNamespace(
+    app.state.automation_schedule_coordinator = Mock()
+    app.state.automation_schedule_coordinator.create.return_value = saved
+    app.state.automation_schedule_coordinator.preview.return_value = SimpleNamespace(
         next_run_at=datetime(2027, 1, 1, 9, 0, tzinfo=UTC),
         next_run_local=datetime(2027, 1, 1, 9, 0, tzinfo=UTC),
-    )
-    app.state.schedule_service.run_now.return_value = SimpleNamespace(
-        outcome=ScheduleRunOutcome.SUBMITTED,
-        execution_id="scheduled123",
-        message="Planning Process was submitted successfully.",
     )
     client = TestClient(app)
     _login(client)
 
     schedule_payload = {
         "name": "Daily Forecast",
-        "process_code": "MONTHLY_FORECAST_PROCESS",
+        "target_key": "PIPE01",
         "frequency": "DAILY",
         "timezone": "UTC",
         "first_run_local": "2027-01-01T09:00:00",
-        "context_mode": "PIPELINE_DEFAULTS",
+        "input_policy": "FIXED",
+        "variables": {"YEAR": "FY27"},
+        "inbox_files": {},
+        "misfire_policy": "RUN_ONCE",
         "enabled": True,
     }
     preview = client.post("/api/v1/schedules/preview", json=schedule_payload)
     created = client.post("/api/v1/schedules", json=schedule_payload)
-    started = client.post("/api/v1/schedules/11/runs")
 
     assert preview.status_code == 200
     assert preview.json()["next_run_at"] == "2027-01-01T09:00:00+00:00"
     assert created.status_code == 201
-    assert created.json()["schedule"]["frequency_label"] == "Daily"
-    submitted = app.state.schedule_service.create.call_args.args[0]
-    assert submitted.process_code == "MONTHLY_FORECAST_PROCESS"
+    assert created.json()["schedule"]["target_key"] == "PIPE01"
+    submitted = app.state.automation_schedule_coordinator.create.call_args.args[0]
+    assert submitted.target_key == "PIPE01"
+    assert submitted.configuration["variables"] == {"YEAR": "FY27"}
     assert submitted.first_run_local.tzinfo is None
-    assert started.status_code == 202
-    assert started.json()["redirect"] == "/app/runs/scheduled123"
+
+
+def test_schedule_history_returns_environment_scoped_execution_evidence(
+    tmp_path: Path,
+) -> None:
+    app = create_app(
+        _settings(tmp_path),
+        session_secret="test-secret",
+        connection_use_case_factory=lambda settings: _SuccessfulConnection(),
+    )
+    occurred_at = datetime(2027, 1, 1, 9, 0, tzinfo=UTC)
+    app.state.automation_schedule_service = Mock()
+    app.state.automation_schedule_service.list_run_evidence.return_value = (
+        AutomationScheduleRunEvidence(
+            run=AutomationScheduleRun(
+                run_id=7,
+                schedule_id=11,
+                scheduled_for=occurred_at,
+                claimed_at=occurred_at,
+                completed_at=occurred_at,
+                status=AutomationScheduleRunStatus.SUBMITTED,
+                execution_id="execution-7",
+                resolved_payload={},
+            ),
+            schedule_name="Daily Forecast",
+            target_type=AutomationTargetType.ORACLE_PIPELINE,
+            target_key="PIPE01",
+        ),
+    )
+    client = TestClient(app)
+    _login(client)
+
+    response = client.get(
+        "/api/v1/schedules/runs/history?status=SUBMITTED&limit=25"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["summary"] == {
+        "total": 1,
+        "submitted": 1,
+        "completed": 0,
+        "failed": 0,
+        "skipped": 0,
+        "claimed": 0,
+    }
+    assert response.json()["runs"][0]["execution_id"] == "execution-7"
+    kwargs = app.state.automation_schedule_service.list_run_evidence.call_args.kwargs
+    assert kwargs["status"] is AutomationScheduleRunStatus.SUBMITTED
+    assert kwargs["limit"] == 25
 
 
 def test_successful_connection_opens_real_catalog_dashboard(
@@ -1402,6 +1622,37 @@ def test_health_check_verifies_oracle_application(
 
     assert response.status_code == 200
     assert response.json()["application"] == "Vision"
+
+
+def test_health_check_uses_latest_selected_application(
+    tmp_path: Path,
+) -> None:
+    checked_settings: list[Settings] = []
+
+    def connection_factory(settings: Settings) -> _SuccessfulConnection:
+        checked_settings.append(settings)
+        return _SuccessfulConnection()
+
+    app = create_app(
+        _settings(tmp_path),
+        session_secret="test-secret",
+        connection_use_case_factory=connection_factory,
+    )
+    app.state.environment_configuration.resolve_startup_settings = Mock(
+        return_value=replace(
+            app.state.settings,
+            application_name="EBPCS",
+        )
+    )
+    client = TestClient(app)
+    _login(client)
+
+    response = client.get("/api/health")
+
+    assert response.status_code == 200
+    assert checked_settings[-1].application_name == "EBPCS"
+    assert response.json()["active_application"] == "Vision"
+    assert response.json()["restart_required"] is True
 
 
 def test_health_check_reports_oracle_unavailability(
@@ -2026,6 +2277,74 @@ def test_business_rule_start_requires_live_artifact_and_returns_monitor(
     app.state.operation_catalog.discover_job_names.assert_called_once_with(
         job_type="RULES"
     )
+
+
+def test_business_rule_rtp_import_drives_form_and_execution_validation(
+    tmp_path: Path,
+) -> None:
+    app = create_app(
+        _settings(tmp_path),
+        session_secret="test-secret",
+        connection_use_case_factory=lambda settings: _SuccessfulConnection(),
+    )
+    app.state.operation_catalog = Mock()
+    app.state.operation_catalog.discover_job_names.return_value = (
+        "Calculate Revenue",
+    )
+    app.state.operation_manager = Mock()
+    app.state.operation_manager.submit.return_value = SimpleNamespace(
+        execution_id="registered-rule-123"
+    )
+    client = TestClient(app)
+    _login(client)
+    xml = b"""<businessRule name="Calculate Revenue" cube="Plan1">
+      <rtp name="Year" label="Planning Year" type="MEMBER"
+           dimension="Year" required="true" />
+      <rtp name="Scenario" type="MEMBER" default="Forecast" />
+    </businessRule>"""
+
+    imported = client.post(
+        "/api/operations/business-rules/rtp-registry/import?filename=rules.xml",
+        content=xml,
+        headers={"Content-Type": "application/octet-stream"},
+    )
+    definition = client.get(
+        "/api/operations/business-rules/rtp-definition",
+        params={"rule_name": "Calculate Revenue"},
+    )
+    missing = client.post(
+        "/api/operations/business-rules/runs",
+        json={"rule_name": "Calculate Revenue", "runtime_prompts": {}},
+    )
+    accepted = client.post(
+        "/api/operations/business-rules/runs",
+        json={
+            "rule_name": "Calculate Revenue",
+            "runtime_prompts": {"year": "FY27"},
+        },
+    )
+
+    assert imported.status_code == 200
+    assert imported.json()["result"]["prompts_imported"] == 2
+    assert imported.json()["result"]["rules_added"] == 1
+    assert definition.status_code == 200
+    assert [
+        item["name"] for item in definition.json()["definition"]["prompts"]
+    ] == ["Year", "Scenario"]
+    assert missing.status_code == 400
+    assert "Planning Year" in missing.json()["details"]
+    assert accepted.status_code == 202
+    submitted = app.state.operation_manager.submit.call_args.args[0]
+    assert submitted.runtime_prompts == {"Year": "FY27"}
+
+    registry_status = client.get(
+        "/api/operations/business-rules/rtp-registry/status"
+    )
+    assert registry_status.status_code == 200
+    assert registry_status.json()["registry"]["health"] == "HEALTHY"
+    assert registry_status.json()["registry"][
+        "synchronized_rule_count"
+    ] == 1
 
 
 def test_data_map_start_uses_targeted_discovery_and_reviewed_scope(
@@ -2783,10 +3102,13 @@ def test_business_rule_catalog_uses_targeted_live_discovery(
     response = client.get("/api/operations/business-rules/catalog")
 
     assert response.status_code == 200
-    assert response.json() == {
-        "status": "success",
-        "jobs": ["Calculate Revenue", "Aggregate Plan1"],
-    }
+    assert response.json()["status"] == "success"
+    assert response.json()["jobs"] == [
+        "Calculate Revenue",
+        "Aggregate Plan1",
+    ]
+    assert response.json()["rtp_registry"]["health"] == "EMPTY"
+    assert response.json()["rtp_registry"]["live_rule_count"] == 2
     app.state.operation_catalog.discover_job_names.assert_called_once_with(
         job_type="RULES"
     )

@@ -371,6 +371,11 @@ class _PipelineCatalog:
         )
 
 
+class _PipelineAndRuleCatalog(_PipelineCatalog):
+    def discover_job_names(self, *, job_type):
+        return {"RULES": ("Revenue Forecast",)}.get(job_type, ())
+
+
 def test_multi_step_planner_resolves_one_live_oracle_pipeline(
     tmp_path: Path,
 ) -> None:
@@ -1490,6 +1495,101 @@ def test_standalone_flow_runs_after_one_complete_approval(
         "Revenue to Reporting",
     ]
     assert actor.trigger_source is TriggerSource.AI_AGENT
+
+
+def test_standalone_flow_preserves_pipeline_and_following_rule(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    access = AccessControlService(settings.workflow_database_file)
+    access.bootstrap_administrator(
+        username="admin",
+        display_name="Administrator",
+        email=None,
+        password="Strong password 123!",
+    )
+    repository = SQLiteAgentRepository(settings.workflow_database_file)
+    gateway = AgentCapabilityGateway(
+        settings,
+        control_center=_ControlCenter(),
+        data_review=_DataReview(),
+        operation_catalog=_PipelineAndRuleCatalog(),
+    )
+    manager = _OperationManager()
+    service = AgentApplicationService(
+        settings,
+        gateway=gateway,
+        repository=repository,
+        provider_factory=_NeverCalledProvider,
+        operation_manager=manager,
+    )
+    user = replace(
+        _user(Permission.OPERATION_EXECUTE),
+        user_id=access.list_users()[0].user_id,
+    )
+    conversation = service.create_conversation(user)
+
+    pipeline = service.send_message(
+        conversation_id=conversation.conversation_id,
+        user=user,
+        content=(
+            "Configure and execute a standalone flow without an Oracle "
+            "Pipeline for these operations: Pipelines -> Business Rules. "
+            "Objective: Run PIPE01, then Revenue Forecast."
+        ),
+    )
+    assert pipeline["input_request"].operation_code == "pipelines"
+    rule = service.resolve_input(
+        conversation_id=conversation.conversation_id,
+        user=user,
+        request_id=pipeline["input_request"].request_id,
+        values={
+            "runtime_variables": {"YEAR": "FY27"},
+            "file_choices": {
+                "DataLoad_File": {
+                    "source": "upload",
+                    "upload_token": "forecast-upload-token",
+                    "filename": "Forecast.csv",
+                }
+            },
+        },
+    )
+    assert rule["input_request"].operation_code == "business-rules"
+    review = service.resolve_input(
+        conversation_id=conversation.conversation_id,
+        user=user,
+        request_id=rule["input_request"].request_id,
+        values={
+            "runtime_prompt_mode": "Use Calculation Manager defaults",
+            "runtime_prompts": {},
+        },
+    )
+
+    approval = review["approval_request"]
+    assert [
+        (step["operation_code"], step["artifact_name"])
+        for step in approval.input_values["steps"]
+    ] == [
+        ("pipelines", "PIPE01"),
+        ("business-rules", "Revenue Forecast"),
+    ]
+    upload_path = tmp_path / "Forecast.csv"
+    upload_path.write_text("Account,Jan\nRevenue,100\n", encoding="utf-8")
+    completed = service.resolve_approval(
+        conversation_id=conversation.conversation_id,
+        user=user,
+        request_id=approval.request_id,
+        decision="approve",
+        operation_uploads={"step_1:DataLoad_File": upload_path},
+    )
+
+    assert completed["execution"]["operation_code"] == "standalone-flow"
+    flow_input, _actor = manager.submissions[0]
+    assert flow_input.steps[0].operation_input.pipeline_code == "PIPE01"
+    assert flow_input.steps[0].operation_input.uploads == {
+        "DataLoad_File": upload_path
+    }
+    assert flow_input.steps[1].operation_input.rule_name == "Revenue Forecast"
 
 
 def test_pipeline_request_runs_full_governed_flow_without_model_tool_choice(

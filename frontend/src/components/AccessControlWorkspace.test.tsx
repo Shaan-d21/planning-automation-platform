@@ -25,6 +25,7 @@ const data: AccessControlResponse = {
     provider_registered: true,
     identity_provider_mode: "oracle_cloud",
     sso_enabled: true,
+    oracle_password_login_enabled: true,
     synced_identities: 6,
     active_identities: 6,
     mapped_entitlements: 1,
@@ -61,7 +62,7 @@ const provisioning: IdentityProvisioningPreview = {
     target_role: "POWER_USER",
     action: "CREATE",
     matched_entitlements: ["Service Administrator"],
-    explanation: "Create a passwordless shadow account."
+    explanation: "Create a linked Oracle profile."
   }]
 };
 
@@ -92,15 +93,15 @@ describe("AccessControlWorkspace identity guidance", () => {
   it("makes the entitlement-wide mapping impact explicit", () => {
     renderWorkspace();
 
-    expect(screen.getByText("Oracle first, platform accounts second")).toBeTruthy();
+    expect(screen.getByText("Oracle first, local recovery second")).toBeTruthy();
     expect(screen.getByText(/All 6 will derive/)).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Preview all mapped accounts" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Preview linked profiles" })).toBeTruthy();
   });
 
   it("labels provisioning as a combined preview and shows its source entitlement", () => {
     renderWorkspace(provisioning);
 
-    expect(screen.getByRole("heading", { name: "Review all mapped account changes" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Review all mapped profile changes" })).toBeTruthy();
     expect(screen.getByText(/combined preview across every saved/)).toBeTruthy();
     expect(screen.getByText("Matched: Service Administrator")).toBeTruthy();
   });

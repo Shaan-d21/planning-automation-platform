@@ -1,4 +1,4 @@
-"""Governed provisioning of passwordless platform shadow accounts."""
+"""Governed provisioning of passwordless Oracle-linked platform profiles."""
 
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ _ROLE_PRIORITY = {
 
 
 class FederatedProvisioningService:
-    """Derive and apply shadow accounts from synchronized entitlements."""
+    """Derive and apply linked profiles from synchronized entitlements."""
 
     def __init__(self, database_target: DatabaseTarget) -> None:
         self._database = database_for(database_target)
@@ -54,6 +54,160 @@ class FederatedProvisioningService:
         with self._database.connect() as connection:
             provider_id, normalized_code = self._provider(connection, provider_code)
             return self._build_preview(connection, provider_id, normalized_code)
+
+    def provision_identity(
+        self,
+        provider_code: str,
+        subject: str,
+        *,
+        actor_user_id: int | None = None,
+    ) -> int:
+        """Create or refresh one mapped linked profile during Oracle login."""
+        normalized_subject = str(subject).strip()
+        if not normalized_subject or len(normalized_subject) > 255:
+            raise IdentitySynchronizationError(
+                "A valid synchronized Oracle identity is required."
+            )
+        with self._database.begin() as connection:
+            provider_id, normalized_code = self._provider(
+                connection,
+                provider_code,
+            )
+            if connection.dialect.name == "postgresql":
+                connection.execute(
+                    select(func.pg_advisory_xact_lock(9_100_000 + provider_id))
+                )
+            identity_row = connection.execute(
+                select(
+                    external_identities.c.external_identity_id,
+                    external_identities.c.user_id,
+                ).where(
+                    external_identities.c.provider_id == provider_id,
+                    external_identities.c.subject == normalized_subject,
+                )
+            ).mappings().one_or_none()
+            if identity_row is None:
+                raise IdentitySynchronizationError(
+                    "The authenticated Oracle identity was not synchronized."
+                )
+            identity_id = int(identity_row["external_identity_id"])
+            preview = self._build_preview(
+                connection,
+                provider_id,
+                normalized_code,
+                lock=True,
+            )
+            entry = next(
+                (
+                    item
+                    for item in preview.entries
+                    if item.external_identity_id == identity_id
+                ),
+                None,
+            )
+            if entry is None:
+                raise IdentitySynchronizationError(
+                    "The authenticated Oracle identity could not be evaluated."
+                )
+            if entry.action == IdentityProvisioningAction.SKIP_UNMAPPED:
+                raise IdentitySynchronizationError(
+                    "Your Oracle account is valid, but none of its current "
+                    "roles or groups is mapped to platform access."
+                )
+            if entry.action == IdentityProvisioningAction.CONFLICT:
+                raise IdentitySynchronizationError(entry.explanation)
+            if entry.action == IdentityProvisioningAction.DEACTIVATE:
+                raise IdentitySynchronizationError(
+                    "Your linked platform profile is no longer eligible for access."
+                )
+            if entry.target_role is None:
+                raise IdentitySynchronizationError(
+                    "The Oracle identity does not resolve to an approved platform role."
+                )
+            role_id = connection.execute(
+                select(platform_roles.c.role_id).where(
+                    platform_roles.c.code == entry.target_role
+                )
+            ).scalar_one_or_none()
+            if role_id is None:
+                raise IdentitySynchronizationError(
+                    "The mapped platform role is unavailable."
+                )
+            now = datetime.now(UTC)
+            if entry.action == IdentityProvisioningAction.CREATE:
+                user_id = int(
+                    connection.execute(
+                        insert(platform_users)
+                        .values(
+                            username=entry.username,
+                            display_name=entry.display_name,
+                            email=entry.email,
+                            password_hash=None,
+                            is_active=True,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                        .returning(platform_users.c.user_id)
+                    ).scalar_one()
+                )
+                connection.execute(
+                    update(external_identities)
+                    .where(
+                        external_identities.c.external_identity_id
+                        == entry.external_identity_id
+                    )
+                    .values(user_id=user_id, updated_at=now)
+                )
+                event_type = "LINKED_ORACLE_PROFILE_CREATED"
+            else:
+                if entry.user_id is None:
+                    raise IdentitySynchronizationError(
+                        "The linked Oracle profile has no platform user."
+                    )
+                user_id = entry.user_id
+                reused_profile = identity_row["user_id"] is None
+                connection.execute(
+                    update(external_identities)
+                    .where(
+                        external_identities.c.external_identity_id
+                        == entry.external_identity_id
+                    )
+                    .values(user_id=user_id, updated_at=now)
+                )
+                if entry.action == IdentityProvisioningAction.UPDATE:
+                    connection.execute(
+                        update(platform_users)
+                        .where(platform_users.c.user_id == user_id)
+                        .values(
+                            display_name=entry.display_name,
+                            email=entry.email,
+                            is_active=True,
+                            updated_at=now,
+                        )
+                    )
+                    event_type = (
+                        "LINKED_ORACLE_PROFILE_REUSED"
+                        if reused_profile
+                        else "LINKED_ORACLE_PROFILE_UPDATED"
+                    )
+                else:
+                    event_type = "LINKED_ORACLE_PROFILE_CONFIRMED"
+            self._replace_role(
+                connection,
+                user_id,
+                int(role_id),
+                actor_user_id,
+                now,
+            )
+            self._audit(
+                connection,
+                event_type,
+                entry,
+                user_id,
+                actor_user_id,
+                now,
+            )
+            return user_id
 
     def apply(
         self,
@@ -174,6 +328,17 @@ class FederatedProvisioningService:
                     raise IdentitySynchronizationError(
                         "Provisioning plan contains an update without a role."
                     )
+                linked_existing_profile = bool(
+                    connection.execute(
+                        update(external_identities)
+                        .where(
+                            external_identities.c.external_identity_id
+                            == entry.external_identity_id,
+                            external_identities.c.user_id.is_(None),
+                        )
+                        .values(user_id=entry.user_id, updated_at=now)
+                    ).rowcount
+                )
                 connection.execute(
                     update(platform_users)
                     .where(platform_users.c.user_id == entry.user_id)
@@ -193,7 +358,11 @@ class FederatedProvisioningService:
                 )
                 self._audit(
                     connection,
-                    "FEDERATED_USER_UPDATED",
+                    (
+                        "FEDERATED_USER_REUSED"
+                        if linked_existing_profile
+                        else "FEDERATED_USER_UPDATED"
+                    ),
                     entry,
                     entry.user_id,
                     actor_user_id,
@@ -274,6 +443,34 @@ class FederatedProvisioningService:
             for row in platform_rows.values()
             if row["email"]
         }
+        current_provider = connection.execute(
+            select(identity_providers).where(
+                identity_providers.c.provider_id == provider_id
+            )
+        ).mappings().one()
+        managed_links = connection.execute(
+            select(
+                external_identities.c.user_id,
+                external_identities.c.subject,
+                external_identities.c.username,
+                external_identities.c.provider_id,
+                identity_providers.c.provider_type,
+                identity_providers.c.issuer_url,
+                identity_providers.c.safe_configuration,
+            )
+            .select_from(external_identities)
+            .join(
+                identity_providers,
+                identity_providers.c.provider_id
+                == external_identities.c.provider_id,
+            )
+            .where(external_identities.c.user_id.is_not(None))
+        ).mappings().all()
+        current_provider_linked_users = {
+            int(identity["user_id"])
+            for identity in identities
+            if identity["user_id"] is not None
+        }
         role_by_user: dict[int, tuple[str, ...]] = {}
         for user_id, role_code in connection.execute(
             select(platform_user_roles.c.user_id, platform_roles.c.code).join(
@@ -308,24 +505,39 @@ class FederatedProvisioningService:
             )
             matched = mappings.get(external_identity_id, [])
             target_role = self._highest_role(role for _, role in matched)
+            reused_managed_profile = False
+            resolved_user_id = linked_user_id
+            if resolved_user_id is None and target_role is not None:
+                resolved_user_id = self._reusable_managed_profile(
+                    identity,
+                    current_provider,
+                    username_owners,
+                    email_owners,
+                    platform_rows,
+                    managed_links,
+                    current_provider_linked_users,
+                )
+                reused_managed_profile = resolved_user_id is not None
             platform_row = (
-                platform_rows.get(linked_user_id)
-                if linked_user_id is not None
+                platform_rows.get(resolved_user_id)
+                if resolved_user_id is not None
                 else None
             )
             action, explanation = self._action(
                 identity,
                 platform_row,
-                role_by_user.get(linked_user_id or -1, ()),
+                role_by_user.get(resolved_user_id or -1, ()),
                 target_role,
                 username_owners,
                 email_owners,
                 external_username_counts,
                 external_email_counts,
+                resolved_user_id=resolved_user_id,
+                reused_managed_profile=reused_managed_profile,
             )
             entry = IdentityProvisioningEntry(
                 external_identity_id=external_identity_id,
-                user_id=linked_user_id,
+                user_id=resolved_user_id,
                 username=str(identity["username"]),
                 display_name=str(identity["display_name"]),
                 email=(str(identity["email"]) if identity["email"] else None),
@@ -348,11 +560,12 @@ class FederatedProvisioningService:
                             "email": platform_row["email"],
                             "active": bool(platform_row["is_active"]),
                             "has_local_password": bool(platform_row["password_hash"]),
-                            "roles": sorted(role_by_user.get(linked_user_id or -1, ())),
+                            "roles": sorted(role_by_user.get(resolved_user_id or -1, ())),
                         }
                         if platform_row is not None
                         else None
                     ),
+                    "reused_managed_profile": reused_managed_profile,
                 }
             )
         entries.sort(
@@ -401,12 +614,13 @@ class FederatedProvisioningService:
         email_owners: dict[str, int],
         external_username_counts: dict[str, int],
         external_email_counts: dict[str, int],
+        *,
+        resolved_user_id: int | None,
+        reused_managed_profile: bool,
     ) -> tuple[IdentityProvisioningAction, str]:
         username = str(identity["username"])
         email = str(identity["email"]) if identity["email"] else None
-        linked_user_id = (
-            int(identity["user_id"]) if identity["user_id"] is not None else None
-        )
+        linked_user_id = resolved_user_id
         display_name = str(identity["display_name"])
         if not display_name.strip() or len(display_name) > 120:
             return (
@@ -446,7 +660,7 @@ class FederatedProvisioningService:
         ):
             return (
                 IdentityProvisioningAction.CONFLICT,
-                "The linked shadow account username changed or its email is owned "
+                "The linked profile username changed or its email is owned "
                 "by another platform account.",
             )
         if not bool(identity["is_active"]) or target_role is None:
@@ -463,7 +677,7 @@ class FederatedProvisioningService:
                 )
             return (
                 IdentityProvisioningAction.UNCHANGED,
-                "The passwordless shadow account is already inactive.",
+                "The passwordless linked profile is already inactive.",
             )
         if platform_row is None:
             if not _USERNAME_PATTERN.fullmatch(username):
@@ -481,7 +695,13 @@ class FederatedProvisioningService:
                 )
             return (
                 IdentityProvisioningAction.CREATE,
-                "Create a passwordless shadow account linked to this Oracle identity.",
+                "Create a passwordless profile linked to this Oracle identity.",
+            )
+        if reused_managed_profile:
+            return (
+                IdentityProvisioningAction.UPDATE,
+                "Link this application's Oracle access to the existing "
+                "passwordless profile for the same Oracle user and environment.",
             )
         changed = (
             str(platform_row["display_name"]) != str(identity["display_name"])
@@ -499,9 +719,68 @@ class FederatedProvisioningService:
             (
                 "Update profile, activation state, or the derived platform role."
                 if changed
-                else "The shadow account already matches the approved mappings."
+                else "The linked profile already matches the approved mappings."
             ),
         )
+
+    @classmethod
+    def _reusable_managed_profile(
+        cls,
+        identity,
+        current_provider,
+        username_owners: dict[str, int],
+        email_owners: dict[str, int],
+        platform_rows: dict[int, object],
+        managed_links,
+        current_provider_linked_users: set[int],
+    ) -> int | None:
+        """Return a proven Oracle-managed owner across application changes.
+
+        Username or email equality alone is intentionally insufficient. Reuse is
+        allowed only for a passwordless profile already linked to the same
+        normalized Oracle subject on the same Oracle environment authority.
+        """
+        username = str(identity["username"])
+        email = str(identity["email"]) if identity["email"] else None
+        username_owner = username_owners.get(username.casefold())
+        email_owner = email_owners.get(email.casefold()) if email else None
+        if username_owner is None or email_owner not in {None, username_owner}:
+            return None
+        if username_owner in current_provider_linked_users:
+            return None
+        owner = platform_rows.get(username_owner)
+        if owner is None or owner["password_hash"] is not None:
+            return None
+        current_authority = cls._provider_authority(current_provider)
+        if current_authority is None:
+            return None
+        subject = str(identity["subject"]).casefold()
+        for link in managed_links:
+            if int(link["user_id"]) != username_owner:
+                continue
+            if int(link["provider_id"]) == int(current_provider["provider_id"]):
+                continue
+            if str(link["subject"]).casefold() != subject:
+                continue
+            if str(link["username"]).casefold() != username.casefold():
+                continue
+            if cls._provider_authority(link) == current_authority:
+                return username_owner
+        return None
+
+    @staticmethod
+    def _provider_authority(provider) -> tuple[str, str] | None:
+        """Return the non-secret authority boundary used for safe relinking."""
+        if str(provider["provider_type"]).upper() != "ORACLE_CLOUD":
+            return None
+        configuration = provider["safe_configuration"] or {}
+        if not isinstance(configuration, dict):
+            return None
+        base_url = str(configuration.get("base_url") or "").strip().rstrip("/")
+        if not base_url:
+            return None
+        issuer = str(provider["issuer_url"] or "").strip().rstrip("/")
+        return base_url.casefold(), issuer.casefold()
 
     @staticmethod
     def _highest_role(roles) -> str | None:
@@ -517,7 +796,7 @@ class FederatedProvisioningService:
         connection,
         user_id: int,
         role_id: int,
-        actor_user_id: int,
+        actor_user_id: int | None,
         now: datetime,
     ) -> None:
         connection.execute(
@@ -540,7 +819,7 @@ class FederatedProvisioningService:
         event_type: str,
         entry: IdentityProvisioningEntry,
         user_id: int,
-        actor_user_id: int,
+        actor_user_id: int | None,
         now: datetime,
     ) -> None:
         connection.execute(

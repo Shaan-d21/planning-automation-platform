@@ -49,6 +49,7 @@ class SQLWorkflowRepository:
             "initiated_by_username": run.initiated_by,
             "initiated_by_display": run.initiated_by_display,
             "trigger_source": run.trigger_source.value,
+            "oracle_execution_username": run.oracle_execution_username,
         }
         with self._database.begin() as connection:
             connection.execute(
@@ -109,6 +110,7 @@ class SQLWorkflowRepository:
             initiated_by=row["initiated_by_username"],
             initiated_by_display=row["initiated_by_display"],
             trigger_source=TriggerSource(str(row["trigger_source"])),
+            oracle_execution_username=row["oracle_execution_username"],
             steps=tuple(
                 WorkflowStepResult(
                     name=str(step["name"]),

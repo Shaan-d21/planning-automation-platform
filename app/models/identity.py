@@ -75,6 +75,7 @@ class IdentityDirectorySnapshot:
     identities: tuple[ExternalIdentitySnapshot, ...]
     retrieved_at: datetime
     complete: bool = True
+    available_entitlements: tuple[ExternalEntitlementSnapshot, ...] = ()
     details: dict[str, object] = field(default_factory=dict)
 
 
@@ -182,7 +183,7 @@ class IdentityProvisioningAction(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class IdentityProvisioningEntry:
-    """One proposed shadow-account outcome derived from approved mappings."""
+    """One proposed linked-profile outcome derived from approved mappings."""
 
     external_identity_id: int
     user_id: int | None
@@ -197,7 +198,7 @@ class IdentityProvisioningEntry:
 
 @dataclass(frozen=True, slots=True)
 class IdentityProvisioningPreview:
-    """Checksum-protected shadow-account provisioning plan."""
+    """Checksum-protected linked-profile provisioning plan."""
 
     provider_code: str
     checksum: str

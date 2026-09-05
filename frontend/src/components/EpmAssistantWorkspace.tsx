@@ -13,12 +13,17 @@ import type {
   AgentMessage,
   AgentStatusResponse,
   AgentToolActivity,
+  AutomationInputPolicy,
+  AutomationMisfirePolicy,
+  AutomationSchedule,
+  ScheduleFrequency,
   DataComparisonMismatch,
   DataReviewGrid,
   DataReviewSliceInput,
   PipelineFilePreview,
   PipelineStagePreview,
   PipelineVariablePreview,
+  RuntimePromptDefinition,
   OracleRecordStatistics,
   StandaloneFlowProgress,
   StandaloneFlowRecoveryPlan
@@ -34,7 +39,7 @@ const suggestedPrompts = [
   ["Activity", "Summarize the five most recent process executions."],
   ["Environment", "Which cubes are available in the connected Planning application?"],
   ["Prepare", "Prepare a governed draft to run a business rule. Ask me for any missing details."],
-  ["Quality", "How should I validate Planning data before publishing it?"],
+  ["Schedule", "Schedule an Oracle Pipeline. Help me choose the Pipeline and recurrence."],
   ["Guidance", "Help me choose the safest operation for my Planning task."]
 ] as const;
 const AGENT_DATA_REVIEW_HANDOFF_KEY = "bisp-epm-agent-data-review-handoff";
@@ -49,6 +54,7 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
   const [clarification, setClarification] = useState<AgentClarificationRequest | null>(null);
   const [inputRequest, setInputRequest] = useState<AgentInputRequest | null>(null);
   const [approvedExecution, setApprovedExecution] = useState<AgentApprovedExecution | null>(null);
+  const [approvedSchedule, setApprovedSchedule] = useState<AutomationSchedule | null>(null);
   const [toolActivity, setToolActivity] = useState<AgentToolActivity[]>([]);
   const [reviewActivity, setReviewActivity] = useState<Record<number, AgentToolActivity[]>>({});
   const [reviewContext, setReviewContext] = useState<AgentDataReviewContext | null>(null);
@@ -64,7 +70,9 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const messageEnd = useRef<HTMLDivElement>(null);
+  const messageViewport = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
+  const keepConversationAtBottom = useRef(true);
 
   useEffect(() => {
     let active = true;
@@ -81,10 +89,23 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
   }, []);
 
   useEffect(() => {
-    if (typeof messageEnd.current?.scrollIntoView === "function") {
-      messageEnd.current.scrollIntoView({ behavior: "smooth", block: "end" });
-    }
-  }, [drafts, messages, sending]);
+    const viewport = messageViewport.current;
+    if (!viewport || !keepConversationAtBottom.current) return;
+    window.requestAnimationFrame(() => {
+      if (typeof viewport.scrollTo === "function") {
+        viewport.scrollTo({ top: viewport.scrollHeight, behavior: loadingMessages ? "auto" : "smooth" });
+      } else {
+        viewport.scrollTop = viewport.scrollHeight;
+      }
+    });
+  }, [approval, clarification, drafts, inputRequest, loadingMessages, messages, reviewContext, sending]);
+
+  useEffect(() => {
+    const textarea = composer.current;
+    if (!textarea) return;
+    textarea.style.height = "auto";
+    textarea.style.height = `${Math.min(textarea.scrollHeight, 160)}px`;
+  }, [content]);
 
   async function refreshConversations() {
     const response = await api.agentConversations();
@@ -92,6 +113,7 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
   }
 
   async function openConversation(conversationId: string) {
+    keepConversationAtBottom.current = true;
     setActiveId(conversationId);
     setLoadingMessages(true);
     setError(null);
@@ -107,6 +129,7 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
       setInputRequest(response.input_request);
       setReviewContext(response.data_review_context ?? null);
       setApprovedExecution(null);
+      setApprovedSchedule(null);
     } catch (reason) {
       setError(errorMessage(reason));
     } finally {
@@ -127,6 +150,7 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
       setClarification(null);
       setInputRequest(null);
       setApprovedExecution(null);
+      setApprovedSchedule(null);
       setToolActivity([]);
       setReviewActivity({});
       setReviewContext(null);
@@ -156,6 +180,7 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
         setClarification(null);
         setInputRequest(null);
         setApprovedExecution(null);
+        setApprovedSchedule(null);
         setToolActivity([]);
         setReviewActivity({});
         setReviewContext(null);
@@ -172,7 +197,9 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
     event?.preventDefault();
     const prompt = preparedPrompt?.trim() || content.trim();
     if (!prompt || sending || approval || clarification || inputRequest || !status?.enabled) return;
+    keepConversationAtBottom.current = true;
     setApprovedExecution(null);
+    setApprovedSchedule(null);
     setSending(true);
     setError(null);
     setToolActivity([]);
@@ -220,6 +247,7 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
   async function resolveApproval(decision: "approve" | "reject") {
     if (!activeId || !approval || deciding) return;
     setApprovedExecution(null);
+    setApprovedSchedule(null);
     setDeciding(decision);
     setError(null);
     try {
@@ -237,6 +265,7 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
       setClarification(response.clarification_request);
       setInputRequest(response.input_request);
       setApprovedExecution(response.execution ?? null);
+      setApprovedSchedule(response.schedule ?? null);
       await refreshConversations();
     } catch (reason) {
       setError(errorMessage(reason));
@@ -382,6 +411,12 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
     window.requestAnimationFrame(() => composer.current?.focus());
   }
 
+  function trackConversationScroll() {
+    const viewport = messageViewport.current;
+    if (!viewport) return;
+    keepConversationAtBottom.current = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 96;
+  }
+
   function rememberReviewActivity(
     message: AgentMessage,
     activities: AgentToolActivity[]
@@ -430,13 +465,14 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
       <section className="panel assistant-chat">
         <header className="assistant-chat__header"><div><span className="eyebrow">Governed copilot</span><h2>{activeConversation?.title || "Start a conversation"}</h2><p>{activeConversation ? `${activeConversation.provider} · ${activeConversation.model}` : status?.message}</p></div>{activeId && <button type="button" className="icon-button" aria-label="Delete conversation" onClick={() => setConfirmDelete(true)}><Icon name="close" /></button>}</header>
 
-        <div className={`assistant-messages${loadingMessages ? " is-loading" : ""}`} aria-live="polite">
+        <div ref={messageViewport} className={`assistant-messages${loadingMessages ? " is-loading" : ""}`} aria-live="polite" onScroll={trackConversationScroll}>
           {loadingMessages ? <AssistantMessageSkeleton /> : messages.length ? messages.map((message) => <Fragment key={message.message_id}><MessageBubble message={message} />{(reviewActivity[message.message_id] ?? []).map((activity, index) => <AgentDataReviewCard activity={activity} csrfToken={csrfToken} onPrompt={preparePrompt} onPrepare={(prompt) => void sendMessage(undefined, prompt)} busy={sending} key={`${activity.name}-${index}`} />)}{drafts.filter((draft) => draft.message_id === message.message_id).map((draft) => <ActionDraftCard draft={draft} csrfToken={csrfToken} onUpdate={updateDraft} key={draft.draft_id} />)}</Fragment>) : <AssistantEmpty onPrompt={preparePrompt} />}
           {reviewContext && !Object.values(reviewActivity).some((items) => items.length) && <AgentReviewResumeCard context={reviewContext} onPrompt={preparePrompt} />}
           {clarification && <ClarificationCard clarification={clarification} busy={selecting} onSubmit={resolveClarification} onSynchronize={synchronizeClarificationArtifacts} onRegister={registerClarificationArtifact} />}
           {inputRequest && <GuidedInputCard request={inputRequest} busy={savingInputs} csrfToken={csrfToken} onSubmit={resolveInput} />}
           {approval && <ApprovalCard approval={approval} deciding={deciding} onDecision={resolveApproval} />}
           {approvedExecution && <AgentExecutionCard approved={approvedExecution} csrfToken={csrfToken} onRecoveryStarted={setApprovedExecution} onDismiss={() => setApprovedExecution(null)} />}
+          {approvedSchedule && <AgentScheduleResultCard schedule={approvedSchedule} onDismiss={() => setApprovedSchedule(null)} />}
           {sending && <article className="assistant-message assistant-message--assistant is-thinking"><span className="assistant-avatar"><Icon name="assistant" /></span><div><span className="eyebrow">EPM Assistant</span><p><span className="spinner" /> Inspecting the permitted platform context…</p></div></article>}
           <div ref={messageEnd} />
         </div>
@@ -444,8 +480,9 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
         {toolActivity.length > 0 && <div className="assistant-evidence"><Icon name="check" /><div><strong>Verified with platform tools</strong><p>{[...new Set(toolActivity.map((item) => friendlyName(item.name)))].join(" · ")}</p></div></div>}
 
         <form className="assistant-composer" onSubmit={(event) => void sendMessage(event)}>
-          <label><span className="sr-only">Message the EPM Assistant</span><textarea ref={composer} rows={2} maxLength={4000} value={content} disabled={!status?.enabled || sending || Boolean(approval) || Boolean(clarification) || Boolean(inputRequest)} onChange={(event) => setContent(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void sendMessage(); } }} placeholder={inputRequest ? "Complete the guided inputs above to continue." : clarification ? "Choose an Oracle artifact above to continue." : approval ? "Approve or reject the proposal above to continue." : "Ask about Planning, recent activity, or prepare a governed action…"} /></label>
+          <label><span className="sr-only">Message the EPM Assistant</span><textarea ref={composer} rows={1} maxLength={4000} value={content} disabled={!status?.enabled || sending || Boolean(approval) || Boolean(clarification) || Boolean(inputRequest)} onChange={(event) => setContent(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void sendMessage(); } }} placeholder={inputRequest ? "Complete the guided inputs above to continue." : clarification ? "Choose an Oracle artifact above to continue." : approval ? "Approve or reject the proposal above to continue." : "Ask about Planning, recent activity, or prepare a governed action…"} /></label>
           <button type="submit" className="button button--primary" disabled={!content.trim() || sending || Boolean(approval) || Boolean(clarification) || Boolean(inputRequest) || !status?.enabled}>{sending ? <><span className="spinner" /> Thinking…</> : <>Send <Icon name="arrow" /></>}</button>
+          <div className="assistant-composer__meta"><span><kbd>Enter</kbd> to send · <kbd>Shift</kbd> + <kbd>Enter</kbd> for a new line</span><span>{content.length.toLocaleString()} / 4,000</span></div>
         </form>
         <p className="assistant-disclaimer">AI responses can be inaccurate. Verify the exact Oracle artifact and run inputs before approving any operation.</p>
       </section>
@@ -842,6 +879,7 @@ function GuidedInputCard({ request, busy, csrfToken, onSubmit }: {
   const flowStep = request.context?.flow_step as { sequence?: number; total?: number } | undefined;
   let card: ReactNode;
   if (request.operation_code === "substitution-variables") card = <SubstitutionVariableGuidedInputCard request={request} busy={busy} onSubmit={onSubmit} />;
+  else if (request.operation_code === "pipeline-schedule-create") card = <PipelineScheduleGuidedInputCard request={request} busy={busy} onSubmit={onSubmit} />;
   else if (request.operation_code === "user-variables") card = <UserVariableGuidedInputCard request={request} busy={busy} onSubmit={onSubmit} />;
   else if (request.operation_code === "data-maps") card = <DataMapGuidedInputCard request={request} busy={busy} onSubmit={onSubmit} />;
   else if (request.operation_code === "pipelines") card = <PipelineGuidedInputCard request={request} busy={busy} csrfToken={csrfToken} onSubmit={onSubmit} />;
@@ -1054,8 +1092,8 @@ function MetadataImportGuidedInputCard({ request, busy, csrfToken, onSubmit }: {
       {fileSource === "upload" && <label className={`integration-upload${file ? " has-file" : ""}`}><input type="file" aria-label="Metadata Import local file" disabled={disabled} accept={extensions.join(",")} onChange={(event) => setFile(event.target.files?.[0] ?? null)} /><Icon name={file ? "check" : "data"} /><span><strong>{file?.name || "Choose a metadata file"}</strong><small>{file ? `${Math.max(1, Math.round(file.size / 1024))} KB` : extensions.join(", ")}</small></span><em>{file ? "Change" : "Browse"}</em></label>}
     </section>
     <section className="assistant-pipeline-input__section"><header><div><strong>After the import</strong><p>Optionally synchronize successful metadata changes with the Planning cube.</p></div></header>
-      <label className="runner-approval metadata-refresh-choice"><input type="checkbox" aria-label="Refresh cube after Metadata Import" checked={refreshAfterImport} disabled={disabled || !refreshJobs.length} onChange={(event) => { setRefreshAfterImport(event.target.checked); if (!event.target.checked) setRefreshJobName(""); }} /><span><strong>Refresh the cube after a successful import</strong><small>{refreshJobs.length ? "The refresh is skipped automatically if the import fails." : "No saved Cube Refresh job is currently visible in Oracle."}</small></span></label>
-      {refreshAfterImport && <label className="runner-field"><span>Saved Cube Refresh job *</span><select aria-label="Metadata Import Cube Refresh job" value={refreshJobName} disabled={disabled} onChange={(event) => setRefreshJobName(event.target.value)}><option value="">Select a saved Cube Refresh job</option>{refreshJobs.map((job) => <option value={job} key={job}>{job}</option>)}</select><small>{refreshJobs.length} current Oracle job{refreshJobs.length === 1 ? "" : "s"} available.</small></label>}
+      <label className="runner-approval metadata-refresh-choice"><input type="checkbox" aria-label="Refresh cube after Metadata Import" checked={refreshAfterImport} disabled={disabled} onChange={(event) => { setRefreshAfterImport(event.target.checked); if (!event.target.checked) setRefreshJobName(""); }} /><span><strong>Refresh the cube after a successful import</strong><small>{refreshJobs.length ? "The refresh is skipped automatically if the import fails." : "Oracle did not expose saved Cube Refresh jobs through REST. You can still use the exact saved job name."}</small></span></label>
+      {refreshAfterImport && <label className="runner-field"><span>Saved Cube Refresh job *</span>{refreshJobs.length ? <select aria-label="Metadata Import Cube Refresh job" value={refreshJobName} disabled={disabled} onChange={(event) => setRefreshJobName(event.target.value)}><option value="">Select a saved Cube Refresh job</option>{refreshJobs.map((job) => <option value={job} key={job}>{job}</option>)}</select> : <input aria-label="Metadata Import Cube Refresh job" value={refreshJobName} disabled={disabled} maxLength={128} onChange={(event) => setRefreshJobName(event.target.value)} placeholder="Enter the exact saved job name" />}<small>{refreshJobs.length ? `${refreshJobs.length} current Oracle job${refreshJobs.length === 1 ? "" : "s"} available.` : "Use the exact case, spaces, and underscores shown under Jobs > Refresh Database."}</small></label>}
     </section>
     <section className="assistant-pipeline-input__section"><header><div><strong>Error output</strong><p>Optional. Oracle writes rejected metadata records to this Inbox filename when supported.</p></div></header><label className="runner-field"><span>Error output filename</span><input aria-label="Metadata Import error output filename" value={errorFileName} disabled={disabled} maxLength={250} onChange={(event) => setErrorFileName(event.target.value)} placeholder="Leave blank to use the Oracle default" /><small>Example: Metadata_Errors.csv</small></label></section>
     {error && <div className="assistant-draft__error"><Icon name="alert" />{error}</div>}
@@ -1153,6 +1191,93 @@ interface AgentPipelineContext {
   variables: PipelineVariablePreview[];
   file_requirements: PipelineFilePreview[];
   stages: PipelineStagePreview[];
+  prefill?: { frequency?: ScheduleFrequency };
+}
+
+const AGENT_SCHEDULE_TIMEZONES = [
+  "UTC", "Asia/Kolkata", "Asia/Dubai", "Asia/Singapore", "Europe/London",
+  "Europe/Paris", "America/New_York", "America/Chicago",
+  "America/Los_Angeles", "Australia/Sydney"
+];
+
+function PipelineScheduleGuidedInputCard({ request, busy, onSubmit }: {
+  request: AgentInputRequest;
+  busy: boolean;
+  onSubmit: (values: Record<string, unknown> | null) => Promise<void>;
+}) {
+  const context = request.context as unknown as AgentPipelineContext;
+  const variables = context.variables ?? [];
+  const requirements = context.file_requirements ?? [];
+  const stages = context.stages ?? [];
+  const detectedTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  const timezones = AGENT_SCHEDULE_TIMEZONES.includes(detectedTimezone)
+    ? AGENT_SCHEDULE_TIMEZONES
+    : [detectedTimezone, ...AGENT_SCHEDULE_TIMEZONES];
+  const [name, setName] = useState("");
+  const [frequency, setFrequency] = useState<ScheduleFrequency>("MONTHLY");
+  const [timezone, setTimezone] = useState(detectedTimezone);
+  const [firstRun, setFirstRun] = useState("");
+  const [inputPolicy, setInputPolicy] = useState<AutomationInputPolicy>("ORACLE_DEFAULTS");
+  const [misfirePolicy, setMisfirePolicy] = useState<AutomationMisfirePolicy>("RUN_ONCE");
+  const [enabled, setEnabled] = useState(true);
+  const [values, setValues] = useState<Record<string, string>>({});
+  const [files, setFiles] = useState<Record<string, string>>({});
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    const suggestedFrequency = context.prefill?.frequency ?? "MONTHLY";
+    setName(`${context.display_name || request.artifact_name} · ${friendlyName(suggestedFrequency)}`);
+    setFrequency(suggestedFrequency);
+    setTimezone(detectedTimezone);
+    const next = new Date(Date.now() + 60 * 60 * 1000);
+    next.setMinutes(Math.ceil(next.getMinutes() / 15) * 15, 0, 0);
+    const local = new Date(next.getTime() - next.getTimezoneOffset() * 60_000)
+      .toISOString().slice(0, 16);
+    setFirstRun(local);
+    setInputPolicy("ORACLE_DEFAULTS");
+    setMisfirePolicy("RUN_ONCE");
+    setEnabled(true);
+    setValues(Object.fromEntries(variables.map((item) => [item.name, item.default_value ?? ""])));
+    setFiles(Object.fromEntries(requirements.map((item) => [item.key, item.configured_reference ?? ""])));
+    setError(null);
+  }, [request.request_id]);
+  const fixed = inputPolicy === "FIXED";
+
+  function submit() {
+    setError(null);
+    if (!name.trim()) { setError("Enter a business-friendly schedule name."); return; }
+    if (!firstRun) { setError("Choose the first run date and time."); return; }
+    if (fixed) {
+      const missingVariable = variables.find((item) => item.required && !(values[item.name] ?? "").trim() && !item.default_value);
+      if (missingVariable) { setError(`Enter ${missingVariable.display_name} for unattended execution.`); return; }
+      const missingFile = requirements.find((item) => item.required && !(files[item.key] ?? "").trim() && !item.configured_reference);
+      if (missingFile) { setError(`Choose an existing Oracle Inbox file for ${missingFile.display_name}.`); return; }
+    }
+    void onSubmit({
+      name: name.trim(), frequency, timezone, first_run_local: firstRun,
+      input_policy: inputPolicy,
+      variables: fixed ? cleanAgentPairs(values) : {},
+      inbox_files: fixed ? cleanAgentPairs(files) : {},
+      misfire_policy: misfirePolicy, enabled
+    });
+  }
+
+  return <article className="assistant-guided-input assistant-pipeline-input assistant-schedule-input" aria-label="Oracle Pipeline schedule inputs">
+    <header><span className="assistant-guided-input__icon"><Icon name="calendar" /></span><div><span className="eyebrow">Governed scheduling</span><h3>{request.title}</h3><p>{request.description}</p></div></header>
+    <div className="assistant-guided-input__artifact"><small>Selected Oracle Pipeline</small><strong>{context.display_name || request.artifact_name} <em className="artifact-code">{request.artifact_name}</em></strong></div>
+    {stages.length > 0 && <section className="assistant-pipeline-input__section"><header><div><strong>Oracle-owned stages</strong><p>This schedule runs the Pipeline as configured in Oracle.</p></div></header><ol className="pipeline-stages">{stages.map((stage, index) => <li key={`${stage.name}-${index}`}><span>{index + 1}</span><div><strong>{stage.display_name}</strong><small>{stage.name}</small></div></li>)}</ol></section>}
+    <section className="assistant-pipeline-input__section"><header><div><strong>Recurrence</strong><p>The first occurrence anchors the local time, weekday, or day of month.</p></div></header><div className="assistant-pipeline-input__variables">
+      <label className="runner-field"><span>Schedule name *</span><input value={name} disabled={busy} maxLength={160} onChange={(event) => setName(event.target.value)} /></label>
+      <label className="runner-field"><span>Frequency *</span><select value={frequency} disabled={busy} onChange={(event) => setFrequency(event.target.value as ScheduleFrequency)}><option value="ONE_TIME">One time</option><option value="DAILY">Daily</option><option value="WEEKLY">Weekly</option><option value="MONTHLY">Monthly</option></select></label>
+      <label className="runner-field"><span>First run *</span><input type="datetime-local" value={firstRun} disabled={busy} onChange={(event) => setFirstRun(event.target.value)} /><small>Local date and time in the selected timezone.</small></label>
+      <label className="runner-field"><span>Timezone *</span><select value={timezone} disabled={busy} onChange={(event) => setTimezone(event.target.value)}>{timezones.map((item) => <option key={item}>{item}</option>)}</select></label>
+    </div></section>
+    <section className="assistant-pipeline-input__section"><header><div><strong>Unattended inputs</strong><p>Schedules cannot pause for a local upload or ask a person for a value.</p></div></header><div className="assistant-pipeline-input__variables"><label className="runner-field"><span>Input strategy *</span><select value={inputPolicy} disabled={busy} onChange={(event) => setInputPolicy(event.target.value as AutomationInputPolicy)}><option value="ORACLE_DEFAULTS">Use Oracle Pipeline defaults</option><option value="FIXED">Use fixed unattended values</option></select><small>Fixed files must already exist in the Oracle Inbox.</small></label><label className="runner-field"><span>If an occurrence was missed *</span><select value={misfirePolicy} disabled={busy} onChange={(event) => setMisfirePolicy(event.target.value as AutomationMisfirePolicy)}><option value="RUN_ONCE">Run once after service recovery</option><option value="SKIP">Skip the missed occurrence</option></select></label></div>
+      {fixed && <><div className="assistant-pipeline-input__variables">{variables.map((variable) => <label className="runner-field" key={variable.name}><span>{variable.display_name}{variable.required ? " *" : ""}</span><input value={values[variable.name] ?? ""} disabled={busy || variable.editable === false} onChange={(event) => setValues((current) => ({ ...current, [variable.name]: event.target.value }))} /><small>Oracle variable: {variable.name}</small></label>)}</div><div className="assistant-pipeline-input__variables">{requirements.map((file) => <label className="runner-field" key={file.key}><span>{file.display_name}{file.required ? " *" : ""}</span><input value={files[file.key] ?? ""} disabled={busy} placeholder="Existing Oracle Inbox file" onChange={(event) => setFiles((current) => ({ ...current, [file.key]: event.target.value }))} /><small>No local computer paths or uploads.</small></label>)}</div></>}
+    </section>
+    <label className="runner-approval"><input type="checkbox" checked={enabled} disabled={busy} onChange={(event) => setEnabled(event.target.checked)} /><span><strong>Enable after approval</strong><small>Clear this to create the recurrence in a paused state.</small></span></label>
+    {error && <div className="assistant-draft__error"><Icon name="alert" />{error}</div>}
+    <footer><button type="button" className="button button--secondary" disabled={busy} onClick={() => void onSubmit(null)}>Cancel proposal</button><button type="button" className="button button--primary" disabled={busy} onClick={submit}>{busy ? <><span className="spinner" /> Validating…</> : <>Validate schedule <Icon name="arrow" /></>}</button></footer>
+  </article>;
 }
 
 function PipelineGuidedInputCard({ request, busy, csrfToken, onSubmit }: {
@@ -1257,15 +1382,33 @@ function BusinessRuleGuidedInputCard({ request, busy, onSubmit }: {
   busy: boolean;
   onSubmit: (values: Record<string, unknown> | null) => Promise<void>;
 }) {
+  const requestContext = request.context || {};
+  const registryContext = requestContext.rtp_definition;
+  const registeredPrompts = (
+    registryContext
+    && typeof registryContext === "object"
+    && Array.isArray((registryContext as { prompts?: unknown }).prompts)
+  ) ? (registryContext as { prompts: RuntimePromptDefinition[] }).prompts : [];
+  const hasRegistry = Boolean(registryContext && typeof registryContext === "object");
+  const prefill = (
+    requestContext.prefill && typeof requestContext.prefill === "object"
+  ) ? requestContext.prefill as Record<string, unknown> : {};
+  const prefilledPrompts = (
+    prefill.runtime_prompts && typeof prefill.runtime_prompts === "object"
+  ) ? prefill.runtime_prompts as Record<string, unknown> : {};
   const [mode, setMode] = useState("");
   const [pairs, setPairs] = useState<GuidedPair[]>([]);
   const [error, setError] = useState<string | null>(null);
   const nextId = useRef(1);
   useEffect(() => {
-    setMode("");
-    setPairs([]);
-    setError(null);
     nextId.current = 1;
+    setMode(String(prefill.runtime_prompt_mode || ""));
+    setPairs(registeredPrompts.map((prompt) => ({
+      id: nextId.current++,
+      name: prompt.name,
+      value: String(prefilledPrompts[prompt.name] || "")
+    })));
+    setError(null);
   }, [request.request_id]);
   const usesOverrides = mode === "Provide runtime prompt values";
 
@@ -1285,7 +1428,7 @@ function BusinessRuleGuidedInputCard({ request, busy, onSubmit }: {
     }
     const runtimePrompts: Record<string, string> = {};
     if (usesOverrides) {
-      if (!pairs.length) {
+      if (!pairs.length && !hasRegistry) {
         setError("Add at least one runtime prompt name and value.");
         return;
       }
@@ -1293,10 +1436,14 @@ function BusinessRuleGuidedInputCard({ request, busy, onSubmit }: {
       for (const pair of pairs) {
         const name = pair.name.trim();
         const value = pair.value.trim();
-        if (!name || !value) {
+        const definition = registeredPrompts.find(
+          (prompt) => prompt.name.toLowerCase() === name.toLowerCase()
+        );
+        if (!name || (!value && (!definition || (definition.required && !definition.has_default)))) {
           setError("Every runtime prompt requires both an exact name and value.");
           return;
         }
+        if (!value) continue;
         if (seen.has(name.toLowerCase())) {
           setError(`Runtime prompt '${name}' was entered more than once.`);
           return;
@@ -1311,8 +1458,9 @@ function BusinessRuleGuidedInputCard({ request, busy, onSubmit }: {
   return <article className="assistant-guided-input" aria-label="Business Rule runtime prompts">
     <header><span className="assistant-guided-input__icon"><Icon name="settings" /></span><div><span className="eyebrow">Guided Business Rule setup</span><h3>{request.title}</h3><p>{request.description}</p></div></header>
     <div className="assistant-guided-input__artifact"><small>Selected Business Rule</small><strong>{request.artifact_name}</strong></div>
-    <label className="assistant-guided-input__mode"><span>Runtime prompt source *</span><select value={mode} disabled={busy} onChange={(event) => { setMode(event.target.value); setError(null); if (event.target.value !== "Provide runtime prompt values") setPairs([]); }}><option value="">Select how to continue</option><option value="Use Calculation Manager defaults">Use Calculation Manager defaults</option><option value="Provide runtime prompt values">Provide runtime prompt values</option></select><small>Defaults require no typing and use the values deployed with the rule.</small></label>
-    {usesOverrides && <section className="assistant-guided-input__prompts"><header><div><strong>Runtime prompt overrides</strong><p>Oracle does not publish RTP definitions through the supported REST API. Enter only exact names configured for this rule.</p></div><button type="button" className="button button--quiet" disabled={busy} onClick={addPair}>+ Add prompt</button></header>{pairs.length ? <div>{pairs.map((pair) => <div className="assistant-guided-input__pair" key={pair.id}><label><span>Exact RTP name</span><input value={pair.name} disabled={busy} onChange={(event) => updatePair(pair.id, "name", event.target.value)} /></label><label><span>Value</span><input value={pair.value} disabled={busy} onChange={(event) => updatePair(pair.id, "value", event.target.value)} /></label><button type="button" aria-label="Remove runtime prompt" disabled={busy} onClick={() => setPairs((current) => current.filter((item) => item.id !== pair.id))}><Icon name="close" /></button></div>)}</div> : <button type="button" className="assistant-guided-input__empty" disabled={busy} onClick={addPair}><Icon name="settings" /><span><strong>Add the first runtime prompt</strong><small>Name and value are validated before the draft is created.</small></span></button>}</section>}
+    {hasRegistry && <FeedbackBanner tone="success" title="Runtime prompts synchronized" message={`${registeredPrompts.length} prompt${registeredPrompts.length === 1 ? "" : "s"} loaded from the platform RTP registry. Names are locked to the Calc Manager definition.`} />}
+    <label className="assistant-guided-input__mode"><span>Runtime prompt source *</span><select value={mode} disabled={busy} onChange={(event) => { setMode(event.target.value); setError(null); }}><option value="">Select how to continue</option><option value="Use Calculation Manager defaults">Use Calculation Manager defaults</option><option value="Provide runtime prompt values">Provide runtime prompt values</option></select><small>Defaults require no typing and use the values deployed with the rule.</small></label>
+    {usesOverrides && <section className="assistant-guided-input__prompts"><header><div><strong>{hasRegistry ? "Registered runtime prompts" : "Runtime prompt overrides"}</strong><p>{hasRegistry ? "Enter required values and only the optional overrides needed for this run." : "No synchronized definition is available. Enter only exact names configured for this rule."}</p></div>{!hasRegistry && <button type="button" className="button button--quiet" disabled={busy} onClick={addPair}>+ Add prompt</button>}</header>{pairs.length ? <div>{pairs.map((pair) => { const definition = registeredPrompts.find((prompt) => prompt.name.toLowerCase() === pair.name.toLowerCase()); return <div className="assistant-guided-input__pair" key={pair.id}><label><span>{definition?.label || "Exact RTP name"}{definition?.required && !definition.has_default ? " *" : ""}</span><input value={pair.name} readOnly={hasRegistry} disabled={busy} onChange={(event) => updatePair(pair.id, "name", event.target.value)} />{definition && <small>{definition.dimension ? `${definition.value_type} / ${definition.dimension}` : definition.value_type}</small>}</label><label><span>Value</span><input value={pair.value} disabled={busy} placeholder={definition?.has_default ? `Oracle default: ${definition.default_value}` : "Enter a value"} onChange={(event) => updatePair(pair.id, "value", event.target.value)} /></label>{!hasRegistry && <button type="button" aria-label="Remove runtime prompt" disabled={busy} onClick={() => setPairs((current) => current.filter((item) => item.id !== pair.id))}><Icon name="close" /></button>}</div>; })}</div> : hasRegistry ? <div className="assistant-guided-input__empty"><Icon name="check" /><span><strong>This rule has no registered RTPs</strong><small>Continue using Calculation Manager defaults.</small></span></div> : <button type="button" className="assistant-guided-input__empty" disabled={busy} onClick={addPair}><Icon name="settings" /><span><strong>Add the first runtime prompt</strong><small>Name and value are validated before the draft is created.</small></span></button>}</section>}
     {error && <div className="assistant-draft__error"><Icon name="alert" />{error}</div>}
     <footer><button type="button" className="button button--secondary" disabled={busy} onClick={() => void onSubmit(null)}>Cancel proposal</button><button type="button" className="button button--primary" disabled={busy || !mode} onClick={submit}>{busy ? <><span className="spinner" /> Validating…</> : <>Continue to approval <Icon name="arrow" /></>}</button></footer>
   </article>;
@@ -1419,12 +1567,14 @@ function ApprovalCard({ approval, deciding, onDecision }: {
   const isSubstitutionVariable = approval.operation_code === "substitution-variables";
   const isUserVariable = approval.operation_code === "user-variables";
   const isStandaloneFlow = approval.operation_code === "standalone-flow";
+  const isSchedule = approval.operation_code.startsWith("pipeline-schedule-");
+  const scheduleVerb = approval.operation_code === "pipeline-schedule-create" ? "Create" : approval.operation_code === "pipeline-schedule-pause" ? "Pause" : "Resume";
   const flowSteps = recordList(approval.input_values?.steps);
-  const runsDirectly = ["business-rules", "data-maps", "pipelines", "data-integrations", "data-import", "metadata-import", "cube-refresh", "substitution-variables", "user-variables", "standalone-flow"].includes(approval.operation_code);
+  const runsDirectly = ["business-rules", "data-maps", "pipelines", "data-integrations", "data-import", "metadata-import", "cube-refresh", "substitution-variables", "user-variables", "standalone-flow"].includes(approval.operation_code) || isSchedule;
   return <article className="assistant-approval" aria-label="Action preparation approval">
     <header>
       <span className="assistant-approval__icon"><Icon name="alert" /></span>
-      <div><span className="eyebrow">Your approval is required</span><h3>{runsDirectly ? "Run" : "Prepare"} {approval.display_name}?</h3><p>{approval.objective}</p></div>
+      <div><span className="eyebrow">Your approval is required</span><h3>{isSchedule ? scheduleVerb : runsDirectly ? "Run" : "Prepare"} {approval.display_name}?</h3><p>{approval.objective}</p></div>
       <span className="assistant-approval__risk">{approval.risk_level}</span>
     </header>
     <dl>
@@ -1432,7 +1582,9 @@ function ApprovalCard({ approval, deciding, onDecision }: {
       <div><dt>Artifact</dt><dd>{approval.artifact_name || "Choose on governed screen"}</dd></div>
       <div><dt>What approval does</dt><dd>{approval.effect}</dd></div>
     </dl>
-    {isStandaloneFlow
+    {isSchedule
+      ? <section className="assistant-approval__inputs"><strong>Schedule change</strong><dl><div><dt>Action</dt><dd>{scheduleVerb}</dd></div><div><dt>{approval.operation_code === "pipeline-schedule-create" ? "Oracle Pipeline" : "Schedule"}</dt><dd>{String(approval.input_values?.schedule_name || approval.artifact_name || "")}</dd></div>{approval.operation_code === "pipeline-schedule-create" && <><div><dt>Recurrence</dt><dd>{friendlyName(String(approval.input_values?.frequency || ""))} · {String(approval.input_values?.first_run_local || "")}</dd></div><div><dt>Timezone</dt><dd>{String(approval.input_values?.timezone || "")}</dd></div><div><dt>Inputs</dt><dd>{approval.input_values?.input_policy === "FIXED" ? "Fixed unattended values" : "Oracle Pipeline defaults"}</dd></div><div><dt>Next run</dt><dd>{String(approval.input_values?.next_run_at || "")}</dd></div></>}</dl></section>
+      : isStandaloneFlow
       ? <section className="assistant-approval__inputs assistant-approval__flow"><strong>Execution order</strong><p>Each operation must finish successfully before the next one starts.</p><ol>{flowSteps.map((step, index) => <li key={`${String(step.operation_code)}-${index}`}><span>{index + 1}</span><div><strong>{String(step.display_name || step.operation_code || "Operation")}</strong><small>{String(step.artifact_name || "")}</small></div><em>{String(step.risk_level || "Controlled")}</em></li>)}</ol></section>
       : isUserVariable
       ? <section className="assistant-approval__inputs"><strong>User Variable assignment</strong><dl><div><dt>Oracle user</dt><dd>{String(approval.input_values?.user_name || "")}</dd></div><div><dt>Variable</dt><dd>{String(approval.input_values?.variable_name || "")}</dd></div><div><dt>Dimension</dt><dd>{String(approval.input_values?.dimension || "")}</dd></div><div><dt>Current member</dt><dd>{String(approval.input_values?.expected_current_member ?? "Not assigned")}</dd></div><div><dt>New member</dt><dd>{String(approval.input_values?.new_member || "")}</dd></div></dl></section>
@@ -1451,11 +1603,22 @@ function ApprovalCard({ approval, deciding, onDecision }: {
       : isDataMap
       ? <section className="assistant-approval__inputs"><strong>Data Map controls</strong><dl><div><dt>Clear target</dt><dd>{approval.input_values?.clear_target === true ? "Yes" : "No"}</dd></div><div><dt>Member overrides</dt><dd>{Object.keys(memberOverrides).length ? Object.entries(memberOverrides).map(([name, value]) => `${name}=${value}`).join(", ") : "Use configured mapping"}</dd></div><div><dt>Exclusions</dt><dd>{Object.keys(exclusionOverrides).length ? Object.entries(exclusionOverrides).map(([name, value]) => `${name}=${value}`).join(", ") : "None"}</dd></div></dl></section>
       : <section className="assistant-approval__inputs"><strong>Runtime prompts</strong>{Object.keys(prompts).length ? <dl>{Object.entries(prompts).map(([name, value]) => <div key={name}><dt>{name}</dt><dd>{value}</dd></div>)}</dl> : <p>Use defaults configured in Calculation Manager.</p>}</section>}
-    <div className="assistant-approval__notice"><Icon name={runsDirectly ? "alert" : "check"} /><p>{runsDirectly ? <><strong>{isStandaloneFlow ? "This approval starts the complete reviewed sequence." : isUserVariable ? "This approval changes one Oracle user-variable assignment." : isSubstitutionVariable ? "This approval changes one Oracle substitution variable." : isCubeRefresh ? "This approval starts an application-wide Cube Refresh." : "This approval starts the Oracle operation."}</strong> {isStandaloneFlow ? "The flow will be queued as one monitored execution and will stop after the first failed operation." : <>The selected {isUserVariable ? "user-variable change" : isSubstitutionVariable ? "variable change" : isCubeRefresh ? "Cube Refresh job" : isPipeline ? "Pipeline" : isDataIntegration ? "Data Integration" : isMetadataImport ? "Metadata Import" : isDataImport ? "Planning Data Import" : isDataMap ? "Data Map" : "Business Rule"} will be queued immediately and monitored in Jobs &amp; Activity.</>}</> : <><strong>Oracle will not run from this approval.</strong> Approval only creates a draft that you validate and continue on the operation's governed screen.</>}</p></div>
+    <div className="assistant-approval__notice"><Icon name={runsDirectly ? "alert" : "check"} /><p>{isSchedule ? <><strong>This approval changes the governed scheduler.</strong> {approval.operation_code === "pipeline-schedule-create" ? "Nothing runs immediately; the Pipeline is submitted only when an enabled occurrence becomes due." : approval.operation_code === "pipeline-schedule-pause" ? "Future occurrences stop being claimed; an already running job is not cancelled." : "The Pipeline is revalidated now and again before every future occurrence."}</> : runsDirectly ? <><strong>{isStandaloneFlow ? "This approval starts the complete reviewed sequence." : isUserVariable ? "This approval changes one Oracle user-variable assignment." : isSubstitutionVariable ? "This approval changes one Oracle substitution variable." : isCubeRefresh ? "This approval starts an application-wide Cube Refresh." : "This approval starts the Oracle operation."}</strong> {isStandaloneFlow ? "The flow will be queued as one monitored execution and will stop after the first failed operation." : <>The selected {isUserVariable ? "user-variable change" : isSubstitutionVariable ? "variable change" : isCubeRefresh ? "Cube Refresh job" : isPipeline ? "Pipeline" : isDataIntegration ? "Data Integration" : isMetadataImport ? "Metadata Import" : isDataImport ? "Planning Data Import" : isDataMap ? "Data Map" : "Business Rule"} will be queued immediately and monitored in Jobs &amp; Activity.</>}</> : <><strong>Oracle will not run from this approval.</strong> Approval only creates a draft that you validate and continue on the operation's governed screen.</>}</p></div>
     <footer>
       <button type="button" className="button button--secondary" disabled={Boolean(deciding)} onClick={() => void onDecision("reject")}>{deciding === "reject" ? <><span className="spinner" /> Rejecting…</> : "Reject proposal"}</button>
-      <button type="button" className="button button--primary" disabled={Boolean(deciding)} onClick={() => void onDecision("approve")}>{deciding === "approve" ? <><span className="spinner" /> {runsDirectly ? "Starting…" : "Preparing…"}</> : <>{runsDirectly ? "Approve and run" : "Approve preparation"} <Icon name="arrow" /></>}</button>
+      <button type="button" className="button button--primary" disabled={Boolean(deciding)} onClick={() => void onDecision("approve")}>{deciding === "approve" ? <><span className="spinner" /> {isSchedule ? "Saving…" : runsDirectly ? "Starting…" : "Preparing…"}</> : <>{isSchedule ? `Approve and ${scheduleVerb.toLowerCase()}` : runsDirectly ? "Approve and run" : "Approve preparation"} <Icon name="arrow" /></>}</button>
     </footer>
+  </article>;
+}
+
+function AgentScheduleResultCard({ schedule, onDismiss }: {
+  schedule: AutomationSchedule;
+  onDismiss: () => void;
+}) {
+  return <article className="assistant-agent-execution assistant-schedule-result is-success" aria-label="Saved automation schedule">
+    <span className="assistant-agent-execution__icon"><Icon name="calendar" /></span>
+    <div><span className="eyebrow">Governed schedule saved</span><h3>{schedule.name}</h3><p>{schedule.enabled ? <>Next run: <strong>{schedule.next_run_at ? new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(schedule.next_run_at)) : "No future occurrence"}</strong></> : "This schedule is paused."}</p><small>{friendlyName(schedule.frequency)} · {schedule.timezone} · {schedule.target_key}</small></div>
+    <footer><button type="button" className="button button--quiet" onClick={() => { window.location.hash = "#schedules"; }}>Open schedules <Icon name="arrow" /></button><button type="button" className="icon-button" aria-label="Dismiss schedule result" onClick={onDismiss}><Icon name="close" /></button></footer>
   </article>;
 }
 
@@ -1651,15 +1814,56 @@ function MarkdownContent({ content }: { content: string }) {
       blocks.push(<ul key={`l-${index}`}>{items.map((item, itemIndex) => <li key={itemIndex}>{inlineMarkdown(item)}</li>)}</ul>);
       continue;
     }
+    if (/^\d+[.)]\s+/.test(line)) {
+      const items: string[] = [];
+      while (index < lines.length && /^\s*\d+[.)]\s+/.test(lines[index])) {
+        items.push(lines[index].replace(/^\s*\d+[.)]\s+/, ""));
+        index += 1;
+      }
+      blocks.push(<ol key={`ol-${index}`}>{items.map((item, itemIndex) => <li key={itemIndex}>{inlineMarkdown(item)}</li>)}</ol>);
+      continue;
+    }
+    if (line.startsWith("> ")) {
+      const quote: string[] = [];
+      while (index < lines.length && lines[index].trim().startsWith("> ")) {
+        quote.push(lines[index].trim().slice(2));
+        index += 1;
+      }
+      blocks.push(<blockquote key={`q-${index}`}>{inlineMarkdown(quote.join(" "))}</blockquote>);
+      continue;
+    }
+    if (line.includes("|") && index + 1 < lines.length && /^\s*\|?\s*:?-{3,}/.test(lines[index + 1])) {
+      const headers = markdownTableCells(line);
+      index += 2;
+      const rows: string[][] = [];
+      while (index < lines.length && lines[index].trim().includes("|")) {
+        rows.push(markdownTableCells(lines[index]));
+        index += 1;
+      }
+      blocks.push(<div className="assistant-markdown__table" key={`t-${index}`}><table><thead><tr>{headers.map((cell, cellIndex) => <th key={cellIndex}>{inlineMarkdown(cell)}</th>)}</tr></thead><tbody>{rows.map((row, rowIndex) => <tr key={rowIndex}>{headers.map((_, cellIndex) => <td key={cellIndex}>{inlineMarkdown(row[cellIndex] ?? "")}</td>)}</tr>)}</tbody></table></div>);
+      continue;
+    }
     const paragraph = [line];
     index += 1;
-    while (index < lines.length && lines[index].trim() && !/^(#{1,4})\s+/.test(lines[index].trim()) && !/^\s*[-*]\s+/.test(lines[index])) {
+    while (
+      index < lines.length
+      && lines[index].trim()
+      && !/^(#{1,4})\s+/.test(lines[index].trim())
+      && !/^\s*[-*]\s+/.test(lines[index])
+      && !/^\s*\d+[.)]\s+/.test(lines[index])
+      && !lines[index].trim().startsWith("> ")
+      && !(lines[index].includes("|") && index + 1 < lines.length && /^\s*\|?\s*:?-{3,}/.test(lines[index + 1]))
+    ) {
       paragraph.push(lines[index].trim());
       index += 1;
     }
     blocks.push(<p key={`p-${index}`}>{inlineMarkdown(paragraph.join(" "))}</p>);
   }
   return <div className="assistant-markdown">{blocks}</div>;
+}
+
+function markdownTableCells(value: string) {
+  return value.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.trim());
 }
 
 function inlineMarkdown(value: string) {
@@ -1679,6 +1883,7 @@ function handoffHref(draft: AgentActionDraft) { const url = new URL(draft.route,
 function pairsToText(value: unknown) { return value && typeof value === "object" && !Array.isArray(value) ? Object.entries(value).map(([name, item]) => `${name}=${String(item)}`).join("\n") : ""; }
 function parsePairs(value: string) { return Object.fromEntries(value.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => { const separator = line.indexOf("="); return separator > 0 ? [line.slice(0, separator).trim(), line.slice(separator + 1).trim()] : [line, ""]; })); }
 function stringRecord(value: unknown): Record<string, string> { return value && typeof value === "object" && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).map(([name, item]) => [name, String(item)])) : {}; }
+function cleanAgentPairs(value: Record<string, string>) { return Object.fromEntries(Object.entries(value).map(([name, item]) => [name.trim(), item.trim()]).filter(([name, item]) => name && item)); }
 function friendlyName(value: string) { return value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase()); }
 function recordStatisticsSummary(value: OracleRecordStatistics) { return `Read ${value.records_read.toLocaleString()} · processed ${value.records_processed.toLocaleString()} · rejected ${value.records_rejected.toLocaleString()}`; }
 function formatConversationDate(value: string) { return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(value)); }

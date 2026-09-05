@@ -150,6 +150,9 @@ class OperationExecutionManager:
                     trigger_source=(
                         actor.trigger_source if actor else TriggerSource.API
                     ),
+                    oracle_execution_username=(
+                        self._settings.oracle_execution_username
+                    ),
                 )
             )
         except Exception:
@@ -227,6 +230,9 @@ class OperationExecutionManager:
                     initiated_by_display=actor.display_name if actor else None,
                     trigger_source=(
                         actor.trigger_source if actor else TriggerSource.API
+                    ),
+                    oracle_execution_username=(
+                        self._settings.oracle_execution_username
                     ),
                 )
             )

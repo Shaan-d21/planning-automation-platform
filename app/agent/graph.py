@@ -14,7 +14,13 @@ from typing import Any, Literal, TypedDict
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
-from app.agent.capabilities import AgentCapabilityGateway
+from app.agent.capabilities import (
+    AgentCapabilityGateway,
+    PIPELINE_SCHEDULE_ACTIONS,
+    PIPELINE_SCHEDULE_CREATE,
+    PIPELINE_SCHEDULE_PAUSE,
+    PIPELINE_SCHEDULE_RESUME,
+)
 from app.agent.checkpoints import AgentCheckpointStore
 from app.agent.models import (
     AgentMessage,
@@ -52,6 +58,7 @@ GRAPH_TOOL_NAMES = frozenset(
         "plan_multi_step_request",
         "prepare_operation_action",
         "prepare_standalone_flow_action",
+        "prepare_schedule_action",
     }
 )
 
@@ -63,7 +70,24 @@ RESOLVED_ARTIFACT_REQUIRED_CODES = frozenset(
         "cube-refresh",
         "substitution-variables",
         "user-variables",
+        PIPELINE_SCHEDULE_CREATE,
+        PIPELINE_SCHEDULE_PAUSE,
+        PIPELINE_SCHEDULE_RESUME,
     }
+)
+
+# Exact Oracle artifact names frequently carry the operation meaning without
+# repeating words such as "rule" or "integration" in every clause. These are
+# the operation catalogs that can safely participate in a governed standalone
+# sequence after their exact artifacts and inputs have been reviewed.
+MULTI_STEP_ARTIFACT_OPERATION_CODES = (
+    "pipelines",
+    "data-integrations",
+    "data-import",
+    "metadata-import",
+    "business-rules",
+    "data-maps",
+    "cube-refresh",
 )
 
 
@@ -427,9 +451,10 @@ class AgentGraphOrchestrator:
             self._deterministic_execution_evidence_call(state)
             or self._deterministic_data_review_slice_call(state)
             or self._deterministic_data_review_cube_call(state)
+            or self._deterministic_schedule_call(state)
             or self._deterministic_standalone_flow_call(state)
-            or self._deterministic_pipeline_call(state)
             or self._deterministic_multi_step_plan_call(state)
+            or self._deterministic_pipeline_call(state)
             or self._deterministic_business_rule_call(state)
             or self._deterministic_data_integration_call(state)
             or self._deterministic_data_map_call(state)
@@ -443,6 +468,14 @@ class AgentGraphOrchestrator:
                 "review_data_slice": "data-review-slice",
                 "plan_multi_step_request": "multi-step-plan",
                 "prepare_standalone_flow_action": "standalone-flow",
+                "prepare_schedule_action": {
+                    "CREATE": PIPELINE_SCHEDULE_CREATE,
+                    "PAUSE": PIPELINE_SCHEDULE_PAUSE,
+                    "RESUME": PIPELINE_SCHEDULE_RESUME,
+                }.get(
+                    str(deterministic_call.arguments.get("action") or "").upper(),
+                    PIPELINE_SCHEDULE_CREATE,
+                ),
             }.get(
                 deterministic_call.name,
                 str(
@@ -534,6 +567,7 @@ class AgentGraphOrchestrator:
                 call.name in {
                     "prepare_operation_action",
                     "prepare_standalone_flow_action",
+                    "prepare_schedule_action",
                 }
                 and state.get("approval_decision") != "approve"
             ):
@@ -628,6 +662,7 @@ class AgentGraphOrchestrator:
             item.get("name") in {
                 "prepare_operation_action",
                 "prepare_standalone_flow_action",
+                "prepare_schedule_action",
             }
             for item in calls
         ):
@@ -888,6 +923,61 @@ class AgentGraphOrchestrator:
             call_id="deterministic-pipeline-preparation",
         )
 
+    @classmethod
+    def _deterministic_schedule_call(
+        cls,
+        state: AgentGraphState,
+    ) -> AgentToolCall | None:
+        """Route explicit schedule changes without provider interpretation."""
+        allowed = {
+            str(item).strip()
+            for item in state.get("allowed_tool_names", [])
+        }
+        if "prepare_schedule_action" not in allowed:
+            return None
+        user_messages = [
+            str(item.get("content") or "").strip()
+            for item in state.get("messages", [])
+            if item.get("role") == AgentMessageRole.USER.value
+        ]
+        if not user_messages:
+            return None
+        latest = user_messages[-1]
+        normalized = cls._normalize_artifact_text(latest)
+        padded = f" {normalized} "
+        mentions_schedule = any(
+            phrase in padded
+            for phrase in (
+                " schedule ",
+                " scheduled ",
+                " recurrence ",
+                " recurring ",
+            )
+        )
+        if not mentions_schedule or normalized.startswith(
+            ("how ", "why ", "what ", "which ", "can ", "should ", "explain ")
+        ):
+            return None
+        if any(word in set(normalized.split()) for word in {"pause", "disable", "stop"}):
+            action = "PAUSE"
+        elif any(word in set(normalized.split()) for word in {"resume", "enable", "restart"}):
+            action = "RESUME"
+        elif any(
+            word in set(normalized.split())
+            for word in {"schedule", "create", "add", "run", "start"}
+        ):
+            action = "CREATE"
+        else:
+            return None
+        return AgentToolCall(
+            name="prepare_schedule_action",
+            arguments={
+                "action": action,
+                "objective": " ".join(latest.split())[:500],
+            },
+            call_id=f"deterministic-schedule-{action.casefold()}",
+        )
+
     def _deterministic_standalone_flow_call(
         self,
         state: AgentGraphState,
@@ -983,6 +1073,7 @@ class AgentGraphOrchestrator:
         )
         normalized = " ".join(re.sub(r"[\W_]+", " ", source).split())
         patterns: dict[str, str] = {
+            "pipelines": r"\b(?:oracle\s+)?pipelines?\b",
             "metadata-import": (
                 r"\b(?:metadata\s+import|import\s+metadata|metadata\s+load|"
                 r"load\s+metadata|update\s+metadata)\b"
@@ -1012,18 +1103,40 @@ class AgentGraphOrchestrator:
                 r"\b(?:generate\s+report|create\s+report|export\s+report|"
                 r"generate\s+workbook)\b"
             ),
+            "substitution-variables": (
+                r"\b(?:substitution|subst)\s+(?:variables?|vars?)\b"
+            ),
+            "user-variables": r"\buser\s+(?:variables?|vars?)\b",
         }
         matches: list[tuple[int, str]] = []
-        has_data_integration = bool(
-            re.search(patterns["data-integrations"], normalized)
+        integration_matches = tuple(
+            re.finditer(patterns["data-integrations"], normalized)
         )
         for code, pattern in patterns.items():
-            if code == "data-import" and has_data_integration:
-                continue
-            matches.extend(
-                (match.start(), code)
-                for match in re.finditer(pattern, normalized)
-            )
+            for match in re.finditer(pattern, normalized):
+                if code == "pipelines" and re.search(
+                    r"(?:without(?:\s+an?)?(?:\s+oracle)?|"
+                    r"do\s+not\s+use(?:\s+an?)?(?:\s+oracle)?|"
+                    r"don\s+t\s+use(?:\s+an?)?(?:\s+oracle)?)\s+$",
+                    normalized[max(0, match.start() - 45) : match.start()],
+                ):
+                    continue
+                if code == "data-import" and any(
+                    abs(match.start() - integration.start()) <= 45
+                    and not re.search(
+                        r"\b(?:then|next|after\s+that|followed\s+by)\b",
+                        normalized[
+                            min(match.start(), integration.start()) :
+                            max(match.end(), integration.end())
+                        ],
+                    )
+                    for integration in integration_matches
+                ):
+                    # "Revenue Load Data Integration" describes one
+                    # Integration. Keep a native Data Import only when the
+                    # user explicitly sequences it separately.
+                    continue
+                matches.append((match.start(), code))
         # Overlapping synonyms for one operation describe one step, not two.
         matches.sort(key=lambda item: (item[0], item[1]))
         distinct: list[tuple[int, str]] = []
@@ -1053,9 +1166,25 @@ class AgentGraphOrchestrator:
         self,
         text: str,
     ) -> tuple[str, ...]:
-        """Expand repeated operation types from exact live artifact mentions."""
+        """Expand an ordered request using exact live artifact mentions.
+
+        A business user commonly writes ``Run Revenue_Load, BR_Calc, then
+        Forecast_to_Reporting``. Only the rule name may contain a generic
+        operation word, so restricting artifact discovery to already detected
+        operation types silently loses the Integration and Data Map. For text
+        that clearly describes a sequence, inspect every supported catalog and
+        add only exact, unambiguous artifact mentions.
+        """
         occurrences = self._requested_multi_step_occurrences(text)
-        for operation_code in {code for _position, code in occurrences}:
+        multi_step_signal = self._has_multi_step_signal(text, occurrences)
+        if len(occurrences) < 2 and not multi_step_signal:
+            return tuple(code for _position, code in occurrences)
+        operation_codes = {code for _position, code in occurrences}
+        if multi_step_signal:
+            operation_codes.update(MULTI_STEP_ARTIFACT_OPERATION_CODES)
+
+        mentions_by_code: dict[str, tuple[tuple[int, str], ...]] = {}
+        for operation_code in operation_codes:
             try:
                 catalog = self._gateway.artifact_catalog(operation_code)
             except Exception as exc:
@@ -1065,21 +1194,79 @@ class AgentGraphOrchestrator:
                     exc,
                 )
                 continue
-            mentions = self._artifact_mentions_in_user_text(catalog, text)
+            mentions_by_code[operation_code] = (
+                self._artifact_mentions_in_user_text(catalog, text)
+            )
+
+        # If the same exact text span exists in more than one Oracle catalog,
+        # do not guess its operation type. A generic operation mention still
+        # remains available to drive a governed artifact-choice card.
+        absent_codes_by_position: dict[int, set[str]] = {}
+        for operation_code, mentions in mentions_by_code.items():
+            if any(code == operation_code for _position, code in occurrences):
+                continue
+            for position, _identifier in mentions:
+                absent_codes_by_position.setdefault(position, set()).add(
+                    operation_code
+                )
+
+        for operation_code, mentions in mentions_by_code.items():
             existing = [
                 item for item in occurrences if item[1] == operation_code
             ]
             if len(mentions) <= len(existing):
                 continue
-            occurrences = [
-                item for item in occurrences if item[1] != operation_code
-            ]
+            if existing:
+                occurrences = [
+                    item for item in occurrences if item[1] != operation_code
+                ]
+                occurrences.extend(
+                    (position, operation_code)
+                    for position, _identifier in mentions
+                )
+                continue
             occurrences.extend(
                 (position, operation_code)
                 for position, _identifier in mentions
+                if len(absent_codes_by_position.get(position, ())) == 1
             )
         occurrences.sort(key=lambda item: item[0])
         return tuple(code for _position, code in occurrences)
+
+    @staticmethod
+    def _has_multi_step_signal(
+        text: str,
+        occurrences: Sequence[tuple[int, str]],
+    ) -> bool:
+        """Return whether a request safely warrants cross-catalog inspection."""
+        if len(occurrences) >= 2:
+            return True
+        source = str(text or "")
+        normalized = " ".join(source.casefold().split())
+        if re.search(
+            r"(?:->|→)|\b(?:then|next|followed\s+by|after\s+that)\b",
+            normalized,
+        ):
+            return True
+        action_count = len(
+            re.findall(
+                r"\b(?:prepare|run|execute|start|calculate|launch|push|"
+                r"publish|import|load|update|set|change|assign|create|"
+                r"refresh|generate|export)\b",
+                normalized,
+            )
+        )
+        repeated_operation_list = bool(
+            re.search(
+                r"\b(?:pipelines|business\s+rules|calculation\s+rules|"
+                r"data\s+maps|data\s+integrations|substitution\s+variables|"
+                r"user\s+variables)\b.*\band\b",
+                normalized,
+            )
+        )
+        return repeated_operation_list or action_count >= 2 or (
+            action_count >= 1 and ("," in source or ";" in source)
+        )
 
     @staticmethod
     def _requests_standalone_flow(text: str) -> bool:
@@ -1103,7 +1290,8 @@ class AgentGraphOrchestrator:
         """Isolate the UI-generated ordered step list from its objective."""
         normalized = " ".join(str(text or "").split())
         match = re.search(
-            r"\bfor these operations\s*:?\s*(.+?)\s+objective\s*:?",
+            r"\bfor these operations\s*:?\s*(.+?)"
+            r"(?:\s+objective\s*:?|$)",
             normalized,
             re.IGNORECASE,
         )
@@ -1657,6 +1845,21 @@ class AgentGraphOrchestrator:
                 + "Check the exact dimension and member names; the selected "
                 "cube and layout remain visible in the review card."
             )
+        if operation_code in PIPELINE_SCHEDULE_ACTIONS:
+            label = {
+                PIPELINE_SCHEDULE_CREATE: "Pipeline schedule",
+                PIPELINE_SCHEDULE_PAUSE: "schedule pause",
+                PIPELINE_SCHEDULE_RESUME: "schedule resume",
+            }[operation_code]
+            statuses = {
+                str(item.get("status") or "").strip().upper()
+                for item in activities
+            }
+            if "FAILED" in statuses:
+                return f"The {label} could not be applied. Review the validated error."
+            if "CANCELLED" in statuses:
+                return f"The {label} was cancelled. No schedule changed."
+            return f"The approved {label} was applied through the governed scheduler."
         display_name = {
             "business-rules": "Business Rule",
             "pipelines": "Pipeline",
@@ -1771,7 +1974,10 @@ class AgentGraphOrchestrator:
         calls = tuple(
             self._call_from_payload(item)
             for item in state.get("pending_tool_calls", [])
-            if item.get("name") == "prepare_operation_action"
+            if item.get("name") in {
+                "prepare_operation_action",
+                "prepare_schedule_action",
+            }
         )
         if len(calls) != 1:
             raise AgentProviderError(
@@ -1798,22 +2004,23 @@ class AgentGraphOrchestrator:
             ),
             "",
         )
-        resolved_operation = self._resolve_explicit_operation_intent(
-            latest_user_text,
-            str(call.arguments.get("operation_code") or ""),
-        )
-        if resolved_operation != str(
-            call.arguments.get("operation_code") or ""
-        ).strip().casefold():
-            call = AgentToolCall(
-                name=call.name,
-                arguments={
-                    **call.arguments,
-                    "operation_code": resolved_operation,
-                    "artifact_name": None,
-                },
-                call_id=call.call_id,
+        if call.name == "prepare_operation_action":
+            resolved_operation = self._resolve_explicit_operation_intent(
+                latest_user_text,
+                str(call.arguments.get("operation_code") or ""),
             )
+            if resolved_operation != str(
+                call.arguments.get("operation_code") or ""
+            ).strip().casefold():
+                call = AgentToolCall(
+                    name=call.name,
+                    arguments={
+                        **call.arguments,
+                        "operation_code": resolved_operation,
+                        "artifact_name": None,
+                    },
+                    call_id=call.call_id,
+                )
         # This gateway operation only validates and describes a draft. It does
         # not call Oracle or persist anything.
         proposal = self._execute_allowed_tool(call, state).get("action_draft")
@@ -1821,7 +2028,7 @@ class AgentGraphOrchestrator:
             raise AgentProviderError("The proposed operation could not be resolved.")
         pending_payloads = [
             self._call_payload(call)
-            if item.get("name") == "prepare_operation_action"
+            if item.get("name") == call.name
             else item
             for item in state.get("pending_tool_calls", [])
         ]
@@ -1957,15 +2164,25 @@ class AgentGraphOrchestrator:
             explicitly_named or recommended_artifact
         )
         if (choices or recovery) and not user_explicitly_named_artifact:
+            selection_display_name = {
+                PIPELINE_SCHEDULE_CREATE: "Oracle Pipelines",
+                PIPELINE_SCHEDULE_PAUSE: "active schedules",
+                PIPELINE_SCHEDULE_RESUME: "paused schedules",
+            }.get(operation_code, str(proposal.get("display_name") or "Operation"))
+            selection_prompt = {
+                PIPELINE_SCHEDULE_CREATE: "Choose the Oracle Pipeline to schedule.",
+                PIPELINE_SCHEDULE_PAUSE: "Choose the active schedule to pause.",
+                PIPELINE_SCHEDULE_RESUME: "Choose the paused schedule to resume.",
+            }.get(
+                operation_code,
+                f"Choose the {proposal.get('display_name')} artifact to prepare.",
+            )
             clarification = interrupt(
                 {
                     "kind": "operation_artifact_selection",
                     "operation_code": proposal.get("target_code"),
-                    "display_name": proposal.get("display_name"),
-                    "prompt": (
-                        f"Choose the {proposal.get('display_name')} artifact "
-                        "to prepare."
-                    ),
+                    "display_name": selection_display_name,
+                    "prompt": selection_prompt,
                     "options": list(choices),
                     "option_labels": display_names,
                     "allows_cancel": True,
@@ -1998,7 +2215,7 @@ class AgentGraphOrchestrator:
             )
             pending_payloads = [
                 self._call_payload(call)
-                if item.get("name") == "prepare_operation_action"
+                if item.get("name") == call.name
                 else item
                 for item in pending_payloads
             ]
@@ -2020,7 +2237,7 @@ class AgentGraphOrchestrator:
             )
             pending_payloads = [
                 self._call_payload(call)
-                if item.get("name") == "prepare_operation_action"
+                if item.get("name") == call.name
                 else item
                 for item in pending_payloads
             ]
@@ -2035,7 +2252,7 @@ class AgentGraphOrchestrator:
             )
             pending_payloads = [
                 self._call_payload(call)
-                if item.get("name") == "prepare_operation_action"
+                if item.get("name") == call.name
                 else item
                 for item in pending_payloads
             ]
@@ -2096,7 +2313,7 @@ class AgentGraphOrchestrator:
                 )
                 pending_payloads = [
                     self._call_payload(call)
-                    if item.get("name") == "prepare_operation_action"
+                    if item.get("name") == call.name
                     else item
                     for item in pending_payloads
                 ]
@@ -2110,6 +2327,27 @@ class AgentGraphOrchestrator:
                 context = dict(guided.get("context") or {})
                 context["prefill"] = {"new_member": replacement}
                 guided = {**guided, "context": context}
+        elif guided is not None and operation_code == "business-rules":
+            context = dict(guided.get("context") or {})
+            rtp_definition = context.get("rtp_definition")
+            prefill = self._business_rule_rtp_prefill(
+                input_source_text,
+                rtp_definition if isinstance(rtp_definition, dict) else {},
+            )
+            if prefill:
+                context["prefill"] = {
+                    "runtime_prompt_mode": "Provide runtime prompt values",
+                    "runtime_prompts": prefill,
+                }
+                guided = {**guided, "context": context}
+        elif guided is not None and operation_code == PIPELINE_SCHEDULE_CREATE:
+            context = dict(guided.get("context") or {})
+            context["prefill"] = {
+                "frequency": self._schedule_frequency_prefill(
+                    input_source_text
+                ),
+            }
+            guided = {**guided, "context": context}
         if guided is not None:
             input_response = interrupt(
                 {"kind": "operation_input_collection", **guided}
@@ -2133,7 +2371,7 @@ class AgentGraphOrchestrator:
             )
             pending_payloads = [
                 self._call_payload(call)
-                if item.get("name") == "prepare_operation_action"
+                if item.get("name") == call.name
                 else item
                 for item in pending_payloads
             ]
@@ -2706,6 +2944,69 @@ class AgentGraphOrchestrator:
         return value
 
     @staticmethod
+    def _schedule_frequency_prefill(user_text: str) -> str:
+        """Map explicit business recurrence wording to a safe UI default."""
+        normalized = " ".join(str(user_text or "").casefold().split())
+        if re.search(r"\b(one[ -]?time|once|single run)\b", normalized):
+            return "ONE_TIME"
+        if re.search(r"\b(daily|every day|each day)\b", normalized):
+            return "DAILY"
+        if re.search(r"\b(weekly|every week|each week)\b", normalized):
+            return "WEEKLY"
+        if re.search(r"\b(monthly|every month|each month)\b", normalized):
+            return "MONTHLY"
+        return "MONTHLY"
+
+    @staticmethod
+    def _business_rule_rtp_prefill(
+        user_text: str,
+        definition: dict[str, Any],
+    ) -> dict[str, str]:
+        """Extract only values explicitly paired with registered RTP names."""
+        text = " ".join(str(user_text or "").strip().split())
+        raw_prompts = definition.get("prompts")
+        if not text or not isinstance(raw_prompts, list):
+            return {}
+        result: dict[str, str] = {}
+        for raw_prompt in raw_prompts:
+            if not isinstance(raw_prompt, dict):
+                continue
+            name = str(raw_prompt.get("name") or "").strip()
+            if not name:
+                continue
+            aliases = {
+                name,
+                str(raw_prompt.get("label") or "").strip(),
+                str(raw_prompt.get("dimension") or "").strip(),
+            }
+            aliases.discard("")
+            value: str | None = None
+            for alias in sorted(aliases, key=len, reverse=True):
+                match = re.search(
+                    rf"\b{re.escape(alias)}\b\s*(?:=|:|\bis\b|\bto\b)\s*"
+                    r"(?:\"([^\"]+)\"|'([^']+)'|([^,;]+?))"
+                    r"(?=\s+(?:and|then)\s+|[,;]|$)",
+                    text,
+                    re.IGNORECASE,
+                )
+                if match:
+                    value = next(
+                        (group for group in match.groups() if group is not None),
+                        None,
+                    )
+                    break
+            if value is None and any(
+                alias.casefold() == "year" for alias in aliases
+            ):
+                year_match = re.search(r"\bFY\d{2,4}\b", text, re.IGNORECASE)
+                if year_match:
+                    value = year_match.group(0)
+            normalized_value = str(value or "").strip().strip("\"'").rstrip(".!?")
+            if normalized_value and len(normalized_value) <= 500:
+                result[name] = normalized_value
+        return result
+
+    @staticmethod
     def _unambiguous_recommendation(
         recommendations: Sequence[BusinessRuleMatch],
     ) -> str | None:
@@ -2900,6 +3201,18 @@ class AgentGraphOrchestrator:
             return (
                 "Apply exactly one reviewed user-variable member assignment "
                 "for the selected Oracle user and verify the resulting value."
+            )
+        if normalized == PIPELINE_SCHEDULE_CREATE:
+            return (
+                "Create one governed unattended Oracle Pipeline schedule with "
+                "the reviewed recurrence, timezone, and input policy."
+            )
+        if normalized == PIPELINE_SCHEDULE_PAUSE:
+            return "Pause the selected schedule; no future occurrence will be claimed."
+        if normalized == PIPELINE_SCHEDULE_RESUME:
+            return (
+                "Revalidate the selected Pipeline against Oracle and resume "
+                "its future occurrences."
             )
         return "Prepare a governed handoff; no Oracle action will run."
 

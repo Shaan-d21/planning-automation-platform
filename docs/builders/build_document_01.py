@@ -387,10 +387,8 @@ def add_page_break(doc: Document) -> None:
 
 
 def add_chapter(doc: Document, number: int, title: str, lead: str) -> None:
-    if number == 4:
-        add_page_break(doc)
     kicker = doc.add_paragraph(f"CHAPTER {number}", style="Kicker")
-    kicker.paragraph_format.page_break_before = number != 4
+    kicker.paragraph_format.page_break_before = True
     kicker.paragraph_format.space_before = Pt(6)
     doc.add_paragraph(title, style="Heading 1")
     doc.add_paragraph(lead, style="Lead")
@@ -610,6 +608,54 @@ def make_capability_map(path: Path) -> None:
     image.save(path, quality=95)
 
 
+def make_ai_copilot_model(path: Path) -> None:
+    image = Image.new("RGB", (2100, 1260), "#FFFFFF")
+    draw = ImageDraw.Draw(image)
+    draw.rounded_rectangle((50, 45, 2050, 1215), radius=48, fill="#F6F8FC", outline="#D8E1EF", width=4)
+    draw.text((105, 85), "AI IS THE INTELLIGENT FRONT DOOR", font=font(38, bold=True), fill="#0B1F3A")
+    draw.text((105, 145), "The model understands the request; platform code owns validation, approval, execution, and evidence.", font=font(26), fill="#66748C")
+
+    top_boxes = [
+        ((105, 285, 565, 620), "1", "ASK", "Describe the business outcome in normal language.", "#2F5DE0"),
+        ((820, 250, 1280, 655), "2", "ASSIST", "Inspect live context, match artifacts, explain choices, and collect exact inputs.", "#7C3AED"),
+        ((1535, 285, 1995, 620), "3", "GOVERN", "Apply role permissions, deterministic checks, and explicit human approval.", "#F05A36"),
+    ]
+    for box, number, title, body, color in top_boxes:
+        x1, y1, x2, y2 = box
+        draw.rounded_rectangle(box, radius=30, fill="#FFFFFF", outline=color, width=4)
+        draw.ellipse((x1 + 28, y1 + 28, x1 + 94, y1 + 94), fill=color)
+        number_font = font(28, bold=True)
+        bounds = draw.textbbox((0, 0), number, font=number_font)
+        draw.text((x1 + 61 - (bounds[2] - bounds[0]) / 2, y1 + 43), number, font=number_font, fill="#FFFFFF")
+        draw.text((x1 + 118, y1 + 34), title, font=font(29, bold=True), fill=color)
+        y = y1 + 125
+        for line in wrap(draw, body, font(25), x2 - x1 - 58):
+            draw.text((x1 + 30, y), line, font=font(25), fill="#19243A")
+            y += 36
+
+    arrow(draw, (585, 450), (790, 450), color="#9AACCB", width=7)
+    arrow(draw, (1300, 450), (1505, 450), color="#9AACCB", width=7)
+
+    draw.rounded_rectangle((240, 785, 1860, 1055), radius=38, fill="#E8F7F2", outline="#00866A", width=4)
+    draw.text((305, 830), "APPROVED RESULT", font=font(27, bold=True), fill="#00866A")
+    result_text = (
+        "A read-only answer, a reviewed Oracle action, or an ordered standalone flow - "
+        "queued through the same durable worker and retained in Jobs & Activity."
+    )
+    y = 890
+    for line in wrap(draw, result_text, font(30, bold=True), 1490):
+        draw.text((305, y), line, font=font(30, bold=True), fill="#0B1F3A")
+        y += 42
+    arrow(draw, (1050, 675), (1050, 765), color="#00866A", width=8)
+
+    draw.rounded_rectangle((370, 1090, 1730, 1170), radius=28, fill="#FFF4D8", outline="#B76E00", width=3)
+    guardrail = "No button approval = no state-changing Oracle execution"
+    guard_font = font(26, bold=True)
+    bounds = draw.textbbox((0, 0), guardrail, font=guard_font)
+    draw.text((1050 - (bounds[2] - bounds[0]) / 2, 1115), guardrail, font=guard_font, fill="#B76E00")
+    image.save(path, quality=95)
+
+
 def make_execution_flow(path: Path) -> None:
     image = Image.new("RGB", (2100, 1080), "#FFFFFF")
     draw = ImageDraw.Draw(image)
@@ -728,11 +774,13 @@ def create_assets() -> dict[str, Path]:
     ASSET_DIR.mkdir(parents=True, exist_ok=True)
     assets = {
         "capabilities": ASSET_DIR / "capability-map.png",
+        "ai_copilot": ASSET_DIR / "ai-copilot-model.png",
         "execution": ASSET_DIR / "governed-execution-flow.png",
         "lifecycle": ASSET_DIR / "planning-lifecycle.png",
         "navigation": ASSET_DIR / "navigation-guide.png",
     }
     make_capability_map(assets["capabilities"])
+    make_ai_copilot_model(assets["ai_copilot"])
     make_execution_flow(assets["execution"])
     make_lifecycle(assets["lifecycle"])
     make_navigation(assets["navigation"])
@@ -750,7 +798,7 @@ def add_cover(doc: Document) -> None:
     run.add_picture(str(LOGO), width=Inches(2.35))
     set_picture_alt_text(run, "BISP Solutions company logo")
 
-    paragraph = doc.add_paragraph("ORACLE EPM AUTOMATION PLATFORM", style="Kicker")
+    paragraph = doc.add_paragraph("AI-FIRST ORACLE EPM AUTOMATION PLATFORM", style="Kicker")
     paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
     paragraph.paragraph_format.space_before = Pt(34)
     paragraph.paragraph_format.space_after = Pt(12)
@@ -762,8 +810,8 @@ def add_cover(doc: Document) -> None:
     paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
     paragraph = doc.add_paragraph(
-        "A plain-language guide to what the platform does, who it serves, "
-        "and how it supports a governed Oracle Planning lifecycle.",
+        "An AI-first, human-governed guide to simplifying Oracle Planning work, "
+        "executing approved automation, and understanding every result.",
         style="Subtitle",
     )
     paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -774,7 +822,7 @@ def add_cover(doc: Document) -> None:
     set_table_geometry(table, [3120, 3120, 3120], indent_dxa=0)
     values = [
         ("DOCUMENT", "01 of the project handbook"),
-        ("VERSION", "1.0  |  14 August 2026"),
+        ("VERSION", "1.1  |  3 September 2026"),
         ("AUDIENCE", "Business users, consultants and administrators"),
     ]
     for cell, (label, value) in zip(table.rows[0].cells, values, strict=True):
@@ -793,7 +841,7 @@ def add_cover(doc: Document) -> None:
     add_callout(
         doc,
         "Scope of this volume",
-        "This guide documents the current modern application and the shared governed services that support it.",
+        "This guide introduces the current modern application, with special focus on the EPM Assistant as its intelligent, governed entry point.",
         fill=ORANGE_LIGHT,
         accent=ORANGE,
     )
@@ -810,7 +858,7 @@ def add_front_matter(doc: Document) -> None:
     doc.add_paragraph("How to use Document 01", style="Heading 1")
     doc.add_paragraph(
         "This volume is the starting point for the BISP Solutions Oracle EPM Automation Platform documentation. "
-        "It explains the product in business language before later documents explore installation, individual operations, data review, administration, the AI assistant, and software architecture.",
+        "It explains the product in business language and highlights how the EPM Assistant turns a user's objective into live Oracle discovery, clear choices, reviewed inputs, and governed execution.",
         style="Lead",
     )
 
@@ -830,8 +878,8 @@ def add_front_matter(doc: Document) -> None:
         [
             ["Document", "01 - Product Introduction and Beginner's Guide"],
             ["Product", "BISP Solutions Oracle EPM Automation Platform"],
-            ["Version", "1.0"],
-            ["Publication date", "14 August 2026"],
+            ["Version", "1.1"],
+            ["Publication date", "3 September 2026"],
             ["Status", "Current implemented baseline"],
             ["Scope", "Modern React application and its shared production backend"],
         ],
@@ -845,6 +893,7 @@ def add_front_matter(doc: Document) -> None:
         ["Chapter", "What you will learn"],
         [
             ["1. Welcome", "What the platform is and the value it provides."],
+            ["AI spotlight", "Why the EPM Assistant is the intelligent front door and what it can do today."],
             ["2. Why it exists", "Which manual problems and risks it reduces."],
             ["3. People and roles", "Who uses the platform and what each role sees."],
             ["4. Capabilities", "What has been implemented in the modern application."],
@@ -910,6 +959,74 @@ def build_document() -> Path:
         "It is not an uncontrolled bot; state-changing work is validated, reviewed, approved, queued, and audited.",
     ])
 
+    ai_kicker = doc.add_paragraph("AI SPOTLIGHT", style="Kicker")
+    ai_kicker.paragraph_format.page_break_before = True
+    doc.add_paragraph("The EPM Assistant is the intelligent front door", style="Heading 1")
+    doc.add_paragraph(
+        "A user can begin with a business objective instead of a technical menu. The assistant helps translate that objective into live Oracle facts, relevant artifacts, structured choices, and a safely reviewed next action.",
+        style="Lead",
+    )
+    add_callout(
+        doc,
+        "The product difference",
+        "The AI does more than answer questions. It works inside a governed control plane that can inspect live context, recommend current Oracle artifacts, collect exact inputs, and start supported work only after explicit human approval.",
+        fill=ORANGE_LIGHT,
+        accent=ORANGE,
+    )
+    add_figure(
+        doc,
+        assets["ai_copilot"],
+        "Figure 2. The assistant interprets; the platform validates, governs, executes, and records.",
+        "AI operating model showing Ask, Assist, and Govern leading to an approved result, with a guardrail that state-changing Oracle work cannot run without button approval.",
+    )
+    add_heading(doc, "What the assistant can do today")
+    add_table(
+        doc,
+        ["Capability", "What the user experiences"],
+        [
+            ["Explain and guide", "Ask what the platform can do, where to work, or how a Planning activity fits into the lifecycle."],
+            ["Inspect live context", "Read the connected application summary, available operations, recent executions, retained failure evidence, cubes, dimensions, and members."],
+            ["Recommend Oracle artifacts", "Describe a task and receive likely Business Rule, Data Map, Pipeline, Data Integration, or import-job matches from current platform catalogs."],
+            ["Collect governed inputs", "Use guided cards for files, periods, modes, RTPs, Pipeline variables, Data Map controls, Cube Refresh jobs, and variable values."],
+            ["Review Planning data", "Build a bounded read-only cube slice or compare matching source and target slices when the connected Oracle release exposes the required metadata."],
+            ["Prepare one operation", "Review the exact artifact, inputs, business purpose, risk, and effect before an approval button is enabled."],
+            ["Plan several operations", "Prefer an existing Oracle Pipeline when it already owns the sequence, or prepare an ordered standalone flow of two to twelve supported operations."],
+            ["Run after approval", "Queue the approved operation or flow, monitor it through the durable worker, stop a flow at the first failure, and retain the result in Jobs & Activity."],
+        ],
+        [2500, 6860],
+    )
+    add_heading(doc, "Supported approved actions")
+    add_para(
+        doc,
+        "After the signed-in user reviews the exact proposal and selects the approval control, the assistant can submit Business Rules, Data Maps, Pipelines, Data Integrations, Planning Data Imports, Metadata Imports, Cube Refresh jobs, substitution-variable changes, user-variable changes, and approved standalone flows.",
+    )
+    add_callout(
+        doc,
+        "Human authority remains final",
+        "Typing yes in chat is not execution approval. Only the dedicated approval control can authorize a state-changing action, and the assistant cannot exceed the signed-in user's permissions.",
+        fill=GOLD_LIGHT,
+        accent=GOLD,
+    )
+    conversation_heading = doc.add_paragraph("Three realistic conversations", style="Heading 2")
+    conversation_heading.paragraph_format.page_break_before = True
+    add_table(
+        doc,
+        ["User request", "How the assistant helps"],
+        [
+            ["Run the travel-expense calculation", "Matches the request to current Business Rules, lets the user choose the correct rule, collects registered RTP values when available, and presents one final approval."],
+            ["Push compensation data to reporting", "Treats data push as a Data Map, recommends matching maps, shows clear-target and override controls, and keeps Data Import separate."],
+            ["Load actuals, calculate, and publish", "Checks whether a registered Oracle Pipeline already represents the sequence. If not, the user may configure a governed standalone flow whose steps execute in order and stop on failure."],
+        ],
+        [3300, 6060],
+    )
+    add_heading(doc, "What makes the AI dependable")
+    add_bullets(doc, [
+        "Recommendations are grounded in current platform catalogs and live Oracle context instead of relying only on model memory.",
+        "The language model interprets the request, while deterministic application services validate identifiers, inputs, permissions, and execution rules.",
+        "LangGraph checkpoints preserve the governed conversation state, and approved work is retained with decisions, tool activity, execution status, and evidence.",
+        "Gemini and Groq are supported behind a provider-neutral interface, so the selected model provider can change without redesigning the Oracle control plane.",
+        "Release evaluations test routing, recommendation quality, least-privilege behavior, and safety expectations before agent changes are promoted.",
+    ])
     add_chapter(
         doc,
         2,
@@ -928,7 +1045,7 @@ def build_document() -> Path:
         "Require review and approval before an operation changes Oracle state.",
         "Run long work in the background and retain status, diagnostics, and outputs.",
         "Make common tasks available through mouse-driven choices wherever Oracle exposes enough information.",
-        "Provide an AI assistant that explains and prepares governed work without bypassing controls.",
+        "Provide an AI assistant that explains, prepares, and submits explicitly approved governed work without bypassing controls.",
     ])
     add_figure(
         doc,
@@ -998,6 +1115,15 @@ def build_document() -> Path:
         ],
         [2500, 6860],
     )
+    add_heading(doc, "AI-powered Planning assistance")
+    add_bullets(doc, [
+        "Provider-neutral conversations using LangGraph with a configured Gemini or Groq model.",
+        "Durable conversation history and checkpoints so clarification, input collection, and approval can safely continue across requests.",
+        "Deterministic routing for common operation requests so a clear request does not depend only on model phrasing or tool choice.",
+        "Live artifact matching, catalog synchronization, and governed exact-identifier registration for supported Pipeline and Data Integration recovery paths.",
+        "Structured cards that preserve an already identified artifact and ask only for missing required inputs.",
+        "Direct approved execution for supported operations and ordered standalone flows, with retained tool activity and execution evidence.",
+    ])
     add_heading(doc, "Standalone Oracle operations")
     add_table(
         doc,
@@ -1026,6 +1152,7 @@ def build_document() -> Path:
         "Schedules for repeatable approved operations.",
         "Optional success and failure email notifications.",
         "Excel-triggered Pipeline execution through the versioned API.",
+        "AI conversations, recommendations, approvals, and tool activity stored as auditable business records.",
     ])
 
     add_chapter(
@@ -1044,7 +1171,7 @@ def build_document() -> Path:
             ["Oracle connection", "Oracle Planning REST APIs and Requests", "Authenticates, discovers artifacts, starts jobs, and reads results."],
             ["Business records", "PostgreSQL, SQLAlchemy and Alembic", "Stores users, cycles, tasks, schedules, executions, conversations, and auditable state using versioned schemas."],
             ["Background work", "Durable execution worker", "Runs long Oracle jobs outside the browser request and safely claims queued work."],
-            ["AI assistance", "LangGraph with Gemini or Groq", "Provides stateful conversations and tool-governed preparation while keeping providers replaceable."],
+            ["AI assistance", "LangGraph with Gemini or Groq", "Provides stateful conversations, governed preparation, and explicitly approved execution while keeping providers replaceable."],
         ],
         [1900, 2500, 4960],
     )
@@ -1060,11 +1187,34 @@ def build_document() -> Path:
         fill=TEAL_LIGHT,
         accent=TEAL,
     )
+    add_heading(doc, "How the EPM Assistant participates")
+    add_para(
+        doc,
+        "The EPM Assistant is a governed entry point to the same platform services, not a separate Oracle automation engine. It can discover live artifacts, clarify a business request, collect structured inputs, and prepare either one supported operation or an ordered multi-operation flow.",
+    )
+    add_bullets(doc, [
+        "Read-only questions and permitted evidence checks may complete without an execution approval.",
+        "Business Rules, Pipelines, Data Integrations, native data and metadata imports, Data Maps, Cube Refresh jobs, substitution variables, user variables, and supported standalone flows can be submitted only after the signed-in user reviews and explicitly approves the exact proposal.",
+        "Files, periods, modes, runtime variables, RTP values, map controls, and variable changes are collected through deterministic fields and revalidated before queueing.",
+        "Conversation text never counts as approval, and the assistant cannot bypass permissions, invent an Oracle artifact, generate arbitrary REST calls, schedule work, or silently retry a write.",
+        "Report requests currently hand off to the governed Reports workspace; natural-language Data Review remains read-only and depends on metadata exposed by the connected Oracle release.",
+    ])
+    add_heading(doc, "Why LangGraph is used")
+    add_para(
+        doc,
+        "LangGraph provides an explicit state machine for the conversation. It separates model reasoning from tool execution and preserves the current clarification, selected artifact, collected inputs, and approval interrupt in PostgreSQL. This makes the agent resumable, testable, and less dependent on one model provider's conversational memory.",
+    )
+    add_bullets(doc, [
+        "Gemini and Groq implement the same provider contract, so changing the model does not change platform permissions or Oracle execution rules.",
+        "A strict tool allow-list exposes only approved platform capabilities; the model cannot construct an arbitrary REST request.",
+        "Deterministic intent handling protects common Business Rule, Data Map, Pipeline, Data Integration, Metadata Import, variable, multi-step, and Data Review journeys from provider variation.",
+        "Versioned evaluation cases check intent routing, artifact recommendations, least-privilege tool exposure, and critical safety boundaries before release.",
+    ])
     add_heading(doc, "The governed execution journey")
     add_figure(
         doc,
         assets["execution"],
-        "Figure 2. A common controlled path is used for state-changing Oracle work.",
+        "Figure 3. A common controlled path is used for state-changing Oracle work.",
         "Six-step governed execution flow: Choose, Verify, Prepare, Review, Approve, and Execute.",
     )
     add_heading(doc, "Why a background worker is important")
@@ -1086,7 +1236,7 @@ def build_document() -> Path:
     add_figure(
         doc,
         assets["lifecycle"],
-        "Figure 3. Example sequence from pre-cycle readiness through reporting and completion.",
+        "Figure 4. Example sequence from pre-cycle readiness through reporting and completion.",
         "Timeline showing D-2 Prepare, D-1 Open, Day 1 Load, Day 2 Calculate, Day 3 Publish, Day 4 Review, and Close Report.",
     )
     add_heading(doc, "The lifecycle in business language")
@@ -1101,7 +1251,7 @@ def build_document() -> Path:
     ])
     add_heading(doc, "Oracle Pipeline versus the platform")
     add_para(doc, "An Oracle Pipeline remains the best place to configure a repeatable multi-stage technical sequence such as integrations, rules, Data Maps, file stages, and Oracle notifications. The BISP platform should not duplicate work that Oracle already owns inside that Pipeline.")
-    add_para(doc, "The platform adds the business experience around it: role-aware access, task context, live input discovery, file choice, approval, scheduling, monitoring, evidence, notifications, reporting, and AI-assisted preparation.")
+    add_para(doc, "The platform adds the business experience around it: role-aware access, task context, live input discovery, file choice, approval, scheduling, monitoring, evidence, notifications, reporting, and AI-assisted preparation and approved execution.")
     add_table(
         doc,
         ["Oracle Pipeline owns", "The BISP platform adds"],
@@ -1130,7 +1280,7 @@ def build_document() -> Path:
     add_figure(
         doc,
         assets["navigation"],
-        "Figure 4. A simple decision guide for choosing the right modern workspace.",
+        "Figure 5. A simple decision guide for choosing the right modern workspace.",
         "Navigation decision diagram routing assigned work to My Work, one Oracle action to Operations, checking numbers to Data Review, and guidance to EPM Assistant.",
     )
     add_heading(doc, "Navigation reference")
@@ -1144,7 +1294,7 @@ def build_document() -> Path:
             ["Data Review", "You need to inspect or compare numbers.", "Choose a live cube, dimensions, members, and load the grid."],
             ["Reports", "You need a downloadable business output.", "Choose the approved definition or supported form export and generate Excel."],
             ["Jobs & Activity", "A run is queued, running, completed, or failed.", "Inspect steps, Oracle IDs, errors, logs, and artifacts."],
-            ["EPM Assistant", "You need an explanation or help preparing work.", "Ask in business language, confirm the artifact, provide guided inputs, and approve."],
+            ["EPM Assistant", "You need guidance or want to prepare a governed operation or flow.", "Ask in business language, confirm live artifacts and guided inputs, then explicitly approve supported execution."],
         ],
         [1800, 3500, 4060],
     )
@@ -1173,6 +1323,20 @@ def build_document() -> Path:
         "Audit attribution for manual, scheduled, API, Excel, and AI-agent requests.",
         "AI tool permissions that cannot exceed the signed-in user's platform permissions.",
     ])
+    add_heading(doc, "How AI authority is constrained")
+    add_table(
+        doc,
+        ["Control", "Guaranteed behavior"],
+        [
+            ["Model versus platform", "The model may explain or propose. Deterministic application code validates tool names, arguments, artifacts, inputs, permissions, and execution."],
+            ["Live facts", "The assistant uses allow-listed tools for environment, catalog, cube, member, history, and evidence facts instead of inventing them."],
+            ["Identity and permissions", "Every conversation and action belongs to the signed-in user. Tool availability and final execution remain limited by that user's platform role."],
+            ["Human approval", "Only the dedicated approval control authorizes a supported state-changing action. Chat text is never treated as approval."],
+            ["Execution isolation", "Approved work enters the same durable queue and worker used by the web application, schedules, and API clients."],
+            ["Evidence", "Conversation messages, tool activity, decisions, execution IDs, step results, errors, and artifacts remain available for audit and diagnosis."],
+        ],
+        [2500, 6860],
+    )
     add_heading(doc, "What still requires Oracle configuration")
     add_table(
         doc,
@@ -1193,9 +1357,11 @@ def build_document() -> Path:
         "Some Oracle artifacts must already exist before they can be run. The platform focuses on governed execution, not complete Oracle application design.",
         "The Data Review grid is designed for review and reconciliation. It is not a full replacement for every Smart View or Planning-form feature.",
         "The EPM Assistant can misunderstand a request. It must use permitted tools, live choices, guided inputs, and human approval; users should still verify the exact artifact and scope.",
+        "The EPM Assistant cannot approve its own proposal, interpret chat text as approval, schedule work, delete Oracle objects, generate arbitrary REST calls, or bypass platform and Oracle permissions.",
         "The platform cannot guarantee that source business data is correct. It can load, compare, monitor, and expose differences, but business ownership remains essential.",
     ])
-    add_heading(doc, "When a capability is not available")
+    unavailable_heading = doc.add_paragraph("When a capability is not available", style="Heading 2")
+    unavailable_heading.paragraph_format.page_break_before = True
     add_numbered(doc, [
         "Check the connected environment and synchronize the Oracle catalog again.",
         "Confirm that the artifact exists in the current Oracle application and that the configured Oracle account can access it.",

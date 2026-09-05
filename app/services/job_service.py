@@ -23,6 +23,8 @@ class JobService:
     """Retrieve normalized status and diagnostic details for Planning jobs."""
 
     _CHILD_JOB_PATTERN = re.compile(r"/childjobs/([^/]+)/details")
+    _DETAIL_PAGE_SIZE = 200
+    _MAX_DETAIL_ITEMS = 10_000
 
     def __init__(
         self,
@@ -131,15 +133,107 @@ class JobService:
         job_id: int,
     ) -> JobRecordStatistics | None:
         """Return official record counts when the job type exposes them."""
-        details = self.get_job_details(job_id, limit=1000)
+        details = self.get_all_job_details(job_id)
         return JobRecordStatistics.from_response(details)
+
+    def get_all_job_details(
+        self,
+        job_id: int,
+        *,
+        message_type: str | None = None,
+    ) -> Mapping[str, Any]:
+        """Retrieve every available Job Details page with a safety bound."""
+        return self._all_detail_pages(
+            lambda offset, limit: self.get_job_details(
+                job_id,
+                message_type=message_type,
+                offset=offset,
+                limit=limit,
+            )
+        )
+
+    def get_all_child_job_details(
+        self,
+        job_id: int,
+        child_job_id: str,
+        *,
+        message_type: str | None = None,
+    ) -> Mapping[str, Any]:
+        """Retrieve every available message page for one metadata child job."""
+        return self._all_detail_pages(
+            lambda offset, limit: self.get_child_job_details(
+                job_id,
+                child_job_id,
+                message_type=message_type,
+                offset=offset,
+                limit=limit,
+            )
+        )
+
+    def get_execution_evidence(self, job_id: int) -> dict[str, Any]:
+        """Collect counters and Oracle messages for a completed import job."""
+        details = self.get_all_job_details(job_id)
+        statistics = JobRecordStatistics.from_response(details)
+        messages: list[dict[str, Any]] = []
+        child_jobs_seen: set[str] = set()
+        items = details.get("items", [])
+        if isinstance(items, list):
+            for item in items:
+                if not isinstance(item, Mapping):
+                    continue
+                normalized_message = self._message_payload(item)
+                if normalized_message is not None:
+                    messages.append(normalized_message)
+                child_job_id = self._child_job_id(item)
+                if child_job_id is None or child_job_id in child_jobs_seen:
+                    continue
+                child_jobs_seen.add(child_job_id)
+                dimension_name = self._optional_text(
+                    item.get("dimensionName")
+                )
+                try:
+                    child_details = self.get_all_child_job_details(
+                        job_id,
+                        child_job_id,
+                    )
+                except EPMError as exc:
+                    self._logger.warning(
+                        "Child-job evidence unavailable: job_id=%s, "
+                        "child_job_id=%s, error=%s",
+                        job_id,
+                        child_job_id,
+                        exc,
+                    )
+                    continue
+                child_items = child_details.get("items", [])
+                if not isinstance(child_items, list):
+                    continue
+                for message in child_items:
+                    if not isinstance(message, Mapping):
+                        continue
+                    normalized_message = self._message_payload(
+                        message,
+                        child_job_id=child_job_id,
+                        dimension_name=dimension_name,
+                    )
+                    if normalized_message is not None:
+                        messages.append(normalized_message)
+
+        return {
+            "record_statistics": (
+                statistics.to_payload() if statistics is not None else None
+            ),
+            "oracle_messages": messages,
+            "detail_item_count": len(items) if isinstance(items, list) else 0,
+            "child_job_count": len(child_jobs_seen),
+        }
 
     def get_failure_diagnostics(
         self,
         job: JobResult,
     ) -> JobDiagnostics:
         """Collect top-level and child-job error details when available."""
-        details = self.get_job_details(
+        details = self.get_all_job_details(
             job.job_id,
             message_type="ERROR",
         )
@@ -154,7 +248,7 @@ class JobService:
                 if child_job_id is None:
                     continue
                 try:
-                    child_details = self.get_child_job_details(
+                    child_details = self.get_all_child_job_details(
                         job.job_id,
                         child_job_id,
                         message_type="ERROR",
@@ -205,6 +299,66 @@ class JobService:
                 "Oracle Planning returned unexpected child-job details."
             )
         return response
+
+    def _all_detail_pages(self, fetch_page) -> Mapping[str, Any]:
+        offset = 0
+        items: list[Mapping[str, Any]] = []
+        first_page: dict[str, Any] | None = None
+        while len(items) < self._MAX_DETAIL_ITEMS:
+            page = fetch_page(offset, self._DETAIL_PAGE_SIZE)
+            if first_page is None:
+                first_page = dict(page)
+            raw_items = page.get("items", [])
+            page_items = (
+                [item for item in raw_items if isinstance(item, Mapping)]
+                if isinstance(raw_items, list)
+                else []
+            )
+            items.extend(page_items)
+            if len(page_items) < self._DETAIL_PAGE_SIZE:
+                break
+            offset += len(page_items)
+        if len(items) >= self._MAX_DETAIL_ITEMS:
+            self._logger.warning(
+                "Oracle Job Details reached the retained evidence limit of %s items.",
+                self._MAX_DETAIL_ITEMS,
+            )
+        result = first_page or {}
+        result["items"] = items[: self._MAX_DETAIL_ITEMS]
+        return result
+
+    @staticmethod
+    def _message_payload(
+        item: Mapping[str, Any],
+        *,
+        child_job_id: str | None = None,
+        dimension_name: str | None = None,
+    ) -> dict[str, Any] | None:
+        text = JobService._optional_text(
+            item.get("msgText") or item.get("message")
+        )
+        if text is None:
+            return None
+        return {
+            "message_type": JobService._optional_text(
+                item.get("msgType") or item.get("messageType")
+            )
+            or "INFO",
+            "category": JobService._optional_text(
+                item.get("msgCategory") or item.get("messageCategory")
+            ),
+            "message": text,
+            "dimension_name": dimension_name
+            or JobService._optional_text(item.get("dimensionName")),
+            "child_job_id": child_job_id,
+        }
+
+    @staticmethod
+    def _optional_text(value: Any) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
 
     @staticmethod
     def _validate_job_id(job_id: int) -> int:

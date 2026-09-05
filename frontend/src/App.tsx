@@ -188,6 +188,20 @@ export function App() {
     }
   }
 
+  async function oracleLogin(username: string, password: string) {
+    if (!bootstrap) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.oracleLogin(username, password, bootstrap.csrf_token);
+      await load();
+    } catch (reason) {
+      setError(message(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function bootstrapAdministrator(input: InitialAdministratorInput) {
     if (!bootstrap) return;
     setBusy(true);
@@ -518,10 +532,34 @@ export function App() {
 
   async function checkHealth() {
     setHealthBusy(true);
+    let environmentApplication = bootstrap?.environment?.application_name;
+    let deploymentMode = bootstrap?.environment?.deployment_mode;
     try {
-      setHealth(await api.health());
+      const configuration = await api.environmentConfiguration().catch(() => null);
+      environmentApplication = configuration?.selected_application
+        ?? configuration?.active_application
+        ?? environmentApplication;
+      deploymentMode = configuration?.deployment_mode ?? deploymentMode;
+      const result = await api.health();
+      setHealth({
+        ...result,
+        application: result.application ?? environmentApplication,
+        deployment_mode: result.deployment_mode ?? deploymentMode
+      });
     } catch (reason) {
-      setHealth({ status: "unavailable", details: message(reason) });
+      setHealth({
+        status: "unavailable",
+        application: environmentApplication,
+        active_application: bootstrap?.environment?.application_name,
+        restart_required: Boolean(
+          environmentApplication
+          && bootstrap?.environment?.application_name
+          && environmentApplication.toLowerCase()
+            !== bootstrap.environment.application_name.toLowerCase()
+        ),
+        deployment_mode: deploymentMode,
+        details: message(reason)
+      });
     } finally {
       setHealthBusy(false);
     }
@@ -530,7 +568,7 @@ export function App() {
   if (loading) return <FullPageLoading />;
   if (!bootstrap) return <UnavailableState error={error ?? "The platform could not be initialized."} onRetry={refresh} />;
   if (!bootstrap.authenticated) {
-    return <LoginPage productName={bootstrap.product.name} company={bootstrap.product.company} busy={busy} error={error} requiresBootstrap={bootstrap.requires_bootstrap} identityAuthentication={bootstrap.identity_authentication} onLogin={login} onBootstrap={bootstrapAdministrator} />;
+    return <LoginPage productName={bootstrap.product.name} company={bootstrap.product.company} busy={busy} error={error} requiresBootstrap={bootstrap.requires_bootstrap} identityAuthentication={bootstrap.identity_authentication} onLogin={login} onOracleLogin={oracleLogin} onBootstrap={bootstrapAdministrator} />;
   }
   if (!home) return <UnavailableState error={error ?? "Your Planning workspace is unavailable."} onRetry={refresh} />;
 

@@ -18,7 +18,10 @@ class _Client:
         self.closed = False
 
     def get(self, endpoint: str, *, params=None):
-        if endpoint.endswith("roleassignmentreport/user"):
+        return {"status": 0, "details": []}
+
+    def post(self, endpoint: str, *, payload=None, params=None):
+        if endpoint.endswith("users/list"):
             return {
                 "status": 0,
                 "details": [
@@ -27,10 +30,10 @@ class _Client:
                         "firstname": "Finance",
                         "lastname": "Planner",
                         "email": "planner@example.com",
-                        "roles": [
+                        "applicationroles": [
                             {
                                 "rolename": self.role_name,
-                                "roletype": "Application",
+                                "direct": "Yes",
                                 "grantedthroughgroup": "",
                             }
                         ],

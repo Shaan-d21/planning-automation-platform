@@ -54,6 +54,92 @@ def aggregate_record_statistics(
     }
 
 
+def aggregate_import_evidence(
+    step_details: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Project structured import evidence retained across workflow steps."""
+    lineage: Mapping[str, Any] | None = None
+    messages: list[dict[str, Any]] = []
+    rejected_records: list[dict[str, Any]] = []
+    artifacts: list[dict[str, Any]] = []
+    notices: list[str] = []
+    seen_messages: set[tuple[str, str, str, str]] = set()
+    seen_artifacts: set[str] = set()
+    for details in step_details:
+        raw_lineage = details.get("load_lineage")
+        if lineage is None and isinstance(raw_lineage, Mapping):
+            lineage = raw_lineage
+        raw_messages = details.get("oracle_messages")
+        if isinstance(raw_messages, list):
+            for item in raw_messages:
+                if not isinstance(item, Mapping):
+                    continue
+                payload = {
+                    "message_type": _safe_text(item.get("message_type"), limit=30) or "INFO",
+                    "category": _safe_text(item.get("category"), limit=200),
+                    "message": _safe_text(item.get("message"), limit=4000) or "",
+                    "dimension_name": _safe_text(item.get("dimension_name"), limit=200),
+                    "child_job_id": _safe_text(item.get("child_job_id"), limit=100),
+                }
+                key = tuple(str(payload[field] or "") for field in ("message_type", "category", "message", "dimension_name"))
+                if payload["message"] and key not in seen_messages:
+                    messages.append(payload)
+                    seen_messages.add(key)
+        raw_rejections = details.get("rejected_records")
+        if isinstance(raw_rejections, list):
+            rejected_records.extend(
+                dict(item) for item in raw_rejections if isinstance(item, Mapping)
+            )
+        raw_artifacts = details.get("artifacts")
+        if isinstance(raw_artifacts, list):
+            for item in raw_artifacts:
+                if not isinstance(item, Mapping):
+                    continue
+                artifact_id = str(item.get("artifact_id") or "")
+                if not artifact_id or artifact_id in seen_artifacts:
+                    continue
+                artifacts.append(
+                    {
+                        "artifact_id": artifact_id,
+                        "name": _safe_text(item.get("name"), limit=255) or "Oracle artifact",
+                        "kind": _safe_text(item.get("kind"), limit=80) or "ORACLE_ARTIFACT",
+                        "size_bytes": _counter(item.get("size_bytes")),
+                    }
+                )
+                seen_artifacts.add(artifact_id)
+        for notice_key in ("artifact_message", "evidence_message"):
+            notice = _safe_text(details.get(notice_key), limit=500)
+            if notice and notice not in notices:
+                notices.append(notice)
+    return {
+        "lineage": _safe_lineage(lineage),
+        "oracle_messages": messages[:2000],
+        "rejected_records": rejected_records[:100],
+        "artifacts": artifacts[:200],
+        "notices": notices,
+    }
+
+
+def _safe_lineage(value: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    allowed = (
+        "operation",
+        "source_kind",
+        "source_file",
+        "staging_location",
+        "oracle_job_name",
+        "target_application",
+        "target_system",
+        "origin_note",
+    )
+    return {
+        key: _safe_text(value.get(key), limit=500)
+        for key in allowed
+        if value.get(key) is not None
+    }
+
+
 def workflow_failure_details(exc: Exception) -> dict[str, Any]:
     """Project safe Oracle failure evidence into a durable workflow step."""
     if not isinstance(exc, JobFailedError):
@@ -62,6 +148,7 @@ def workflow_failure_details(exc: Exception) -> dict[str, Any]:
     evidence: dict[str, Any] = {
         "job_id": exc.job.job_id,
         "status": exc.job.descriptive_status or exc.job.status,
+        **dict(exc.evidence),
     }
     candidates: list[Mapping[str, Any]] = [exc.job.raw_response]
     if exc.diagnostics is not None and isinstance(
@@ -78,6 +165,24 @@ def workflow_failure_details(exc: Exception) -> dict[str, Any]:
         if statistics is not None:
             evidence["record_statistics"] = statistics.to_payload()
             break
+    if exc.diagnostics is not None and exc.diagnostics.messages:
+        evidence.setdefault(
+            "oracle_messages",
+            [
+                {
+                    "message_type": str(
+                        item.get("msgType") or item.get("messageType") or "ERROR"
+                    ),
+                    "category": item.get("msgCategory") or item.get("messageCategory"),
+                    "message": str(item.get("msgText") or item.get("message") or ""),
+                    "dimension_name": item.get("dimensionName"),
+                    "child_job_id": item.get("childJobId"),
+                }
+                for item in exc.diagnostics.messages
+                if isinstance(item, Mapping)
+                and (item.get("msgText") or item.get("message"))
+            ],
+        )
     return evidence
 
 
@@ -154,6 +259,10 @@ def agent_execution_evidence(run: WorkflowRun) -> dict[str, Any]:
             limit=200,
         ),
         "trigger_source": run.trigger_source.value,
+        "executed_by": _safe_text(
+            run.oracle_execution_username or "Not recorded",
+            limit=254,
+        ),
         "error_message": _safe_text(run.error_message),
         "record_statistics": safe_statistics,
         "steps": steps,

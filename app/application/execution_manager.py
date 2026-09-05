@@ -123,6 +123,9 @@ class PlanningProcessExecutionManager:
                     trigger_source=(
                         actor.trigger_source if actor else TriggerSource.API
                     ),
+                    oracle_execution_username=(
+                        self._settings.oracle_execution_username
+                    ),
                 )
             )
         except Exception:

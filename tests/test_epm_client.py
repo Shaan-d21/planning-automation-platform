@@ -207,6 +207,29 @@ def test_post_binary_uses_octet_stream_and_environment_root(
     )
 
 
+def test_get_binary_preserves_repository_content(settings: Settings) -> None:
+    session = Mock(spec=requests.Session)
+    session.headers = {}
+    response = json_response(200, {})
+    response.headers = {"Content-Type": "application/octet-stream"}
+    response.content = b"PK\x03\x04calc-manager"
+    session.request.return_value = response
+
+    content = EPMClient(settings, session=session).get_binary(
+        "interop/rest/test/export.zip/contents"
+    )
+
+    assert content == b"PK\x03\x04calc-manager"
+    session.request.assert_called_once_with(
+        method="GET",
+        url=(
+            "https://example.oraclecloud.com/interop/rest/test/"
+            "export.zip/contents"
+        ),
+        timeout=10,
+        verify=True,
+        params=None,
+    )
 def test_data_integration_endpoint_uses_environment_root(
     settings: Settings,
 ) -> None:

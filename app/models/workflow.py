@@ -56,3 +56,4 @@ class WorkflowRun:
     initiated_by: str | None = None
     initiated_by_display: str | None = None
     trigger_source: TriggerSource = TriggerSource.API
+    oracle_execution_username: str | None = None

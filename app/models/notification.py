@@ -12,6 +12,7 @@ class TaskNotificationStatus(StrEnum):
 
     SUCCESS = "SUCCESS"
     FAILED = "FAILED"
+    SKIPPED = "SKIPPED"
 
 
 @dataclass(frozen=True, slots=True)

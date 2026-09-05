@@ -147,7 +147,7 @@ def test_get_record_statistics_aggregates_oracle_dimension_details() -> None:
     assert statistics.to_payload()["source"] == "ORACLE_JOB_DETAILS"
     client.get.assert_called_once_with(
         "HyperionPlanning/rest/v3/applications/Vision/jobs/224/details",
-        params={"offset": 0, "limit": 1000},
+        params={"offset": 0, "limit": 200},
     )
 
 
@@ -158,3 +158,57 @@ def test_get_record_statistics_returns_none_when_oracle_has_no_counters() -> Non
     }
 
     assert JobService(client).get_record_statistics(224) is None
+
+
+def test_execution_evidence_pages_details_and_reads_child_messages() -> None:
+    client = make_client()
+    first_page = [
+        {
+            "dimensionName": "Account" if index == 0 else f"Dimension {index}",
+            "recordsRead": 1,
+            "recordsProcessed": 1,
+            "recordsRejected": 0,
+            "links": (
+                [{
+                    "rel": "child-job-details",
+                    "href": "https://example/jobs/224/childjobs/12/details",
+                }]
+                if index == 0
+                else []
+            ),
+        }
+        for index in range(200)
+    ]
+    client.get.side_effect = [
+        {"items": first_page},
+        {
+            "items": [{
+                "dimensionName": "Entity",
+                "recordsRead": 2,
+                "recordsProcessed": 1,
+                "recordsRejected": 1,
+            }]
+        },
+        {
+            "items": [{
+                "msgType": "WARN",
+                "msgCategory": "Metadata Import",
+                "msgText": "One member was rejected.",
+            }]
+        },
+    ]
+
+    evidence = JobService(client).get_execution_evidence(224)
+
+    assert evidence["record_statistics"]["records_read"] == 202
+    assert evidence["record_statistics"]["records_rejected"] == 1
+    assert evidence["detail_item_count"] == 201
+    assert evidence["child_job_count"] == 1
+    assert evidence["oracle_messages"] == [{
+        "message_type": "WARN",
+        "category": "Metadata Import",
+        "message": "One member was rejected.",
+        "dimension_name": "Account",
+        "child_job_id": "12",
+    }]
+    assert client.get.call_args_list[1].kwargs["params"]["offset"] == 200

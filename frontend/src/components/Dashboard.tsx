@@ -1,3 +1,5 @@
+import { useState } from "react";
+
 import type {
   BootstrapResponse,
   EnvironmentHealth,
@@ -8,6 +10,7 @@ import type {
   TaskStatus
 } from "../api/types";
 import { Icon } from "./Icon";
+import { EnvironmentSetupDialog } from "./EnvironmentSetupDialog";
 import { PlanningTaskCard, taskOrder } from "./PlanningTaskCard";
 
 interface DashboardProps {
@@ -157,18 +160,53 @@ function SummaryMetric({ label, value, tone, icon }: { label: string; value: num
 
 function EnvironmentPanel({ bootstrap, health, busy, onCheck }: { bootstrap: BootstrapResponse; health: EnvironmentHealth | null; busy: boolean; onCheck: () => Promise<void> }) {
   const available = health?.status === "ok";
+  const checked = Boolean(health);
+  const restartRequired = Boolean(health?.restart_required);
+  const application = health?.application || bootstrap.environment?.application_name || "Not configured";
+  const deployment = health?.deployment_mode || bootstrap.environment?.deployment_mode || "Unknown";
+  const statusTitle = busy
+    ? "Checking Oracle connection"
+    : available
+      ? restartRequired ? "Connected · restart required" : "Connected to Oracle Planning"
+      : checked ? "Connection needs attention" : "Connection not checked";
+  const statusDescription = busy
+    ? `Verifying access to ${application} with the configured automation identity.`
+    : available
+      ? restartRequired
+        ? `${application} is reachable. Restart the API and workers before running operations in this application.`
+        : `${application} responded successfully and is ready for governed automation.`
+      : checked
+        ? `The platform could not verify ${application}. Review the diagnostic below or manage the environment.`
+        : "Run a read-only check to verify the configured URL, credentials, and Planning application.";
+  const [setupOpen, setSetupOpen] = useState(false);
   return (
-    <section className="environment-panel" aria-label="Environment health">
-      <div className={`environment-state ${health ? available ? "is-healthy" : "is-unavailable" : "is-unchecked"}`}>
-        <span className="environment-state__icon"><Icon name={available ? "check" : health ? "alert" : "activity"} /></span>
-        <div><small>Environment health</small><strong>{busy ? "Checking Oracle…" : available ? "Connected" : health ? "Connection needs attention" : "Ready to verify"}</strong></div>
+    <><section className={`environment-panel${available ? " is-healthy" : checked ? " is-unavailable" : " is-unchecked"}`} aria-label="Environment health" aria-busy={busy}>
+      <header className="environment-panel__header">
+        <div className="environment-state">
+          <span className="environment-state__icon"><Icon name={available ? restartRequired ? "alert" : "check" : checked ? "alert" : "activity"} /></span>
+          <div>
+            <small>Environment health</small>
+            <strong>{statusTitle}</strong>
+            <p>{statusDescription}</p>
+          </div>
+        </div>
+        <span className="environment-status-badge">{busy ? "Checking" : available ? restartRequired ? "Restart required" : "Healthy" : checked ? "Attention" : "Not checked"}</span>
+      </header>
+
+      <div className="environment-details" aria-label="Oracle environment details">
+        <div className="environment-detail"><small>Planning application</small><strong>{application}</strong>{restartRequired && health?.active_application && <span>Currently active: {health.active_application}</span>}</div>
+        <div className="environment-detail"><small>Deployment</small><strong>{deployment}</strong></div>
+        <div className="environment-detail"><small>Automation identity</small><strong>{bootstrap.environment?.execution_account || "Not configured"}</strong></div>
+        <div className="environment-detail"><small>Last verification</small><strong>{busy ? "In progress" : health ? "Just now" : "Not checked"}</strong></div>
       </div>
-      <div className="environment-detail"><small>Application</small><strong>{bootstrap.environment?.application_name || "Not configured"}</strong></div>
-      <div className="environment-detail"><small>Deployment</small><strong>{bootstrap.environment?.deployment_mode || "Unknown"}</strong></div>
-      <div className="environment-detail"><small>Last check</small><strong>{health ? "Just now" : "Not checked"}</strong></div>
-      <button className="button button--quiet" type="button" disabled={busy} onClick={onCheck}>{busy ? <span className="spinner spinner--dark" /> : <Icon name="refresh" />} {health ? "Check again" : "Check connection"}</button>
-      {health?.details && <p className="environment-error">{health.details}</p>}
-    </section>
+
+      {health?.details && <aside className="environment-error" role="alert"><span><Icon name="alert" /></span><div><strong>Oracle connection check failed</strong><p>{health.details}</p></div></aside>}
+
+      <div className="environment-actions">
+        <button className="button button--primary" type="button" disabled={busy} onClick={onCheck}>{busy ? <span className="spinner" /> : <Icon name="refresh" />} {health ? "Check again" : "Check connection"}</button>
+        <button className="button button--quiet" type="button" disabled={busy} onClick={() => setSetupOpen(true)}><Icon name="settings" /> Manage environment</button>
+      </div>
+    </section>{setupOpen && <EnvironmentSetupDialog csrfToken={bootstrap.csrf_token} onClose={() => setSetupOpen(false)} />}</>
   );
 }
 

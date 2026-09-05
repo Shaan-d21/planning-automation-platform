@@ -1,4 +1,4 @@
-"""Resolve validated OIDC identities to governed platform shadow accounts."""
+"""Resolve validated OIDC identities to governed linked platform profiles."""
 
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ class FederatedAuthenticationService:
         username: str,
         ip_address: str | None = None,
     ) -> UserAccount:
-        """Authenticate a synchronized, linked, passwordless shadow account."""
+        """Authenticate a synchronized, linked, passwordless profile."""
         provider = str(provider_code).strip().casefold()
         normalized_subject = str(subject).strip()
         normalized_username = str(username).strip()

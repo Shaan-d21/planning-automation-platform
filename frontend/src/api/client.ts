@@ -8,6 +8,7 @@ import type {
   IdentityProvisioningApplyResponse,
   IdentityProvisioningPreviewResponse,
   PlatformRoleCode,
+  EnvironmentConfigurationResponse,
   EnvironmentHealth,
   HomeResponse,
   PlanningCycleAdministrationResponse,
@@ -24,9 +25,13 @@ import type {
   JobActivityDetail,
   OperationsResponse,
   OperationArtifactCatalog,
+  BusinessRuleCatalogResponse,
   OracleFileCatalogResponse,
   OracleFilePurpose,
   BusinessRuleRunInput,
+  BusinessRuleRTPDefinitionResponse,
+  BusinessRuleRTPImportResponse,
+  BusinessRuleRTPRegistryStatusResponse,
   DataMapRunInput,
   DataIntegrationCatalogResponse,
   DataIntegrationRegistrationResponse,
@@ -73,21 +78,22 @@ import type {
   AgentSendResponse,
   AgentClarificationRefreshResponse,
   AgentActionDraft,
-  ProcessScheduleInput,
-  ProcessSchedulesResponse,
-  ScheduleCatalogResponse,
+  AutomationScheduleInput,
+  AutomationSchedulesResponse,
+  AutomationScheduleRunsResponse,
   ScheduleMutationResponse,
-  SchedulePreviewResponse,
-  ScheduleRunResponse
+  SchedulePreviewResponse
 } from "./types";
 
 export class ApiError extends Error {
   readonly status: number;
+  readonly requestId: string | null;
 
-  constructor(message: string, status: number) {
-    super(message);
+  constructor(message: string, status: number, requestId: string | null = null) {
+    super(requestId ? `${message} Reference: ${requestId}.` : message);
     this.name = "ApiError";
     this.status = status;
+    this.requestId = requestId;
   }
 }
 
@@ -120,7 +126,8 @@ async function request<T>(
       | null;
     throw new ApiError(
       payload?.detail ?? payload?.details ?? payload?.message ?? "The request could not be completed.",
-      response.status
+      response.status,
+      response.headers.get("X-Request-ID")
     );
   }
   return (await response.json()) as T;
@@ -148,7 +155,8 @@ async function requestBlob(
       | null;
     throw new ApiError(
       details?.detail ?? details?.details ?? details?.message ?? "The Excel export could not be created.",
-      response.status
+      response.status,
+      response.headers.get("X-Request-ID")
     );
   }
   return response.blob();
@@ -229,21 +237,23 @@ export const api = {
     csrfToken
   ),
   jobsActivity: () => request<JobsActivityResponse>("/api/v1/jobs"),
-  scheduleCatalog: () => request<ScheduleCatalogResponse>("/api/schedules/catalog"),
-  schedules: () => request<ProcessSchedulesResponse>("/api/schedules"),
-  previewSchedule: (payload: ProcessScheduleInput, csrfToken: string) =>
+  schedules: () => request<AutomationSchedulesResponse>("/api/schedules"),
+  scheduleRuns: (query = "") => request<AutomationScheduleRunsResponse>(
+    `/api/schedules/runs/history${query ? `?${query}` : ""}`
+  ),
+  previewSchedule: (payload: AutomationScheduleInput, csrfToken: string) =>
     request<SchedulePreviewResponse>(
       "/api/schedules/preview",
       { method: "POST", body: JSON.stringify(payload) },
       csrfToken
     ),
-  createSchedule: (payload: ProcessScheduleInput, csrfToken: string) =>
+  createSchedule: (payload: AutomationScheduleInput, csrfToken: string) =>
     request<ScheduleMutationResponse>(
       "/api/schedules",
       { method: "POST", body: JSON.stringify(payload) },
       csrfToken
     ),
-  updateSchedule: (scheduleId: number, payload: ProcessScheduleInput, csrfToken: string) =>
+  updateSchedule: (scheduleId: number, payload: AutomationScheduleInput, csrfToken: string) =>
     request<ScheduleMutationResponse>(
       `/api/schedules/${scheduleId}`,
       { method: "PUT", body: JSON.stringify(payload) },
@@ -253,12 +263,6 @@ export const api = {
     request<ScheduleMutationResponse>(
       `/api/schedules/${scheduleId}/enabled`,
       { method: "PATCH", body: JSON.stringify({ enabled }) },
-      csrfToken
-    ),
-  runScheduleNow: (scheduleId: number, csrfToken: string) =>
-    request<ScheduleRunResponse>(
-      `/api/schedules/${scheduleId}/runs`,
-      { method: "POST" },
       csrfToken
     ),
   deleteSchedule: (scheduleId: number, csrfToken: string) =>
@@ -485,6 +489,28 @@ export const api = {
       { method: "POST", body: JSON.stringify(payload) },
       csrfToken
     ),
+  businessRuleRTPDefinition: (ruleName: string) =>
+    request<BusinessRuleRTPDefinitionResponse>(
+      `/api/operations/business-rules/rtp-definition?rule_name=${encodeURIComponent(ruleName)}`
+    ),
+  businessRuleCatalog: () =>
+    request<BusinessRuleCatalogResponse>(
+      "/api/operations/business-rules/catalog"
+    ),
+  businessRuleRTPRegistryStatus: () =>
+    request<BusinessRuleRTPRegistryStatusResponse>(
+      "/api/operations/business-rules/rtp-registry/status"
+    ),
+  importBusinessRuleRTPRegistry: (file: File, csrfToken: string) =>
+    request<BusinessRuleRTPImportResponse>(
+      `/api/operations/business-rules/rtp-registry/import?filename=${encodeURIComponent(file.name)}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/octet-stream" },
+        body: file
+      },
+      csrfToken
+    ),
   startDataMap: (payload: DataMapRunInput, csrfToken: string) =>
     request<OperationAcceptedResponse>(
       "/api/operations/data-maps/runs",
@@ -591,9 +617,39 @@ export const api = {
       csrfToken
     ),
   health: () => request<EnvironmentHealth>("/api/health"),
+  environmentConfiguration: () =>
+    request<EnvironmentConfigurationResponse>(
+      "/api/v1/environment/configuration"
+    ),
+  discoverEnvironmentApplications: (csrfToken: string) =>
+    request<EnvironmentConfigurationResponse>(
+      "/api/v1/environment/applications/discover",
+      { method: "POST" },
+      csrfToken
+    ),
+  selectEnvironmentApplication: (
+    applicationName: string,
+    csrfToken: string
+  ) => request<EnvironmentConfigurationResponse>(
+    "/api/v1/environment/application",
+    {
+      method: "PUT",
+      body: JSON.stringify({ application_name: applicationName })
+    },
+    csrfToken
+  ),
   login: (username: string, password: string, csrfToken: string) =>
     request<SessionResponse>(
       "/api/v1/session",
+      {
+        method: "POST",
+        body: JSON.stringify({ username, password })
+      },
+      csrfToken
+    ),
+  oracleLogin: (username: string, password: string, csrfToken: string) =>
+    request<SessionResponse>(
+      "/api/v1/session/oracle",
       {
         method: "POST",
         body: JSON.stringify({ username, password })

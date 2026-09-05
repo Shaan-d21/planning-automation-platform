@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 from app.application.execution_evidence import (
     agent_execution_evidence,
+    aggregate_import_evidence,
     aggregate_record_statistics,
     workflow_failure_details,
 )
@@ -57,6 +58,40 @@ def test_record_statistics_are_absent_for_unsupported_operations() -> None:
     assert aggregate_record_statistics(({"job_id": 42},)) is None
 
 
+def test_import_evidence_projects_lineage_messages_and_artifacts() -> None:
+    evidence = aggregate_import_evidence(({
+        "load_lineage": {
+            "source_kind": "existing_inbox",
+            "source_file": "ERP_Actuals.csv",
+            "target_application": "Vision",
+            "password": "must-not-leak",
+        },
+        "oracle_messages": [{
+            "message_type": "WARN",
+            "category": "Data Import",
+            "message": "One record was rejected.",
+            "dimension_name": "Account",
+        }],
+        "artifacts": [{
+            "artifact_id": "abc123",
+            "stored_name": "private-name.zip",
+            "name": "DataErrors.zip",
+            "kind": "ORACLE_ERROR_FILE",
+            "size_bytes": 128,
+        }],
+    },))
+
+    assert evidence["lineage"]["source_file"] == "ERP_Actuals.csv"
+    assert "password" not in evidence["lineage"]
+    assert evidence["oracle_messages"][0]["message_type"] == "WARN"
+    assert evidence["artifacts"] == [{
+        "artifact_id": "abc123",
+        "name": "DataErrors.zip",
+        "kind": "ORACLE_ERROR_FILE",
+        "size_bytes": 128,
+    }]
+
+
 def test_failed_load_retains_oracle_record_statistics() -> None:
     job = JobResult(
         job_id=42,
@@ -98,6 +133,7 @@ def test_agent_execution_evidence_explains_failure_and_load_counts() -> None:
         initiated_by="planner",
         initiated_by_display="Planning User",
         trigger_source=TriggerSource.AI_AGENT,
+        oracle_execution_username="epm.integration",
         error_message="Metadata import failed.",
         steps=(
             WorkflowStepResult(
@@ -134,6 +170,7 @@ def test_agent_execution_evidence_explains_failure_and_load_counts() -> None:
 
     assert evidence["execution_id"] == "run-42"
     assert evidence["status"] == "FAILED"
+    assert evidence["executed_by"] == "epm.integration"
     assert evidence["record_statistics"]["records_rejected"] == 2
     assert evidence["steps"][0]["evidence"]["job_id"] == 917
     assert "password" not in evidence["steps"][0]["evidence"]

@@ -53,6 +53,14 @@ class FederatedAuthenticationError(AccessControlError):
     """Raised when a validated external identity cannot enter the platform."""
 
 
+class OracleCredentialAuthenticationError(AccessControlError):
+    """Raised when Oracle password login is rejected or not authorized locally."""
+
+    def __init__(self, message: str, *, credentials_valid: bool) -> None:
+        super().__init__(message)
+        self.credentials_valid = credentials_valid
+
+
 class ApiTokenError(AccessControlError):
     """Raised when a scoped external-client token is invalid."""
 
@@ -153,6 +161,10 @@ class ScheduleError(EPMError):
     """Raised when a Planning Process schedule is invalid or cannot run."""
 
 
+class AutomationScheduleError(EPMError):
+    """Raised when a platform automation schedule is invalid."""
+
+
 class OperationError(EPMError):
     """Raised when a standalone automation operation cannot be completed."""
 
@@ -231,9 +243,11 @@ class JobFailedError(EPMError):
         job: JobResult,
         *,
         diagnostics: JobDiagnostics | None = None,
+        evidence: dict[str, object] | None = None,
     ) -> None:
         self.job = job
         self.diagnostics = diagnostics
+        self.evidence = evidence or {}
         detail = job.details or job.descriptive_status
         super().__init__(
             f"Oracle EPM job {job.job_id} failed with status "

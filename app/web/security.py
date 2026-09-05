@@ -183,6 +183,11 @@ def required_permissions(
         return (Permission.USER_MANAGE,)
     if path == "/api/operations/oracle-catalog/sync" and mutation:
         return (Permission.CATALOG_MANAGE,)
+    if (
+        path == "/api/operations/business-rules/rtp-registry/import"
+        and mutation
+    ):
+        return (Permission.CATALOG_MANAGE,)
     if path in {
         "/api/operations/pipelines/register",
         "/api/operations/data-integrations/register",

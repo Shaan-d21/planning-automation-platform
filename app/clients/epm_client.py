@@ -140,6 +140,25 @@ class EPMClient:
         """Send a GET request to a relative Oracle EPM endpoint."""
         return self._request("GET", endpoint, params=params)
 
+    def get_binary(
+        self,
+        endpoint: str,
+        *,
+        params: Mapping[str, Any] | None = None,
+    ) -> bytes:
+        """Download binary content from a relative Oracle EPM endpoint."""
+        result = self._request(
+            "GET",
+            endpoint,
+            params=params,
+            deserialize=False,
+        )
+        if not isinstance(result, bytes):
+            raise APIRequestError(
+                "Oracle EPM returned an unexpected binary response."
+            )
+        return result
+
     def post(
         self,
         endpoint: str,
@@ -206,6 +225,7 @@ class EPMClient:
 
     def _request(self, method: str, endpoint: str, **kwargs: Any) -> Any:
         """Send an HTTP request and apply common transport/response handling."""
+        deserialize = bool(kwargs.pop("deserialize", True))
         url = self._build_url(endpoint)
         self._logger.info("HTTP request: %s %s", method, url)
 
@@ -248,6 +268,8 @@ class EPMClient:
             url,
         )
         self._raise_for_error(response)
+        if not deserialize:
+            return bytes(response.content)
         return self._deserialize_response(response)
 
     def _build_url(self, endpoint: str) -> str:

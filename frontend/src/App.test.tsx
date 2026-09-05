@@ -11,11 +11,17 @@ const bootstrap: BootstrapResponse = {
   csrf_token: "test-csrf",
   identity_authentication: {
     federated_enabled: false,
+    oracle_credentials_enabled: false,
     provider_name: "Oracle Cloud Identity",
     login_url: null,
     local_recovery_enabled: true
   },
-  environment: { application_name: "Vision", deployment_mode: "CLOUD" },
+  environment: {
+    application_name: "Vision",
+    deployment_mode: "cloud",
+    base_url: "https://example.oraclecloud.com",
+    configured: true
+  },
   user: {
     user_id: 7,
     username: "planner",
@@ -386,7 +392,12 @@ describe("App", () => {
       if (url === "/api/v1/operations") return response(catalog);
       if (url === "/api/v1/operations/oracle-catalog" && !init?.method) return response({
         status: "success",
-        environment: { application_name: "Vision", deployment_mode: "CLOUD" },
+        environment: {
+          application_name: "Vision",
+          deployment_mode: "cloud",
+          base_url: "https://example.oraclecloud.com",
+          configured: true
+        },
         summary: { verified: 2, attention: 0, last_synchronized_at: "2026-08-11T10:00:00Z" },
         artifacts: []
       });
@@ -462,7 +473,22 @@ describe("App", () => {
       if (url === "/api/v1/home") return response(home);
       if (url === "/api/v1/notifications") return response(notificationInbox);
       if (url === "/api/v1/operations") return response(operations);
-      if (url === "/api/v1/operations/business-rules/catalog") return response({ status: "success", jobs: ["Calculate Revenue"] });
+      if (url === "/api/v1/operations/business-rules/catalog") return response({
+        status: "success",
+        jobs: ["Calculate Revenue"],
+        rtp_registry: {
+          health: "EMPTY",
+          application_name: "Vision",
+          live_catalog_available: true,
+          live_rule_count: 1,
+          synchronized_rule_count: 0,
+          synchronized_prompt_count: 0,
+          unsynchronized_live_rules: ["Calculate Revenue"],
+          definitions_not_in_live_catalog: [],
+          definitions: [],
+          recent_syncs: []
+        }
+      });
       if (url === "/api/v1/operations/business-rules/runs" && init?.method === "POST") return response({ status: "accepted", execution_id: "rule-execution-1", redirect: "/app/operations/runs/rule-execution-1" }, 202);
       if (url === "/api/v1/operations/runs/rule-execution-1") return response(execution);
       return response({ detail: "Unexpected request" }, 404);
@@ -470,9 +496,11 @@ describe("App", () => {
     render(<App />);
 
     fireEvent.click(await screen.findByRole("button", { name: /Open service/ }));
+    expect(await screen.findByText("Registry health")).toBeTruthy();
+    expect(screen.getByText("1", { selector: ".rtp-registry__summary strong" })).toBeTruthy();
     const ruleSelect = await screen.findByRole("combobox");
     fireEvent.change(ruleSelect, { target: { value: "Calculate Revenue" } });
-    fireEvent.click(screen.getByRole("button", { name: "Add input" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Add input" }));
     fireEvent.change(screen.getByLabelText("Prompt name"), { target: { value: "Year" } });
     fireEvent.change(screen.getByLabelText("Member or value"), { target: { value: "FY27" } });
     fireEvent.click(screen.getByRole("button", { name: /Review execution/ }));
@@ -1440,7 +1468,7 @@ describe("App", () => {
     };
     const conversation = { conversation_id: "conv-metadata-import", user_id: 7, title: "Import product metadata", provider: "gemini", model: "gemini-test", created_at: "2026-08-11T10:00:00Z", updated_at: "2026-08-11T10:00:00Z" };
     const message = (id: number, content: string) => ({ message_id: id, conversation_id: conversation.conversation_id, role: "assistant", content, created_at: "2026-08-11T10:01:00Z" });
-    const inputRequest = { request_id: "input-metadata", operation_code: "metadata-import", display_name: "Metadata Import", artifact_name: "Import Products", title: "Choose the metadata file and post-import action", description: "Choose the source and optional refresh.", fields: [], context: { allowed_extensions: [".csv", ".zip"], refresh_jobs: ["Refresh_Cube"] } };
+    const inputRequest = { request_id: "input-metadata", operation_code: "metadata-import", display_name: "Metadata Import", artifact_name: "Import Products", title: "Choose the metadata file and post-import action", description: "Choose the source and optional refresh.", fields: [], context: { allowed_extensions: [".csv", ".zip"], refresh_jobs: [] } };
     const approval = { request_id: "approval-metadata", operation_code: "metadata-import", display_name: "Metadata Import", objective: "Import product hierarchy.", artifact_name: "Import Products", category: "Application administration", risk_level: "Elevated", route: "/app/operations/metadata-import", effect: "Start Metadata Import and refresh after success.", input_values: { file_source: "Upload on governed screen", inbox_file: "", upload_token: "metadata-upload-1", upload_name: "Products.csv", error_file_name: "Metadata_Errors.csv", refresh_after_import: true, refresh_job_name: "Refresh_Cube" } };
     let created = false;
     const fetchMock = vi.mocked(fetch);
@@ -1467,6 +1495,7 @@ describe("App", () => {
     expect(await screen.findByRole("heading", { name: "Choose the metadata file and post-import action" })).toBeTruthy();
     fireEvent.change(screen.getByLabelText("Metadata Import local file"), { target: { files: [new File(["Product,Alias\nP100,Phone"], "Products.csv", { type: "text/csv" })] } });
     fireEvent.click(screen.getByLabelText("Refresh cube after Metadata Import"));
+    expect(screen.getByText(/exact saved job name/)).toBeTruthy();
     fireEvent.change(screen.getByLabelText("Metadata Import Cube Refresh job"), { target: { value: "Refresh_Cube" } });
     fireEvent.change(screen.getByLabelText("Metadata Import error output filename"), { target: { value: "Metadata_Errors.csv" } });
     fireEvent.click(screen.getByRole("button", { name: /Continue to approval/ }));
@@ -1835,6 +1864,6 @@ describe("App", () => {
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "Welcome back" })).toBeTruthy();
-    expect(screen.getByLabelText("Username")).toBeTruthy();
+    expect(screen.getByLabelText("Local platform username")).toBeTruthy();
   });
 });

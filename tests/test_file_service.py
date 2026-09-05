@@ -184,3 +184,39 @@ def test_upload_to_inbox_rejects_target_directories(tmp_path) -> None:
         )
 
     client.post_binary.assert_not_called()
+
+
+def test_download_from_repository_returns_exact_binary_content() -> None:
+    client = Mock(spec=EPMClient)
+    client.get_binary.return_value = b"<rtp name='Year'/>"
+
+    content = FileService(client).download_from_repository(
+        "inbox/Calc Manager Export.xml"
+    )
+
+    assert content == b"<rtp name='Year'/>"
+    client.get_binary.assert_called_once_with(
+        "interop/rest/11.1.2.3.600/applicationsnapshots/"
+        "inbox%2FCalc%20Manager%20Export.xml/contents"
+    )
+
+
+def test_download_from_repository_rejects_traversal() -> None:
+    client = Mock(spec=EPMClient)
+
+    with pytest.raises(FileUploadError, match="exact file name"):
+        FileService(client).download_from_repository("../export.zip")
+
+    client.get_binary.assert_not_called()
+
+
+def test_delete_from_repository_removes_generated_snapshot() -> None:
+    client = Mock(spec=EPMClient)
+    client.delete.return_value = {"status": 0, "details": None}
+
+    FileService(client).delete_from_repository("BISP_RTP_20270101")
+
+    client.delete.assert_called_once_with(
+        "interop/rest/11.1.2.3.600/applicationsnapshots/"
+        "BISP_RTP_20270101"
+    )

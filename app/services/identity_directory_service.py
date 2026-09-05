@@ -307,6 +307,14 @@ class IdentityDirectoryService:
         """Return a deterministic checksum excluding retrieval timestamps."""
         canonical = {
             "complete": snapshot.complete,
+            "available_entitlements": [
+                {
+                    "type": item.entitlement_type.value,
+                    "key": item.external_key,
+                    "name": item.display_name,
+                }
+                for item in snapshot.available_entitlements
+            ],
             "identities": [
                 {
                     "subject": identity.subject,
@@ -691,6 +699,44 @@ class IdentityDirectoryService:
                             observed_at=snapshot.retrieved_at,
                         )
                     )
+
+            for entitlement in snapshot.available_entitlements:
+                entitlement_type = entitlement.entitlement_type.value
+                external_key = self._required(
+                    entitlement.external_key,
+                    "available entitlement key",
+                    255,
+                )
+                observed_entitlements.add((entitlement_type, external_key))
+                connection.execute(
+                    upsert_statement(
+                        connection,
+                        external_entitlements,
+                        {
+                            "provider_id": provider_id,
+                            "entitlement_type": entitlement_type,
+                            "external_key": external_key,
+                            "display_name": self._required(
+                                entitlement.display_name,
+                                "available entitlement display name",
+                                255,
+                            ),
+                            "is_active": True,
+                            "created_at": now,
+                            "updated_at": now,
+                        },
+                        index_elements=(
+                            "provider_id",
+                            "entitlement_type",
+                            "external_key",
+                        ),
+                        update_columns=(
+                            "display_name",
+                            "is_active",
+                            "updated_at",
+                        ),
+                    )
+                )
 
             deactivated = 0
             if snapshot.complete:

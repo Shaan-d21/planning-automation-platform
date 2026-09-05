@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import asdict
+from datetime import datetime
 from pathlib import PurePath
 from typing import Any
 from urllib.parse import urlparse
@@ -15,6 +16,11 @@ from app.application.action_inputs import (
     normalize_action_inputs,
 )
 from app.application.control_center import ControlCenterService
+from app.application.automation_scheduling import AutomationScheduleApplicationService
+from app.application.automation_schedule_targets import (
+    AutomationScheduleCoordinator,
+    PipelineScheduleTargetAdapter,
+)
 from app.application.data_review import (
     DataReviewAxisSelection,
     DataReviewSliceSelection,
@@ -36,7 +42,16 @@ from app.models.data_integration import (
     DataIntegrationFileReference,
     DataIntegrationPeriodRange,
 )
-from app.services.business_rule_service import BusinessRuleService
+from app.models.automation_schedule import (
+    AutomationConcurrencyPolicy,
+    AutomationInputPolicy,
+    AutomationMisfirePolicy,
+    AutomationScheduleFrequency,
+    AutomationScheduleInput,
+    AutomationTargetType,
+)
+from app.models.oracle_artifact import OracleEnvironment
+from app.services.business_rule_rtp_registry import BusinessRuleRTPRegistryService
 from app.services.data_integration_service import DataIntegrationService
 from app.services.data_map_service import DataMapService
 from app.services.data_service import DataService
@@ -45,6 +60,12 @@ from app.utils.exceptions import AgentCapabilityError, EPMError
 
 
 CREATE_SUBSTITUTION_VARIABLE = "Create a new substitution variable"
+PIPELINE_SCHEDULE_CREATE = "pipeline-schedule-create"
+PIPELINE_SCHEDULE_PAUSE = "pipeline-schedule-pause"
+PIPELINE_SCHEDULE_RESUME = "pipeline-schedule-resume"
+PIPELINE_SCHEDULE_ACTIONS = frozenset(
+    {PIPELINE_SCHEDULE_CREATE, PIPELINE_SCHEDULE_PAUSE, PIPELINE_SCHEDULE_RESUME}
+)
 
 
 class AgentCapabilityGateway:
@@ -59,6 +80,9 @@ class AgentCapabilityGateway:
         operation_catalog: OperationCatalogService | None = None,
         substitution_variables: SubstitutionVariableApplicationService | None = None,
         user_variables: UserVariableApplicationService | None = None,
+        business_rule_rtps: BusinessRuleRTPRegistryService | None = None,
+        schedule_service: AutomationScheduleApplicationService | None = None,
+        schedule_coordinator: AutomationScheduleCoordinator | None = None,
     ) -> None:
         self._settings = settings
         self._control_center = control_center
@@ -68,6 +92,15 @@ class AgentCapabilityGateway:
             SubstitutionVariableApplicationService(settings)
         )
         self._user_variables = user_variables or UserVariableApplicationService(settings)
+        self._business_rule_rtps = business_rule_rtps or (
+            BusinessRuleRTPRegistryService(settings)
+        )
+        self._schedule_service = schedule_service
+        self._schedule_coordinator = schedule_coordinator
+        self._schedule_environment_key = OracleEnvironment.from_settings(
+            settings.epm_base_url,
+            settings.application_name,
+        ).key
         self._handlers = {
             "get_environment_summary": self._environment_summary,
             "list_platform_operations": self._platform_operations,
@@ -84,6 +117,7 @@ class AgentCapabilityGateway:
             "prepare_standalone_flow_action": (
                 self._prepare_standalone_flow_action
             ),
+            "prepare_schedule_action": self._prepare_schedule_action,
         }
 
     _REQUIRED_INPUTS = {
@@ -106,6 +140,7 @@ class AgentCapabilityGateway:
 
     _STANDALONE_FLOW_OPERATIONS = frozenset(
         {
+            "pipelines",
             "business-rules",
             "data-maps",
             "data-integrations",
@@ -402,6 +437,38 @@ class AgentCapabilityGateway:
                     "additionalProperties": False,
                 },
             ),
+            AgentToolDefinition(
+                name="prepare_schedule_action",
+                description=(
+                    "Prepare a governed Oracle Pipeline schedule change. Use "
+                    "CREATE for a new unattended recurrence, PAUSE for an "
+                    "enabled schedule, or RESUME for a paused schedule. The "
+                    "platform performs live validation and requires explicit "
+                    "approval before saving the change."
+                ),
+                parameters_schema={
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["CREATE", "PAUSE", "RESUME"],
+                        },
+                        "objective": {
+                            "type": "string",
+                            "description": "Concise description of the requested scheduling change.",
+                        },
+                        "artifact_name": {
+                            "type": "string",
+                            "description": (
+                                "Exact Pipeline code for CREATE, or exact "
+                                "schedule identifier for PAUSE/RESUME when known."
+                            ),
+                        },
+                    },
+                    "required": ["action", "objective"],
+                    "additionalProperties": False,
+                },
+            ),
         )
 
     def execute(self, call: AgentToolCall) -> dict[str, Any]:
@@ -443,6 +510,12 @@ class AgentCapabilityGateway:
                 "objective",
                 "requested_steps",
                 "configured_steps",
+            },
+            "prepare_schedule_action": {
+                "action",
+                "objective",
+                "artifact_name",
+                "input_values",
             },
         }
         unexpected = set(call.arguments) - allowed_arguments.get(call.name, set())
@@ -540,6 +613,11 @@ class AgentCapabilityGateway:
             for index, code in enumerate(requested_steps, start=1)
         ]
         if arguments.get("prefer_standalone") is True:
+            return self._standalone_flow_draft(objective, steps)
+        # A Pipeline explicitly requested alongside another operation is one
+        # step in the desired sequence. It must not be mistaken for a single
+        # Pipeline that implicitly covers every requested task.
+        if "pipelines" in requested_steps:
             return self._standalone_flow_draft(objective, steps)
         if self._operation_catalog is None:
             return self._manual_multi_step_plan(objective, steps, ())
@@ -1055,6 +1133,24 @@ class AgentCapabilityGateway:
     ) -> tuple[tuple[str, str], ...]:
         """Return identifiers and labels from one consistent catalog read."""
         normalized = operation_code.strip().casefold()
+        if normalized == PIPELINE_SCHEDULE_CREATE:
+            return self.artifact_catalog("pipelines")
+        if normalized in {PIPELINE_SCHEDULE_PAUSE, PIPELINE_SCHEDULE_RESUME}:
+            if self._schedule_service is None:
+                return ()
+            desired_enabled = normalized == PIPELINE_SCHEDULE_PAUSE
+            return tuple(
+                (
+                    f"schedule:{item.schedule_id}",
+                    f"{item.name} · {item.target_key} · "
+                    f"{'Active' if item.enabled else 'Paused'}",
+                )
+                for item in self._schedule_service.list_schedules(
+                    environment_key=self._schedule_environment_key
+                )
+                if item.target_type is AutomationTargetType.ORACLE_PIPELINE
+                and item.enabled is desired_enabled
+            )
         if normalized == "substitution-variables":
             catalog = self._substitution_variable_catalog()
             name_counts: dict[str, int] = {}
@@ -1137,6 +1233,8 @@ class AgentCapabilityGateway:
     ) -> dict[str, Any]:
         """Describe safe catalog recovery for incompletely discoverable types."""
         normalized = operation_code.strip().casefold()
+        if normalized == PIPELINE_SCHEDULE_CREATE:
+            normalized = "pipelines"
         if normalized == "pipelines":
             return {
                 "enabled": True,
@@ -1178,6 +1276,8 @@ class AgentCapabilityGateway:
         if self._operation_catalog is None:
             raise AgentCapabilityError("The Oracle artifact catalog is unavailable.")
         normalized = operation_code.strip().casefold()
+        if normalized == PIPELINE_SCHEDULE_CREATE:
+            normalized = "pipelines"
         if normalized == "pipelines":
             return self._operation_catalog.register_pipeline(identifier).code
         if normalized == "data-integrations":
@@ -1201,6 +1301,8 @@ class AgentCapabilityGateway:
         for available in self.artifact_choices(operation_code):
             if available.casefold() == requested.casefold():
                 return available
+        if operation_code.strip().casefold() == PIPELINE_SCHEDULE_CREATE:
+            return self.resolve_artifact_choice("pipelines", requested)
         if (
             operation_code.strip().casefold() == "data-integrations"
             and self._operation_catalog is not None
@@ -1221,6 +1323,48 @@ class AgentCapabilityGateway:
     ) -> dict[str, Any] | None:
         """Return platform-owned guided fields for a supported operation."""
         normalized = operation_code.strip().casefold()
+        if normalized == PIPELINE_SCHEDULE_CREATE:
+            if self._operation_catalog is None:
+                raise AgentCapabilityError(
+                    "The live Oracle Pipeline catalog is unavailable."
+                )
+            try:
+                preview = self._operation_catalog.preflight_pipeline(
+                    artifact_name
+                )
+            except EPMError as exc:
+                raise AgentCapabilityError(str(exc)) from exc
+            return {
+                "operation_code": PIPELINE_SCHEDULE_CREATE,
+                "display_name": "Oracle Pipeline schedule",
+                "artifact_name": preview.code,
+                "title": "Choose when this Pipeline should run",
+                "description": (
+                    "Set the recurrence and unattended inputs. Oracle remains "
+                    "the owner of Pipeline stages, and the complete schedule "
+                    "is validated again before approval."
+                ),
+                "fields": (
+                    {
+                        "key": "schedule",
+                        "label": "Schedule configuration",
+                        "kind": "schedule",
+                        "required": True,
+                        "description": "Recurrence and unattended Pipeline inputs.",
+                        "placeholder": "",
+                        "options": [],
+                    },
+                ),
+                "context": {
+                    "code": preview.code,
+                    "display_name": preview.display_name,
+                    "variables": [asdict(item) for item in preview.variables],
+                    "file_requirements": [
+                        asdict(item) for item in preview.file_requirements
+                    ],
+                    "stages": [asdict(item) for item in preview.stages],
+                },
+            }
         if normalized == "substitution-variables":
             catalog = self._substitution_variable_catalog()
             if artifact_name.casefold() == CREATE_SUBSTITUTION_VARIABLE.casefold():
@@ -1353,16 +1497,45 @@ class AgentCapabilityGateway:
                 },
             }
         if normalized == "business-rules":
+            definition = self._business_rule_rtps.get_definition(artifact_name)
+            rtp_context = None
+            if definition is not None:
+                rtp_context = {
+                    "rule_name": definition.rule_name,
+                    "cube_name": definition.cube_name,
+                    "source_name": definition.source_name,
+                    "synchronized_at": definition.synchronized_at.isoformat(),
+                    "prompts": [
+                        {
+                            "name": prompt.name,
+                            "label": prompt.label,
+                            "value_type": prompt.value_type,
+                            "dimension": prompt.dimension,
+                            "default_value": prompt.default_value,
+                            "has_default": prompt.has_default,
+                            "required": prompt.required_at_launch,
+                            "hidden": prompt.hidden,
+                            "allow_multiple": prompt.allow_multiple,
+                            "scope_type": prompt.scope_type,
+                            "scope_name": prompt.scope_name,
+                            "limit_type": prompt.limit_type,
+                            "limit_value": prompt.limit_value,
+                        }
+                        for prompt in definition.prompts
+                    ],
+                }
             return {
                 "operation_code": "business-rules",
                 "display_name": "Business Rules",
                 "artifact_name": artifact_name,
                 "title": "Choose how to supply runtime prompts",
                 "description": (
-                    "Oracle's public Planning REST API does not publish a "
-                    "rule's RTP definitions. Use Calculation Manager defaults "
-                    "when they are configured, or provide exact RTP names and "
-                    "values."
+                    "Review the synchronized Calc Manager runtime prompts, "
+                    "then use Oracle defaults or provide explicit values."
+                    if definition is not None
+                    else "No synchronized RTP definition is available. Use "
+                    "Calculation Manager defaults when they are configured, "
+                    "or provide exact RTP names and values."
                 ),
                 "fields": (
                     {
@@ -1391,6 +1564,7 @@ class AgentCapabilityGateway:
                         "options": [],
                     },
                 ),
+                "context": {"rtp_definition": rtp_context},
             }
         if normalized == "data-maps":
             return {
@@ -1706,6 +1880,18 @@ class AgentCapabilityGateway:
             }
         return None
 
+    def normalize_business_rule_runtime_prompts(
+        self,
+        rule_name: str,
+        values: dict[str, Any] | None,
+    ) -> dict[str, str]:
+        """Expose the shared registry guard to final agent execution."""
+        supplied = values if isinstance(values, dict) else {}
+        return self._business_rule_rtps.normalize_for_execution(
+            rule_name,
+            supplied,
+        )
+
     def normalize_guided_inputs(
         self,
         operation_code: str,
@@ -1723,9 +1909,15 @@ class AgentCapabilityGateway:
             "data-integrations",
             "data-import",
             "metadata-import",
+            PIPELINE_SCHEDULE_CREATE,
         }:
             return {}
         supplied = values if isinstance(values, dict) else {}
+        if normalized == PIPELINE_SCHEDULE_CREATE:
+            return self._normalize_pipeline_schedule_inputs(
+                artifact_name,
+                supplied,
+            )
         if normalized == "substitution-variables":
             return self._normalize_substitution_variable_inputs(
                 artifact_name,
@@ -1792,7 +1984,11 @@ class AgentCapabilityGateway:
             )
         mode = str(supplied.get("runtime_prompt_mode") or "").strip()
         if mode == "Use Calculation Manager defaults":
-            return {"runtime_prompts": {}}
+            prompts = self._business_rule_rtps.normalize_for_execution(
+                artifact_name,
+                {},
+            )
+            return {"runtime_prompts": prompts}
         if mode != "Provide runtime prompt values":
             raise AgentCapabilityError("Choose a runtime prompt source.")
         raw_prompts = supplied.get("runtime_prompts")
@@ -1800,8 +1996,11 @@ class AgentCapabilityGateway:
             raise AgentCapabilityError(
                 "Add at least one exact runtime prompt name and value."
             )
-        prompts = BusinessRuleService.normalize_runtime_prompts(raw_prompts)
-        return {"runtime_prompts": dict(prompts)}
+        prompts = self._business_rule_rtps.normalize_for_execution(
+            artifact_name,
+            raw_prompts,
+        )
+        return {"runtime_prompts": prompts}
 
     def _normalize_substitution_variable_inputs(
         self,
@@ -2151,15 +2350,31 @@ class AgentCapabilityGateway:
             supplied.get("refresh_job_name") or ""
         ).strip()
         if refresh_after_import:
-            canonical_refresh = self.resolve_artifact_choice(
-                "cube-refresh",
-                refresh_job_name,
+            available_refresh_jobs = self.artifact_choices("cube-refresh")
+            canonical_refresh = next(
+                (
+                    job
+                    for job in available_refresh_jobs
+                    if job.casefold() == refresh_job_name.casefold()
+                ),
+                None,
             )
-            if canonical_refresh is None:
+            if canonical_refresh is not None:
+                refresh_job_name = canonical_refresh
+            elif available_refresh_jobs:
                 raise AgentCapabilityError(
                     "Select a current saved Cube Refresh job."
                 )
-            refresh_job_name = canonical_refresh
+            else:
+                refresh_job_name = self._safe_pipeline_value(
+                    refresh_job_name,
+                    "Cube Refresh job name",
+                    maximum=128,
+                )
+                if not refresh_job_name:
+                    raise AgentCapabilityError(
+                        "Enter the exact saved Cube Refresh job name."
+                    )
         else:
             refresh_job_name = ""
         raw_error_file = str(supplied.get("error_file_name") or "").strip()
@@ -2410,6 +2625,221 @@ class AgentCapabilityGateway:
             raise AgentCapabilityError(f"{label} contains an invalid value.")
         return value
 
+    def _normalize_pipeline_schedule_inputs(
+        self,
+        pipeline_code: str,
+        supplied: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Validate a complete unattended Pipeline recurrence live."""
+        if self._schedule_coordinator is None:
+            raise AgentCapabilityError(
+                "Agent scheduling is not configured for this environment."
+            )
+        allowed = {
+            "name",
+            # These three values are produced by the first live preview and may
+            # be replayed by LangGraph when it builds the approval proposal.
+            # They are never trusted: target_key comes from the selected live
+            # artifact and the next-run values are recalculated below.
+            "target_key",
+            "next_run_at",
+            "next_run_local",
+            "frequency",
+            "timezone",
+            "first_run_local",
+            "input_policy",
+            "variables",
+            "inbox_files",
+            "misfire_policy",
+            "enabled",
+        }
+        unexpected = set(supplied) - allowed
+        if unexpected:
+            raise AgentCapabilityError(
+                "Unsupported schedule inputs: "
+                + ", ".join(sorted(unexpected))
+                + "."
+            )
+        name = str(supplied.get("name") or "").strip()
+        timezone = str(supplied.get("timezone") or "").strip()
+        if not name:
+            raise AgentCapabilityError("Enter a business-friendly schedule name.")
+        if len(name) > 160:
+            raise AgentCapabilityError("Schedule name is too long.")
+        if not timezone:
+            raise AgentCapabilityError("Choose a schedule timezone.")
+        try:
+            first_run_local = datetime.fromisoformat(
+                str(supplied.get("first_run_local") or "").strip()
+            )
+        except ValueError as exc:
+            raise AgentCapabilityError(
+                "Choose a valid first-run date and time."
+            ) from exc
+        if first_run_local.tzinfo is not None:
+            raise AgentCapabilityError(
+                "First run must be a local date and time without an offset."
+            )
+        try:
+            frequency = AutomationScheduleFrequency(
+                str(supplied.get("frequency") or "")
+            )
+            input_policy = AutomationInputPolicy(
+                str(supplied.get("input_policy") or "")
+            )
+            misfire_policy = AutomationMisfirePolicy(
+                str(supplied.get("misfire_policy") or "RUN_ONCE")
+            )
+        except ValueError as exc:
+            raise AgentCapabilityError(
+                "Choose valid recurrence, input, and missed-run policies."
+            ) from exc
+        if input_policy is AutomationInputPolicy.DYNAMIC:
+            raise AgentCapabilityError(
+                "Dynamic schedule inputs are not supported. Use Oracle "
+                "defaults or fixed unattended values."
+            )
+        variables = PipelineScheduleTargetAdapter._string_mapping(
+            supplied.get("variables"),
+            label="Pipeline variables",
+        )
+        inbox_files = PipelineScheduleTargetAdapter._string_mapping(
+            supplied.get("inbox_files"),
+            label="Pipeline Inbox files",
+        )
+        if input_policy is AutomationInputPolicy.ORACLE_DEFAULTS:
+            variables = {}
+            inbox_files = {}
+        schedule_input = AutomationScheduleInput(
+            environment_key=self._schedule_environment_key,
+            name=name,
+            target_type=AutomationTargetType.ORACLE_PIPELINE,
+            target_key=pipeline_code,
+            frequency=frequency,
+            timezone=timezone,
+            first_run_local=first_run_local,
+            input_policy=input_policy,
+            configuration=(
+                {"variables": variables, "inbox_files": inbox_files}
+                if input_policy is AutomationInputPolicy.FIXED
+                else {}
+            ),
+            concurrency_policy=AutomationConcurrencyPolicy.SKIP_IF_ACTIVE,
+            misfire_policy=misfire_policy,
+            enabled=bool(supplied.get("enabled", True)),
+        )
+        try:
+            preview = self._schedule_coordinator.preview(schedule_input)
+        except EPMError as exc:
+            raise AgentCapabilityError(str(exc)) from exc
+        return {
+            "name": schedule_input.name,
+            "target_key": schedule_input.target_key,
+            "frequency": schedule_input.frequency.value,
+            "timezone": schedule_input.timezone,
+            "first_run_local": schedule_input.first_run_local.isoformat(
+                timespec="minutes"
+            ),
+            "input_policy": schedule_input.input_policy.value,
+            "variables": variables,
+            "inbox_files": inbox_files,
+            "misfire_policy": schedule_input.misfire_policy.value,
+            "enabled": schedule_input.enabled,
+            "next_run_at": preview.next_run_at.isoformat(),
+            "next_run_local": preview.next_run_local.isoformat(),
+        }
+
+    def _schedule_from_identifier(self, identifier: str):
+        if self._schedule_service is None:
+            raise AgentCapabilityError(
+                "Agent scheduling is not configured for this environment."
+            )
+        match = re.fullmatch(r"schedule:(\d+)", identifier.strip(), re.IGNORECASE)
+        if match is None:
+            raise AgentCapabilityError("Choose a current automation schedule.")
+        try:
+            schedule = self._schedule_service.get(int(match.group(1)))
+        except EPMError as exc:
+            raise AgentCapabilityError(str(exc)) from exc
+        if schedule.environment_key != self._schedule_environment_key:
+            raise AgentCapabilityError("The selected schedule is no longer available.")
+        return schedule
+
+    def _prepare_schedule_action(
+        self,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        action = self._required_text(arguments, "action", "Schedule action").upper()
+        if action not in {"CREATE", "PAUSE", "RESUME"}:
+            raise AgentCapabilityError(
+                "Schedule action must be CREATE, PAUSE, or RESUME."
+            )
+        objective = self._required_text(arguments, "objective", "Objective")
+        artifact_name = self._optional_text(arguments.get("artifact_name"))
+        target_code = {
+            "CREATE": PIPELINE_SCHEDULE_CREATE,
+            "PAUSE": PIPELINE_SCHEDULE_PAUSE,
+            "RESUME": PIPELINE_SCHEDULE_RESUME,
+        }[action]
+        input_values: dict[str, Any] = {}
+        display_name = {
+            "CREATE": "Oracle Pipeline schedule",
+            "PAUSE": "Pause schedule",
+            "RESUME": "Resume schedule",
+        }[action]
+        if action in {"PAUSE", "RESUME"} and artifact_name:
+            schedule = self._schedule_from_identifier(artifact_name)
+            expected_enabled = action == "PAUSE"
+            if schedule.enabled is not expected_enabled:
+                state = "active" if schedule.enabled else "paused"
+                raise AgentCapabilityError(
+                    f"Schedule '{schedule.name}' is already {state}."
+                )
+            input_values = {
+                "schedule_id": schedule.schedule_id,
+                "schedule_name": schedule.name,
+                "target_key": schedule.target_key,
+                "current_enabled": schedule.enabled,
+                "next_run_at": (
+                    schedule.next_run_at.isoformat()
+                    if schedule.next_run_at is not None
+                    else None
+                ),
+            }
+        elif action == "CREATE":
+            raw_values = arguments.get("input_values")
+            if isinstance(raw_values, dict) and raw_values:
+                if not artifact_name:
+                    raise AgentCapabilityError(
+                        "Choose a live Oracle Pipeline before configuring its schedule."
+                    )
+                input_values = self._normalize_pipeline_schedule_inputs(
+                    artifact_name,
+                    raw_values,
+                )
+        return {
+            "action_draft": {
+                "action_type": "schedule",
+                "target_code": target_code,
+                "display_name": display_name,
+                "category": "Automation scheduling",
+                "risk_level": "Controlled",
+                "route": "/app/schedules",
+                "objective": objective,
+                "artifact_name": artifact_name,
+                "required_inputs": (
+                    ["Pipeline", "Recurrence", "Unattended inputs"]
+                    if action == "CREATE"
+                    else ["Saved schedule"]
+                ),
+                "stages": [],
+                "approval_required": True,
+                "status": "PREPARED_NOT_EXECUTED",
+                "input_schema": [],
+                "input_values": input_values,
+            }
+        }
+
     def _prepare_operation_action(
         self, arguments: dict[str, Any]
     ) -> dict[str, Any]:
@@ -2433,6 +2863,32 @@ class AgentCapabilityGateway:
         input_schema = action_input_schema("operation", definition.code)
         raw_input_values = arguments.get("input_values", {})
         input_values = normalize_action_inputs(input_schema, raw_input_values)
+        # Artifact selection happens before the guided RTP form is shown. The
+        # action schema supplies an empty runtime_prompts mapping by default,
+        # so validating that default here would reject every registered rule
+        # with a required RTP before the user has a chance to enter it. Enforce
+        # the registry contract only after the guided form explicitly submits
+        # runtime_prompts; final execution validates the contract again.
+        runtime_prompts_submitted = (
+            isinstance(raw_input_values, dict)
+            and "runtime_prompts" in raw_input_values
+        )
+        if (
+            definition.code == "business-rules"
+            and artifact_name
+            and runtime_prompts_submitted
+        ):
+            raw_prompts = input_values.get("runtime_prompts", {})
+            if not isinstance(raw_prompts, dict):
+                raise AgentCapabilityError(
+                    "Business Rule runtime prompts must contain name and value pairs."
+                )
+            input_values["runtime_prompts"] = (
+                self.normalize_business_rule_runtime_prompts(
+                    artifact_name,
+                    raw_prompts,
+                )
+            )
         return {
             "action_draft": {
                 "action_type": "operation",

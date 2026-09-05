@@ -88,6 +88,9 @@ from app.services.epm_automate_pipeline_service import (
     EPMAutomatePipelineService,
 )
 from app.services.file_service import FileService
+from app.services.environment_configuration_service import (
+    EnvironmentConfigurationService,
+)
 from app.services.job_service import JobService
 from app.services.metadata_service import MetadataService
 from app.services.notification_service import create_notification_service
@@ -1676,6 +1679,11 @@ def _run_command(
             project_root=PROJECT_ROOT,
         )
     logger = configure_logging(settings.log_level)
+    if isinstance(settings, Settings):
+        settings = EnvironmentConfigurationService(
+            settings,
+            logger=logger.getChild("environment_configuration"),
+        ).resolve_startup_settings()
     email_settings = settings.email_notifications
     if not isinstance(email_settings, EmailNotificationSettings):
         email_settings = EmailNotificationSettings()
@@ -5538,6 +5546,7 @@ def _run_monthly_forecast_workflow(
                 "_execution_id_override",
                 None,
             ),
+            oracle_execution_username=settings.oracle_execution_username,
         )
         output_func(
             f"{process_definition.display_name} completed successfully. "
@@ -5585,6 +5594,7 @@ def _run_monthly_forecast_workflow(
     run = engine.run(
         "MONTHLY_FORECAST",
         tuple(workflow_steps),
+        oracle_execution_username=settings.oracle_execution_username,
     )
     output_func(
         "Monthly Forecast workflow completed successfully. "

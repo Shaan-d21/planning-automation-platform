@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import FileResponse
 from starlette.concurrency import run_in_threadpool
 
 from app.api.v1.schemas import (
@@ -20,11 +22,15 @@ from app.api.v1.schemas import (
     PlatformUserCreateRequest,
     PlatformUserEditRequest,
     CurrentUserSummary,
+    EnvironmentApplicationSelectionRequest,
+    EnvironmentApplicationSummary,
+    EnvironmentConfigurationResponse,
     EnvironmentSummary,
     FeatureAvailability,
     FrontendBootstrapResponse,
     NavigationItem,
     OperationSummary,
+    OracleSessionLoginRequest,
     OperationsResponse,
     ProductSummary,
     SessionLoginRequest,
@@ -40,9 +46,11 @@ from app.models.planning_workflow import (
 from app.models.planning_governance import PlanningApprovalStatus
 from app.utils.exceptions import (
     AccessControlError,
+    ConfigurationError,
     EPMError,
     IdentitySnapshotChangedError,
     IdentitySynchronizationError,
+    OracleCredentialAuthenticationError,
     PlanningWorkflowError,
 )
 from app.application.identity_access import (
@@ -50,6 +58,7 @@ from app.application.identity_access import (
     provisioning_preview_payload,
 )
 from app.models.access_control import Permission, UserAccount
+from app.models.environment_configuration import EnvironmentConfiguration
 from app.web.security import (
     client_ip,
     csrf_token,
@@ -58,7 +67,10 @@ from app.web.security import (
     start_user_session,
     validate_csrf,
 )
-from app.application.execution_evidence import aggregate_record_statistics
+from app.application.execution_evidence import (
+    aggregate_import_evidence,
+    aggregate_record_statistics,
+)
 
 
 router = APIRouter(prefix="/api/v1", tags=["frontend-v1"])
@@ -162,6 +174,7 @@ async def frontend_bootstrap(request: Request) -> FrontendBootstrapResponse:
         csrf_token=csrf_token(request),
         identity_authentication=IdentityAuthenticationSummary(
             federated_enabled=settings.federated_identity_ready,
+            oracle_credentials_enabled=settings.oracle_password_login_ready,
             provider_name="Oracle Cloud Identity",
             login_url=(
                 "/auth/oracle/start"
@@ -173,7 +186,10 @@ async def frontend_bootstrap(request: Request) -> FrontendBootstrapResponse:
         environment=(
             EnvironmentSummary(
                 application_name=settings.application_name,
-                deployment_mode=settings.deployment_mode,
+                deployment_mode=settings.resolved_deployment_mode,
+                base_url=settings.epm_base_url,
+                configured=bool(settings.application_name),
+                execution_account=settings.oracle_execution_username,
             )
             if authenticated
             else None
@@ -181,6 +197,68 @@ async def frontend_bootstrap(request: Request) -> FrontendBootstrapResponse:
         user=_user_summary(user) if authenticated and user else None,
         navigation=_navigation_for(user) if authenticated and user else [],
         features=FeatureAvailability(),
+    )
+
+
+@router.get(
+    "/environment/configuration",
+    response_model=EnvironmentConfigurationResponse,
+)
+async def environment_configuration(
+    request: Request,
+) -> EnvironmentConfigurationResponse:
+    """Return safe application discovery state to a Service Administrator."""
+    _require_user_management(request)
+    configuration = await run_in_threadpool(
+        request.app.state.environment_configuration.get
+    )
+    return _environment_configuration_payload(request, configuration)
+
+
+@router.post(
+    "/environment/applications/discover",
+    response_model=EnvironmentConfigurationResponse,
+)
+async def discover_environment_applications(
+    request: Request,
+) -> EnvironmentConfigurationResponse:
+    """Refresh the supported Oracle application catalog without changing it."""
+    _require_user_management(request)
+    validate_csrf(request)
+    try:
+        configuration = await run_in_threadpool(
+            request.app.state.environment_configuration.discover
+        )
+    except EPMError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return _environment_configuration_payload(request, configuration)
+
+
+@router.put(
+    "/environment/application",
+    response_model=EnvironmentConfigurationResponse,
+)
+async def select_environment_application(
+    request: Request,
+    payload: EnvironmentApplicationSelectionRequest,
+) -> EnvironmentConfigurationResponse:
+    """Persist one live Oracle application for the next process startup."""
+    actor = _require_user_management(request)
+    validate_csrf(request)
+    try:
+        configuration = await run_in_threadpool(
+            request.app.state.environment_configuration.select_application,
+            payload.application_name,
+            selected_by_user_id=actor.user_id,
+        )
+    except ConfigurationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except EPMError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return _environment_configuration_payload(
+        request,
+        configuration,
+        selection_changed=True,
     )
 
 
@@ -206,6 +284,49 @@ async def create_session(
     return SessionResponse(
         status="success",
         message="Signed in successfully.",
+        csrf_token=csrf_token(request),
+        user=_user_summary(user),
+    )
+
+
+@router.post("/session/oracle", response_model=SessionResponse)
+async def create_oracle_session(
+    request: Request,
+    payload: OracleSessionLoginRequest,
+) -> SessionResponse:
+    """Validate Oracle credentials and provision one approved linked profile."""
+    validate_csrf(request)
+    service = request.app.state.oracle_password_authentication
+    if service is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Oracle credential sign-in is not enabled.",
+        )
+    try:
+        user = await run_in_threadpool(
+            service.authenticate,
+            payload.username,
+            payload.password,
+            ip_address=client_ip(request),
+        )
+    except OracleCredentialAuthenticationError as exc:
+        raise HTTPException(
+            status_code=403 if exc.credentials_valid else 401,
+            detail=str(exc),
+        ) from exc
+    except EPMError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Oracle EPM sign-in could not be completed. Verify that the "
+                "environment and Access Control integration account are available."
+            ),
+        ) from exc
+    start_user_session(request, user)
+    request.session["authentication_method"] = "oracle_basic"
+    return SessionResponse(
+        status="success",
+        message="Signed in with Oracle EPM successfully.",
         csrf_token=csrf_token(request),
         user=_user_summary(user),
     )
@@ -757,15 +878,62 @@ async def job_activity_detail(
     return {"status": "success", "job": _job_detail_payload(run)}
 
 
+@router.get("/jobs/{execution_id}/artifacts/{artifact_id}")
+async def download_job_artifact(
+    request: Request,
+    execution_id: str,
+    artifact_id: str,
+):
+    """Download a retained Oracle-generated artifact for an authorized user."""
+    require_api_session(request)
+    run = request.app.state.control_center.get_workflow_run(execution_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="The requested job was not found.")
+    stored_name = None
+    display_name = None
+    for step in run.steps:
+        raw_artifacts = step.details.get("artifacts")
+        if not isinstance(raw_artifacts, list):
+            continue
+        for item in raw_artifacts:
+            if not isinstance(item, dict) or str(item.get("artifact_id")) != artifact_id:
+                continue
+            stored_name = str(item.get("stored_name") or "")
+            display_name = str(item.get("name") or stored_name)
+            break
+    if not stored_name or stored_name != Path(stored_name).name:
+        raise HTTPException(status_code=404, detail="The requested artifact was not found.")
+    evidence_root = (
+        request.app.state.settings.runtime_data_dir / "job-evidence"
+    ).resolve()
+    root = (evidence_root / execution_id).resolve()
+    if root.parent != evidence_root:
+        raise HTTPException(
+            status_code=404,
+            detail="The requested artifact was not found.",
+        )
+    path = (root / stored_name).resolve()
+    if path.parent != root or not path.is_file():
+        raise HTTPException(status_code=404, detail="The requested artifact was not found.")
+    return FileResponse(path, filename=display_name or stored_name)
+
+
 @router.get("/access-control")
 async def access_control_workspace(request: Request) -> dict[str, object]:
     """Return the administrator's password-free user and role catalog."""
     user = _require_user_management(request)
+    sources = request.app.state.access_control.authentication_sources()
     return {
         "status": "success",
         "current_user_id": user.user_id,
         "users": [
-            _platform_user_payload(account)
+            _platform_user_payload(
+                account,
+                authentication_source=sources.get(
+                    account.user_id,
+                    "LOCAL_RECOVERY",
+                ),
+            )
             for account in request.app.state.access_control.list_users()
         ],
         "roles": [
@@ -881,7 +1049,7 @@ async def remove_identity_role_mapping(
 async def preview_identity_provisioning(
     request: Request,
 ) -> dict[str, object]:
-    """Preview collision-safe passwordless platform account changes."""
+    """Preview collision-safe passwordless linked-profile changes."""
     _require_user_management(request)
     validate_csrf(request)
     try:
@@ -1013,6 +1181,66 @@ def _require_user_management(request: Request) -> UserAccount:
     return user
 
 
+def _environment_configuration_payload(
+    request: Request,
+    configuration: EnvironmentConfiguration | None,
+    *,
+    selection_changed: bool = False,
+) -> EnvironmentConfigurationResponse:
+    """Serialize non-secret environment state and controlled restart advice."""
+    settings = request.app.state.settings
+    selected = (
+        configuration.selected_application if configuration else None
+    )
+    active = settings.application_name.strip() or None
+    restart_required = bool(
+        selected and selected.casefold() != (active or "").casefold()
+    )
+    message = None
+    if restart_required:
+        saved_state = "was saved" if selection_changed else "is saved"
+        message = (
+            f"Application '{selected}' {saved_state} but is not active yet. "
+            "Restart the API and worker services once so every background "
+            "component uses the new environment context."
+        )
+    elif selected:
+        message = f"Application '{selected}' is configured."
+    elif configuration and len(configuration.applications) > 1:
+        message = "Select the Planning application used by this platform."
+    elif configuration and configuration.last_discovery_error:
+        message = "Oracle application discovery needs attention."
+    else:
+        message = "Discover the Planning applications available in Oracle."
+    return EnvironmentConfigurationResponse(
+        base_url=settings.epm_base_url,
+        deployment_mode=settings.resolved_deployment_mode,
+        active_application=active,
+        selected_application=selected,
+        selection_source=(
+            configuration.selection_source if configuration else None
+        ),
+        configured=bool(selected),
+        restart_required=restart_required,
+        applications=[
+            EnvironmentApplicationSummary(
+                name=item.name,
+                product_type=item.product_type,
+                application_type=item.application_type,
+                admin_mode=item.admin_mode,
+            )
+            for item in (configuration.applications if configuration else ())
+        ],
+        last_discovered_at=(
+            configuration.last_discovered_at if configuration else None
+        ),
+        last_discovery_error=(
+            configuration.last_discovery_error if configuration else None
+        ),
+        message=message,
+    )
+
+
 def _user_summary(user: UserAccount) -> CurrentUserSummary:
     persona, persona_label = _persona_for(user)
     return CurrentUserSummary(
@@ -1027,7 +1255,11 @@ def _user_summary(user: UserAccount) -> CurrentUserSummary:
     )
 
 
-def _platform_user_payload(user: UserAccount) -> dict[str, object]:
+def _platform_user_payload(
+    user: UserAccount,
+    *,
+    authentication_source: str = "LOCAL_RECOVERY",
+) -> dict[str, object]:
     """Return a credential-free representation of one platform identity."""
     return {
         "user_id": user.user_id,
@@ -1039,6 +1271,7 @@ def _platform_user_payload(user: UserAccount) -> dict[str, object]:
         "created_at": user.created_at.isoformat(),
         "updated_at": user.updated_at.isoformat(),
         "last_login_at": user.last_login_at.isoformat() if user.last_login_at else None,
+        "authentication_source": authentication_source,
     }
 
 
@@ -1066,16 +1299,26 @@ def _job_summary_payload(run) -> dict[str, object]:
         "total_steps": len(run.steps),
         "initiated_by": run.initiated_by_display or run.initiated_by or "System",
         "trigger_source": run.trigger_source.value,
+        "executed_by": run.oracle_execution_username,
         "error_message": _safe_error(run.error_message),
     }
 
 
 def _job_detail_payload(run) -> dict[str, object]:
+    import_evidence = aggregate_import_evidence(
+        step.details for step in run.steps
+    )
+    for artifact in import_evidence["artifacts"]:
+        artifact["download_url"] = (
+            f"/api/v1/jobs/{run.execution_id}/artifacts/"
+            f"{artifact['artifact_id']}"
+        )
     return {
         **_job_summary_payload(run),
         "record_statistics": aggregate_record_statistics(
             step.details for step in run.steps
         ),
+        **import_evidence,
         "steps": [
             {
                 "sequence": step.sequence,

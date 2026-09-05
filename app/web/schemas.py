@@ -42,10 +42,13 @@ from app.models.report import (
     DataSliceReportDefinition,
     ReportAxisSegment,
 )
-from app.models.process_schedule import (
-    ProcessScheduleInput,
-    ScheduleContextMode,
-    ScheduleFrequency,
+from app.models.automation_schedule import (
+    AutomationConcurrencyPolicy,
+    AutomationInputPolicy,
+    AutomationMisfirePolicy,
+    AutomationScheduleFrequency,
+    AutomationScheduleInput,
+    AutomationTargetType,
 )
 from app.models.access_control import RoleCode
 
@@ -214,50 +217,95 @@ class PlanningProcessVariableUpdateRequest(BaseModel):
         )
 
 
-class ProcessScheduleRequest(BaseModel):
-    """Validated schedule creation or replacement request."""
+class AutomationScheduleRequest(BaseModel):
+    """Validated allowlisted automation schedule request."""
 
-    name: str = Field(min_length=1, max_length=120)
-    process_code: str = Field(min_length=1, max_length=50)
-    frequency: ScheduleFrequency
+    name: str = Field(min_length=1, max_length=160)
+    target_type: AutomationTargetType = AutomationTargetType.ORACLE_PIPELINE
+    target_key: str = Field(min_length=1, max_length=300)
+    frequency: AutomationScheduleFrequency
     timezone: str = Field(min_length=1, max_length=120)
     first_run_local: datetime
-    context_mode: ScheduleContextMode
-    preset_id: int | None = Field(default=None, gt=0)
+    input_policy: AutomationInputPolicy = AutomationInputPolicy.ORACLE_DEFAULTS
+    variables: dict[str, str] = Field(default_factory=dict)
+    inbox_files: dict[str, str] = Field(default_factory=dict)
+    misfire_policy: AutomationMisfirePolicy = AutomationMisfirePolicy.RUN_ONCE
     enabled: bool = True
 
-    @field_validator("name", "process_code", "timezone", mode="before")
+    @field_validator("name", "target_key", "timezone", mode="before")
     @classmethod
     def normalize_schedule_text(cls, value) -> str:
         return str(value).strip()
 
+    @field_validator("variables", "inbox_files", mode="before")
+    @classmethod
+    def normalize_schedule_mapping(cls, value) -> dict[str, str]:
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            raise ValueError("Pipeline inputs must be name/value objects.")
+        return {
+            str(name).strip(): str(item).strip()
+            for name, item in value.items()
+        }
+
     @model_validator(mode="after")
-    def validate_schedule_context(self):
+    def validate_schedule_input(self):
         if self.first_run_local.tzinfo is not None:
             raise ValueError(
                 "First run must be a local date and time without an offset."
             )
+        has_pipeline_inputs = bool(self.variables or self.inbox_files)
         if (
-            self.context_mode is ScheduleContextMode.RUN_PRESET
-            and self.preset_id is None
+            self.target_type is AutomationTargetType.ORACLE_PIPELINE
+            and self.input_policy is AutomationInputPolicy.ORACLE_DEFAULTS
+            and has_pipeline_inputs
         ):
-            raise ValueError("Select a saved run preset.")
+            raise ValueError(
+                "Oracle-default schedules cannot contain fixed Pipeline inputs."
+            )
+        if self.target_type is AutomationTargetType.RTP_REGISTRY_SYNC:
+            if self.input_policy is not AutomationInputPolicy.FIXED:
+                raise ValueError(
+                    "RTP registry synchronization requires fixed automated "
+                    "snapshot settings."
+                )
+            if has_pipeline_inputs:
+                raise ValueError(
+                    "RTP registry synchronization cannot contain Pipeline "
+                    "variables or file mappings."
+                )
         return self
 
-    def to_domain(self) -> ProcessScheduleInput:
-        return ProcessScheduleInput(
+    def to_domain(self, environment_key: str) -> AutomationScheduleInput:
+        configuration = (
+            {
+                "variables": self.variables,
+                "inbox_files": self.inbox_files,
+            }
+            if (
+                self.target_type is AutomationTargetType.ORACLE_PIPELINE
+                and self.input_policy is AutomationInputPolicy.FIXED
+            )
+            else {}
+        )
+        return AutomationScheduleInput(
+            environment_key=environment_key,
             name=self.name,
-            process_code=self.process_code,
+            target_type=self.target_type,
+            target_key=self.target_key,
             frequency=self.frequency,
             timezone=self.timezone,
             first_run_local=self.first_run_local,
-            context_mode=self.context_mode,
-            preset_id=self.preset_id,
+            input_policy=self.input_policy,
+            configuration=configuration,
+            concurrency_policy=AutomationConcurrencyPolicy.SKIP_IF_ACTIVE,
+            misfire_policy=self.misfire_policy,
             enabled=self.enabled,
         )
 
 
-class ProcessScheduleEnabledRequest(BaseModel):
+class AutomationScheduleEnabledRequest(BaseModel):
     """Pause or resume one saved schedule."""
 
     enabled: bool

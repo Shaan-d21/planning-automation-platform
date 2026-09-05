@@ -14,18 +14,32 @@ from urllib.parse import quote, urlencode
 
 from authlib.integrations.base_client.errors import OAuthError
 
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.sessions import SessionMiddleware
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 
+from app import __version__
 from app.agent.capabilities import AgentCapabilityGateway
 from app.agent.models import AgentToolActivity
 from app.agent.preflight import AgentActionPreflightService
 from app.agent.service import AgentApplicationService
 from app.api.v1 import router as v1_router
 from app.application.connection import VerifyConnection
+from app.application.automation_schedule_manager import (
+    AutomationScheduleManager,
+)
+from app.application.automation_schedule_targets import (
+    AutomationScheduleCoordinator,
+    PipelineScheduleTargetAdapter,
+    RTPRegistrySyncScheduleTargetAdapter,
+)
+from app.application.automation_scheduling import (
+    AutomationScheduleApplicationService,
+)
 from app.application.data_review import DataReviewWorkspaceService
 from app.application.control_center import ControlCenterService
 from app.application.execution_manager import (
@@ -43,7 +57,7 @@ from app.application.oracle_files import (
     OracleFileCatalogApplicationService,
     OracleFilePurpose,
 )
-from app.application.operations import OperationCatalogService
+from app.application.operations import BusinessRuleOperationInput, OperationCatalogService
 from app.application.planning_process import (
     PlanningProcessApplicationService,
 )
@@ -51,8 +65,6 @@ from app.application.planning_work import PlanningWorkApplicationService
 from app.application.process_designer import (
     ProcessDesignerApplicationService,
 )
-from app.application.schedule_manager import ProcessScheduleManager
-from app.application.scheduling import ProcessScheduleApplicationService
 from app.application.substitution_variables import (
     SubstitutionVariableApplicationService,
 )
@@ -63,6 +75,7 @@ from app.application.user_variables import UserVariableApplicationService
 from app.application.reports import ReportWorkspaceService
 from app.config.settings import PROJECT_ROOT, Settings
 from app.infrastructure.database.migration import assert_schema_current
+from app.infrastructure.database.engine import database_for
 from app.models.access_control import (
     ExecutionActor,
     Permission,
@@ -71,17 +84,32 @@ from app.models.access_control import (
     UserAccount,
 )
 from app.models.api_token import ApiTokenScope
-from app.models.oracle_artifact import OracleArtifactStatus, OracleArtifactType
-from app.models.process_schedule import ProcessSchedule, ScheduleRunOutcome
+from app.models.automation_schedule import (
+    AutomationSchedule,
+    AutomationScheduleRunStatus,
+)
+from app.models.oracle_artifact import (
+    OracleArtifactStatus,
+    OracleArtifactType,
+    OracleEnvironment,
+)
 from app.models.workflow import WorkflowStepStatus
 from app.services.access_control_service import AccessControlService
 from app.services.api_token_service import ApiTokenService
+from app.services.business_rule_rtp_registry import BusinessRuleRTPRegistryService
 from app.services.data_validation_excel_renderer import (
     DataValidationExcelRenderer,
 )
 from app.services.excel_report_renderer import ExcelFormReportRenderer
 from app.services.federated_authentication_service import (
     FederatedAuthenticationService,
+)
+from app.services.environment_configuration_service import (
+    EnvironmentConfigurationService,
+)
+from app.services.notification_service import create_notification_service
+from app.services.oracle_password_authentication_service import (
+    OraclePasswordAuthenticationService,
 )
 from app.utils.exceptions import (
     AgentError,
@@ -120,8 +148,8 @@ from app.web.schemas import (
     PlatformPasswordResetRequest,
     PlatformUserRequest,
     PlatformUserUpdateRequest,
-    ProcessScheduleEnabledRequest,
-    ProcessScheduleRequest,
+    AutomationScheduleEnabledRequest,
+    AutomationScheduleRequest,
     ReportPreflightRequest,
     ReportRegistrationRequest,
     ReportRunRequest,
@@ -131,6 +159,7 @@ from app.web.schemas import (
 )
 from app.web.uploads import ProcessUploadStore
 from app.web.api_versioning import ApiVersioningMiddleware
+from app.web.request_correlation import RequestCorrelationMiddleware
 from app.web.security import (
     client_ip as _client_ip,
     csrf_token as _csrf_token,
@@ -155,11 +184,16 @@ def create_app(
     ) = None,
 ) -> FastAPI:
     """Create an isolated, testable FastAPI application."""
-    resolved_settings = settings or Settings.from_env()
+    initial_settings = settings or Settings.from_env()
     assert_schema_current(
-        resolved_settings.database_target,
+        initial_settings.database_target,
         project_root=PROJECT_ROOT,
     )
+    environment_configuration = EnvironmentConfigurationService(
+        initial_settings,
+        logger=LOGGER.getChild("environment_configuration"),
+    )
+    resolved_settings = environment_configuration.resolve_startup_settings()
     resolved_secret = (
         session_secret
         or os.getenv("WEB_SESSION_SECRET", "").strip()
@@ -183,6 +217,32 @@ def create_app(
         resolved_settings,
         logger=LOGGER.getChild("operation_catalog"),
     )
+    automation_schedule_service = AutomationScheduleApplicationService(
+        resolved_settings.database_target
+    )
+    automation_schedule_coordinator = AutomationScheduleCoordinator(
+        automation_schedule_service,
+        operation_manager,
+        (
+            PipelineScheduleTargetAdapter(
+                resolved_settings,
+                catalog=operation_catalog,
+            ),
+            RTPRegistrySyncScheduleTargetAdapter(resolved_settings),
+        ),
+        notification_service=create_notification_service(
+            resolved_settings.email_notifications,
+            logger=LOGGER.getChild("schedule_notifications"),
+        ),
+        environment_url=resolved_settings.epm_base_url,
+        application_name=resolved_settings.application_name,
+        logger=LOGGER.getChild("automation_schedule_coordinator"),
+    )
+    automation_schedule_manager = AutomationScheduleManager(
+        automation_schedule_coordinator,
+        poll_interval=resolved_settings.schedule_poll_interval,
+        logger=LOGGER.getChild("automation_schedule_manager"),
+    )
     flow_recovery = StandaloneFlowRecoveryService(
         resolved_settings,
         catalog=operation_catalog,
@@ -194,18 +254,6 @@ def create_app(
     process_designer = ProcessDesignerApplicationService(
         resolved_settings,
         logger=LOGGER.getChild("process_designer"),
-    )
-    schedule_service = ProcessScheduleApplicationService(
-        resolved_settings,
-        process_service=process_service,
-        process_designer=process_designer,
-        execution_manager=execution_manager,
-        logger=LOGGER.getChild("schedule_service"),
-    )
-    schedule_manager = ProcessScheduleManager(
-        schedule_service,
-        poll_interval=resolved_settings.schedule_poll_interval,
-        logger=LOGGER.getChild("schedule_manager"),
     )
     recovery_worker = DurableExecutionWorker(
         resolved_settings,
@@ -224,28 +272,40 @@ def create_app(
     async def lifespan(application: FastAPI):
         recovery_worker.recover_expired()
         if resolved_settings.execution_runtime == "embedded":
-            schedule_manager.start()
+            automation_schedule_manager.start()
         try:
             yield
         finally:
             if resolved_settings.execution_runtime == "embedded":
-                schedule_manager.shutdown()
+                automation_schedule_manager.shutdown()
             execution_manager.shutdown()
             operation_manager.shutdown()
             application.state.agent_service.shutdown()
 
     app = FastAPI(
         title="BISP Solutions Oracle EPM Automation",
-        version="0.1.0",
+        version=__version__,
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
         lifespan=lifespan,
     )
     app.state.settings = resolved_settings
+    app.state.platform_database = database_for(
+        resolved_settings.database_target
+    )
+    app.state.environment_configuration = EnvironmentConfigurationService(
+        resolved_settings,
+        logger=LOGGER.getChild("environment_configuration"),
+    )
     app.state.access_control = access_control
     app.state.federated_authentication = FederatedAuthenticationService(
         resolved_settings.database_target
+    )
+    app.state.oracle_password_authentication = (
+        OraclePasswordAuthenticationService(resolved_settings)
+        if resolved_settings.oracle_password_login_ready
+        else None
     )
     app.state.oracle_oidc = (
         OracleOIDCClient(resolved_settings)
@@ -259,11 +319,17 @@ def create_app(
     app.state.control_center = ControlCenterService(resolved_settings)
     app.state.process_service = process_service
     app.state.process_designer = process_designer
-    app.state.schedule_service = schedule_service
-    app.state.schedule_manager = schedule_manager
+    app.state.automation_schedule_service = automation_schedule_service
+    app.state.automation_schedule_coordinator = (
+        automation_schedule_coordinator
+    )
+    app.state.automation_schedule_manager = automation_schedule_manager
     app.state.execution_manager = execution_manager
     app.state.operation_manager = operation_manager
     app.state.operation_catalog = operation_catalog
+    app.state.business_rule_rtp_registry = BusinessRuleRTPRegistryService(
+        resolved_settings
+    )
     app.state.flow_recovery = flow_recovery
     app.state.oracle_file_catalog = OracleFileCatalogApplicationService(
         resolved_settings,
@@ -301,6 +367,9 @@ def create_app(
             data_review=app.state.data_review,
             operation_catalog=app.state.operation_catalog,
             user_variables=app.state.user_variables,
+            business_rule_rtps=app.state.business_rule_rtp_registry,
+            schedule_service=app.state.automation_schedule_service,
+            schedule_coordinator=app.state.automation_schedule_coordinator,
         ),
         preflight=AgentActionPreflightService(
             control_center=app.state.control_center,
@@ -308,6 +377,8 @@ def create_app(
             report_workspace=app.state.report_workspace,
         ),
         operation_manager=app.state.operation_manager,
+        schedule_service=app.state.automation_schedule_service,
+        schedule_coordinator=app.state.automation_schedule_coordinator,
         logger=LOGGER.getChild("agent"),
     )
     app.state.upload_store = ProcessUploadStore(
@@ -322,6 +393,10 @@ def create_app(
         max_age=8 * 60 * 60,
     )
     app.add_middleware(ApiVersioningMiddleware)
+    app.add_middleware(
+        RequestCorrelationMiddleware,
+        logger=LOGGER.getChild("http"),
+    )
     app.mount(
         "/static",
         StaticFiles(directory=WEB_ROOT / "static"),
@@ -346,6 +421,44 @@ def create_app(
         if response.headers.get("content-type", "").startswith("text/html"):
             response.headers["Cache-Control"] = "no-store"
         return response
+
+    @app.get("/health/live", include_in_schema=False)
+    async def liveness_probe():
+        """Confirm that the API process can serve HTTP requests."""
+        return {
+            "status": "alive",
+            "service": "bisp-epm-api",
+            "version": __version__,
+        }
+
+    @app.get("/health/ready", include_in_schema=False)
+    async def readiness_probe(request: Request):
+        """Confirm that required platform persistence is reachable."""
+        def verify_database() -> None:
+            with request.app.state.platform_database.connect() as connection:
+                connection.execute(text("SELECT 1"))
+
+        try:
+            await run_in_threadpool(verify_database)
+        except SQLAlchemyError:
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "status": "unavailable",
+                    "service": "bisp-epm-api",
+                    "version": __version__,
+                    "components": {"database": "unavailable"},
+                },
+            )
+        return {
+            "status": "ready",
+            "service": "bisp-epm-api",
+            "version": __version__,
+            "components": {"database": "available"},
+            "environment_configured": bool(
+                request.app.state.settings.application_name
+            ),
+        }
 
     def modern_workspace_redirect(
         request: Request,
@@ -416,7 +529,7 @@ def create_app(
 
     @app.get("/auth/oracle/callback", include_in_schema=False)
     async def oracle_identity_callback(request: Request):
-        """Validate Oracle tokens and start a session for an approved shadow user."""
+        """Validate Oracle tokens and start a session for an approved linked user."""
         oidc = request.app.state.oracle_oidc
         if oidc is None:
             return identity_redirect(error="federated_not_configured")
@@ -520,9 +633,18 @@ def create_app(
     async def health(request: Request):
         require_api_session(request)
         factory = request.app.state.connection_use_case_factory
+        health_settings = await run_in_threadpool(
+            request.app.state.environment_configuration.resolve_startup_settings
+        )
+        active_application = request.app.state.settings.application_name
+        restart_required = bool(
+            health_settings.application_name
+            and health_settings.application_name.casefold()
+            != active_application.casefold()
+        )
         try:
             result = await run_in_threadpool(
-                factory(resolved_settings).execute
+                factory(health_settings).execute
             )
         except EPMError as exc:
             return JSONResponse(
@@ -530,7 +652,9 @@ def create_app(
                 content={
                     "status": "unavailable",
                     "product": "Oracle EPM Automation Platform",
-                    "application": resolved_settings.application_name,
+                    "application": health_settings.application_name,
+                    "active_application": active_application,
+                    "restart_required": restart_required,
                     "details": str(exc),
                 },
             )
@@ -538,6 +662,8 @@ def create_app(
             "status": "ok",
             "product": "Oracle EPM Automation Platform",
             "application": result.application_name,
+            "active_application": active_application,
+            "restart_required": restart_required,
             "deployment_mode": result.deployment_mode,
             "application_type": result.application_type,
             "storage": result.storage,
@@ -683,23 +809,16 @@ def create_app(
     async def schedules_page(request: Request):
         return modern_workspace_redirect(request, "schedules")
 
-    @app.get("/api/schedules/catalog")
-    async def schedule_catalog(request: Request):
-        require_api_session(request)
-        try:
-            catalog = request.app.state.schedule_service.catalog()
-        except EPMError as exc:
-            return _schedule_error("Schedule catalog is unavailable.", exc)
-        return {
-            "status": "success",
-            "processes": [asdict(item) for item in catalog],
-        }
-
     @app.get("/api/schedules")
     async def list_schedules(request: Request):
         require_api_session(request)
         try:
-            schedules = request.app.state.schedule_service.list_schedules()
+            environment_key = _schedule_environment(request).key
+            schedules = (
+                request.app.state.automation_schedule_service.list_schedules(
+                    environment_key=environment_key
+                )
+            )
         except EPMError as exc:
             return _schedule_error("Schedules could not be loaded.", exc)
         return {
@@ -710,13 +829,13 @@ def create_app(
     @app.post("/api/schedules/preview")
     async def preview_schedule(
         request: Request,
-        payload: ProcessScheduleRequest,
+        payload: AutomationScheduleRequest,
     ):
         require_api_session(request)
         try:
             preview = await run_in_threadpool(
-                request.app.state.schedule_service.preview,
-                payload.to_domain(),
+                request.app.state.automation_schedule_coordinator.preview,
+                payload.to_domain(_schedule_environment(request).key),
             )
         except EPMError as exc:
             return _schedule_error("Schedule could not be validated.", exc)
@@ -725,21 +844,24 @@ def create_app(
             "next_run_at": preview.next_run_at.isoformat(),
             "next_run_local": preview.next_run_local.isoformat(),
             "message": (
-                "The Process, unattended context, file strategy, and "
-                "recurrence are ready."
+                "Oracle can generate the Calculation Manager snapshot, and "
+                "the automated recurrence is ready."
+                if payload.target_type.value == "RTP_REGISTRY_SYNC"
+                else "The live Oracle Pipeline definition, unattended inputs, "
+                "and recurrence are ready."
             ),
         }
 
     @app.post("/api/schedules")
     async def create_schedule(
         request: Request,
-        payload: ProcessScheduleRequest,
+        payload: AutomationScheduleRequest,
     ):
         require_api_session(request)
         try:
             schedule = await run_in_threadpool(
-                request.app.state.schedule_service.create,
-                payload.to_domain(),
+                request.app.state.automation_schedule_coordinator.create,
+                payload.to_domain(_schedule_environment(request).key),
             )
         except EPMError as exc:
             return _schedule_error("Schedule could not be created.", exc)
@@ -756,14 +878,19 @@ def create_app(
     async def update_schedule(
         request: Request,
         schedule_id: int,
-        payload: ProcessScheduleRequest,
+        payload: AutomationScheduleRequest,
     ):
         require_api_session(request)
         try:
+            existing = request.app.state.automation_schedule_service.get(
+                schedule_id
+            )
+            if existing.environment_key != _schedule_environment(request).key:
+                raise ConfigurationError("Schedule was not found.")
             schedule = await run_in_threadpool(
-                request.app.state.schedule_service.update,
+                request.app.state.automation_schedule_coordinator.update,
                 schedule_id,
-                payload.to_domain(),
+                payload.to_domain(_schedule_environment(request).key),
             )
         except EPMError as exc:
             return _schedule_error("Schedule could not be updated.", exc)
@@ -777,12 +904,17 @@ def create_app(
     async def set_schedule_enabled(
         request: Request,
         schedule_id: int,
-        payload: ProcessScheduleEnabledRequest,
+        payload: AutomationScheduleEnabledRequest,
     ):
         require_api_session(request)
         try:
+            existing = request.app.state.automation_schedule_service.get(
+                schedule_id
+            )
+            if existing.environment_key != _schedule_environment(request).key:
+                raise ConfigurationError("Schedule was not found.")
             schedule = await run_in_threadpool(
-                request.app.state.schedule_service.set_enabled,
+                request.app.state.automation_schedule_coordinator.set_enabled,
                 schedule_id,
                 payload.enabled,
             )
@@ -795,53 +927,84 @@ def create_app(
             "schedule": _schedule_payload(schedule),
         }
 
-    @app.post("/api/schedules/{schedule_id}/runs")
-    async def run_schedule_now(request: Request, schedule_id: int):
+    @app.get("/api/schedules/{schedule_id}/runs")
+    async def list_schedule_runs(request: Request, schedule_id: int):
         require_api_session(request)
         try:
-            result = await run_in_threadpool(
-                request.app.state.schedule_service.run_now,
+            schedule = request.app.state.automation_schedule_service.get(
+                schedule_id
+            )
+            if schedule.environment_key != _schedule_environment(request).key:
+                raise ConfigurationError("Schedule was not found.")
+            runs = request.app.state.automation_schedule_service.list_runs(
                 schedule_id,
-                actor=_request_actor(request),
+                limit=100,
             )
         except EPMError as exc:
-            return _schedule_error("Scheduled Process could not be started.", exc)
-        if result.outcome is not ScheduleRunOutcome.SUBMITTED:
-            return JSONResponse(
-                status_code=(
-                    409
-                    if result.outcome is ScheduleRunOutcome.SKIPPED
-                    else 400
-                ),
-                content={
-                    "status": "error",
-                    "message": "Scheduled Process was not started.",
-                    "details": result.message,
-                },
+            return _schedule_error("Schedule history could not be loaded.", exc)
+        return {
+            "status": "success",
+            "runs": [_schedule_run_payload(item) for item in runs],
+        }
+
+    @app.get("/api/schedules/runs/history")
+    async def list_schedule_run_evidence(
+        request: Request,
+        schedule_id: int | None = Query(default=None, gt=0),
+        status: AutomationScheduleRunStatus | None = None,
+        scheduled_from: datetime | None = None,
+        scheduled_to: datetime | None = None,
+        limit: int = Query(default=100, ge=1, le=1_000),
+    ):
+        require_api_session(request)
+        try:
+            evidence = (
+                request.app.state.automation_schedule_service
+                .list_run_evidence(
+                    _schedule_environment(request).key,
+                    schedule_id=schedule_id,
+                    status=status,
+                    scheduled_from=scheduled_from,
+                    scheduled_to=scheduled_to,
+                    limit=limit,
+                )
             )
-        return JSONResponse(
-            status_code=202,
-            content={
-                "status": "accepted",
-                "message": result.message,
-                "execution_id": result.execution_id,
-                "redirect": f"/app/runs/{result.execution_id}",
+        except EPMError as exc:
+            return _schedule_error("Schedule history could not be loaded.", exc)
+        counts = {item.value: 0 for item in AutomationScheduleRunStatus}
+        for item in evidence:
+            counts[item.run.status.value] += 1
+        return {
+            "status": "success",
+            "summary": {
+                "total": len(evidence),
+                "submitted": counts["SUBMITTED"],
+                "completed": counts["COMPLETED"],
+                "failed": counts["FAILED"],
+                "skipped": counts["SKIPPED"],
+                "claimed": counts["CLAIMED"],
             },
-        )
+            "runs": [_schedule_evidence_payload(item) for item in evidence],
+        }
 
     @app.delete("/api/schedules/{schedule_id}")
     async def delete_schedule(request: Request, schedule_id: int):
         require_api_session(request)
         try:
+            schedule = request.app.state.automation_schedule_service.get(
+                schedule_id
+            )
+            if schedule.environment_key != _schedule_environment(request).key:
+                raise ConfigurationError("Schedule was not found.")
             await run_in_threadpool(
-                request.app.state.schedule_service.archive,
+                request.app.state.automation_schedule_service.archive,
                 schedule_id,
             )
         except EPMError as exc:
             return _schedule_error("Schedule could not be deleted.", exc)
         return {
             "status": "success",
-            "message": "Schedule was deleted. Process history was retained.",
+            "message": "Schedule was archived. Execution history was retained.",
         }
 
     @app.get(
@@ -1066,6 +1229,7 @@ def create_app(
                 else None
             ),
             "execution": result.get("execution"),
+            "schedule": result.get("schedule"),
             "decision": (
                 asdict(result["decision"])
                 if result.get("decision")
@@ -1134,6 +1298,16 @@ def create_app(
                             raw_uploads[
                                 f"step_{index}:source_file"
                             ] = token
+                        pipeline_uploads = values.get("uploads", {})
+                        if isinstance(pipeline_uploads, dict):
+                            for key, pipeline_token in pipeline_uploads.items():
+                                normalized_token = str(
+                                    pipeline_token or ""
+                                ).strip()
+                                if normalized_token:
+                                    raw_uploads[
+                                        f"step_{index}:{key}"
+                                    ] = normalized_token
                 upload_label = "Standalone Planning Flow"
             if raw_uploads:
                 upload_tokens = tuple(
@@ -1210,6 +1384,7 @@ def create_app(
                 else None
             ),
             "execution": result.get("execution"),
+            "schedule": result.get("schedule"),
             "decision": (
                 asdict(result["decision"])
                 if result.get("decision")
@@ -2070,6 +2245,10 @@ def create_app(
                 request.app.state.operation_catalog.discover_job_names,
                 job_type="RULES",
             )
+            registry_status = await run_in_threadpool(
+                request.app.state.business_rule_rtp_registry.status,
+                live_rule_names=jobs,
+            )
         except EPMError as exc:
             return JSONResponse(
                 status_code=400,
@@ -2082,6 +2261,110 @@ def create_app(
         return {
             "status": "success",
             "jobs": jobs,
+            "rtp_registry": _business_rule_rtp_status_payload(
+                registry_status
+            ),
+        }
+
+    @app.get("/api/operations/business-rules/rtp-registry/status")
+    async def business_rule_rtp_registry_status(request: Request):
+        require_api_session(request)
+        live_rules = None
+        live_catalog_error = None
+        try:
+            live_rules = await run_in_threadpool(
+                request.app.state.operation_catalog.discover_job_names,
+                job_type="RULES",
+            )
+        except EPMError as exc:
+            live_catalog_error = str(exc)
+        registry_status = await run_in_threadpool(
+            request.app.state.business_rule_rtp_registry.status,
+            live_rule_names=live_rules,
+        )
+        return {
+            "status": "success",
+            "registry": _business_rule_rtp_status_payload(
+                registry_status
+            ),
+            "live_catalog_error": live_catalog_error,
+        }
+
+    @app.get("/api/operations/business-rules/rtp-definition")
+    async def business_rule_rtp_definition(
+        request: Request,
+        rule_name: str,
+    ):
+        require_api_session(request)
+        try:
+            definition = await run_in_threadpool(
+                request.app.state.business_rule_rtp_registry.get_definition,
+                rule_name,
+            )
+            latest_import = await run_in_threadpool(
+                request.app.state.business_rule_rtp_registry.latest_import
+            )
+        except EPMError as exc:
+            return _operation_start_error(exc)
+        return {
+            "status": "success",
+            "definition": (
+                _business_rule_rtp_payload(definition)
+                if definition is not None
+                else None
+            ),
+            "fallback": definition is None,
+            "message": (
+                "A synchronized Calc Manager RTP definition is available."
+                if definition is not None
+                else "No synchronized RTP definition exists for this rule; "
+                "exact manual prompt names remain available."
+            ),
+            "latest_import": (
+                _business_rule_rtp_import_payload(latest_import)
+                if latest_import is not None
+                else None
+            ),
+        }
+
+    @app.post("/api/operations/business-rules/rtp-registry/import")
+    async def import_business_rule_rtp_registry(
+        request: Request,
+        filename: str,
+    ):
+        require_api_session(request)
+        content_length = request.headers.get("content-length")
+        if content_length:
+            try:
+                if int(content_length) > 50 * 1024 * 1024:
+                    raise ValueError
+            except ValueError:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "status": "error",
+                        "message": "The Calc Manager export exceeds the 50 MB limit.",
+                    },
+                )
+        content = await request.body()
+        try:
+            result = await run_in_threadpool(
+                request.app.state.business_rule_rtp_registry.import_package,
+                filename,
+                content,
+            )
+        except EPMError as exc:
+            return _operation_start_error(exc)
+        return {
+            "status": "success",
+            "message": (
+                f"Imported {result.prompts_imported} runtime prompts for "
+                f"{result.rules_imported} Business Rules: "
+                f"{result.rules_added or 0} new, "
+                f"{result.rules_changed or 0} changed, and "
+                f"{result.rules_unchanged or 0} unchanged."
+            ),
+            "result": _business_rule_rtp_import_payload(result),
         }
 
     @app.get("/api/operations/data-integrations/catalog")
@@ -2288,8 +2571,16 @@ def create_app(
                 available_rules,
                 label="Business Rule",
             )
+            normalized_prompts = await run_in_threadpool(
+                request.app.state.business_rule_rtp_registry.normalize_for_execution,
+                payload.rule_name,
+                payload.runtime_prompts,
+            )
             execution = request.app.state.operation_manager.submit(
-                payload.to_domain(),
+                BusinessRuleOperationInput(
+                    rule_name=payload.rule_name,
+                    runtime_prompts=normalized_prompts,
+                ),
                 actor=_request_actor(request),
                 on_queued=task_link,
             )
@@ -3453,6 +3744,7 @@ def _execution_payload(manager, execution_id: str, settings: Settings):
         error_message = workflow.error_message
         initiated_by = workflow.initiated_by_display or workflow.initiated_by
         trigger_source = workflow.trigger_source.value
+        executed_by = workflow.oracle_execution_username
     else:
         steps = []
         status = managed.status.value
@@ -3461,6 +3753,7 @@ def _execution_payload(manager, execution_id: str, settings: Settings):
         error_message = managed.error_message
         initiated_by = None
         trigger_source = None
+        executed_by = settings.oracle_execution_username
 
     terminal_steps = sum(
         item["status"]
@@ -3502,6 +3795,7 @@ def _execution_payload(manager, execution_id: str, settings: Settings):
         "error_message": error_message,
         "initiated_by": initiated_by,
         "trigger_source": trigger_source,
+        "executed_by": executed_by,
         "steps": steps,
         "completed_steps": terminal_steps,
         "total_steps": len(steps),
@@ -3559,6 +3853,104 @@ def _oracle_artifact_payload(artifact) -> dict:
     }
 
 
+def _business_rule_rtp_payload(definition) -> dict[str, object]:
+    """Serialize a current RTP contract without exposing raw source XML."""
+    return {
+        "rule_name": definition.rule_name,
+        "cube_name": definition.cube_name,
+        "source_name": definition.source_name,
+        "source_checksum": definition.source_checksum,
+        "parser_version": definition.parser_version,
+        "definition_checksum": definition.definition_checksum,
+        "synchronized_at": definition.synchronized_at.isoformat(),
+        "prompts": [
+            {
+                "name": prompt.name,
+                "label": prompt.label,
+                "order": prompt.prompt_order,
+                "value_type": prompt.value_type,
+                "dimension": prompt.dimension,
+                "default_value": prompt.default_value,
+                "has_default": prompt.has_default,
+                "required": prompt.required_at_launch,
+                "hidden": prompt.hidden,
+                "allow_multiple": prompt.allow_multiple,
+                "security_mode": prompt.security_mode,
+                "scope_type": prompt.scope_type,
+                "scope_name": prompt.scope_name,
+                "source_variable_id": prompt.source_variable_id,
+                "limit_type": prompt.limit_type,
+                "limit_value": prompt.limit_value,
+            }
+            for prompt in definition.prompts
+        ],
+    }
+
+
+def _business_rule_rtp_import_payload(result) -> dict[str, object]:
+    payload = {
+        "sync_run_id": result.sync_run_id,
+        "source_name": result.source_name,
+        "source_checksum": result.source_checksum,
+        "parser_version": result.parser_version,
+        "rules_imported": result.rules_imported,
+        "prompts_imported": result.prompts_imported,
+        "warnings": list(result.warnings),
+        "completed_at": result.completed_at.isoformat(),
+    }
+    if result.rules_added is not None:
+        payload["rules_added"] = result.rules_added
+        payload["rules_changed"] = result.rules_changed
+        payload["rules_unchanged"] = result.rules_unchanged
+    return payload
+
+
+def _business_rule_rtp_status_payload(status) -> dict[str, object]:
+    return {
+        "health": status.status,
+        "application_name": status.application_name,
+        "live_catalog_available": status.live_catalog_available,
+        "live_rule_count": status.live_rule_count,
+        "synchronized_rule_count": status.synchronized_rule_count,
+        "synchronized_prompt_count": status.synchronized_prompt_count,
+        "unsynchronized_live_rules": list(status.unsynchronized_live_rules),
+        "definitions_not_in_live_catalog": list(
+            status.definitions_not_in_live_catalog
+        ),
+        "definitions": [
+            {
+                "rule_name": item.rule_name,
+                "cube_name": item.cube_name,
+                "source_name": item.source_name,
+                "synchronized_at": item.synchronized_at.isoformat(),
+                "prompt_count": item.prompt_count,
+                "required_prompt_count": item.required_prompt_count,
+                "live_status": item.live_status,
+            }
+            for item in status.definitions
+        ],
+        "recent_syncs": [
+            {
+                "sync_run_id": item.sync_run_id,
+                "source_name": item.source_name,
+                "parser_version": item.parser_version,
+                "status": item.status,
+                "rules_imported": item.rules_imported,
+                "prompts_imported": item.prompts_imported,
+                "warnings": list(item.warnings),
+                "error_summary": item.error_summary,
+                "started_at": item.started_at.isoformat(),
+                "completed_at": (
+                    item.completed_at.isoformat()
+                    if item.completed_at is not None
+                    else None
+                ),
+            }
+            for item in status.recent_syncs
+        ],
+    }
+
+
 def _require_live_artifact(
     requested_name: str,
     available_names: tuple[str, ...],
@@ -3603,19 +3995,31 @@ def _operation_start_error(exc: EPMError) -> JSONResponse:
     )
 
 
-def _schedule_payload(schedule: ProcessSchedule) -> dict[str, object]:
+def _schedule_environment(request: Request) -> OracleEnvironment:
+    settings = request.app.state.settings
+    return OracleEnvironment.from_settings(
+        settings.epm_base_url,
+        settings.application_name,
+    )
+
+
+def _schedule_payload(schedule: AutomationSchedule) -> dict[str, object]:
     """Return a JSON-safe schedule representation."""
+    variables = schedule.configuration.get("variables", {})
+    inbox_files = schedule.configuration.get("inbox_files", {})
     return {
         "schedule_id": schedule.schedule_id,
         "name": schedule.name,
-        "process_code": schedule.process_code,
+        "target_type": schedule.target_type.value,
+        "target_key": schedule.target_key,
         "frequency": schedule.frequency.value,
-        "frequency_label": schedule.frequency.display_name,
         "timezone": schedule.timezone,
         "first_run_local": schedule.first_run_local.isoformat(),
-        "context_mode": schedule.context_mode.value,
-        "context_label": schedule.context_mode.display_name,
-        "preset_id": schedule.preset_id,
+        "input_policy": schedule.input_policy.value,
+        "variables": variables if isinstance(variables, dict) else {},
+        "inbox_files": inbox_files if isinstance(inbox_files, dict) else {},
+        "misfire_policy": schedule.misfire_policy.value,
+        "concurrency_policy": schedule.concurrency_policy.value,
         "enabled": schedule.enabled,
         "next_run_at": (
             schedule.next_run_at.isoformat()
@@ -3633,6 +4037,33 @@ def _schedule_payload(schedule: ProcessSchedule) -> dict[str, object]:
         "last_outcome": schedule.last_outcome.value,
         "last_error": schedule.last_error,
     }
+
+
+def _schedule_run_payload(run) -> dict[str, object]:
+    return {
+        "run_id": run.run_id,
+        "schedule_id": run.schedule_id,
+        "scheduled_for": run.scheduled_for.isoformat(),
+        "claimed_at": run.claimed_at.isoformat(),
+        "status": run.status.value,
+        "completed_at": (
+            run.completed_at.isoformat() if run.completed_at else None
+        ),
+        "execution_id": run.execution_id,
+        "error_message": run.error_message,
+    }
+
+
+def _schedule_evidence_payload(evidence) -> dict[str, object]:
+    payload = _schedule_run_payload(evidence.run)
+    payload.update(
+        {
+            "schedule_name": evidence.schedule_name,
+            "target_type": evidence.target_type.value,
+            "target_key": evidence.target_key,
+        }
+    )
+    return payload
 
 
 def _schedule_error(message: str, exc: EPMError) -> JSONResponse:

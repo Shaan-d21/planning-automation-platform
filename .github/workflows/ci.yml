@@ -1,0 +1,122 @@
+name: Release checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend-tests:
+    name: Backend / Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - name: Install Python dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -r requirements-dev.txt
+      - name: Run backend tests
+        run: python -m pytest
+
+  database-migrations:
+    name: PostgreSQL migration smoke test
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: epm_automation
+          POSTGRES_USER: epm_automation
+          POSTGRES_PASSWORD: ci-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U epm_automation -d epm_automation"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql+psycopg://epm_automation:ci-password@127.0.0.1:5432/epm_automation
+      EPM_BASE_URL: https://example.invalid
+      EPM_USERNAME: ci-user
+      APPLICATION_NAME: CI
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install production dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
+      - name: Apply application migrations
+        run: python -m alembic upgrade head
+      - name: Verify application migration head
+        run: python -m alembic current --check-heads
+      - name: Initialize LangGraph checkpoints
+        run: python -m app.agent.checkpoint_setup
+
+  agent-evaluation:
+    name: Agent release evaluation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install production dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
+      - name: Run deterministic agent release gate
+        run: >-
+          python -m app.agent.evaluation
+          --suite evaluations/agent/release_v1.json
+          --output reports/agent-evaluation.json
+          --fail-on-threshold
+      - name: Publish agent evaluation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-evaluation-report
+          path: reports/agent-evaluation.json
+          if-no-files-found: error
+          retention-days: 30
+
+  frontend:
+    name: Frontend / Node 22
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.19.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.1
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+      - name: Test and build frontend
+        working-directory: frontend
+        run: pnpm verify

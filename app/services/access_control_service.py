@@ -19,6 +19,7 @@ from app.infrastructure.database.engine import (
 )
 from app.infrastructure.database.schema import (
     authentication_events,
+    external_identities,
     platform_role_permissions,
     platform_roles,
     platform_user_roles,
@@ -41,6 +42,8 @@ _SCRYPT_R = 8
 _SCRYPT_P = 1
 _MAX_FAILED_LOGINS = 5
 _LOCKOUT_DURATION = timedelta(minutes=15)
+_MAX_ORACLE_CREDENTIAL_FAILURES = 3
+_MAX_ORACLE_IP_FAILURES = 15
 
 
 ROLE_DEFINITIONS = (
@@ -384,6 +387,32 @@ class AccessControlService:
             )
         return tuple(self.require_user(user_id) for user_id in ids)
 
+    def authentication_sources(self) -> dict[int, str]:
+        """Classify accounts without exposing password or provider details."""
+        with self._database.connect() as connection:
+            rows = connection.execute(
+                select(
+                    platform_users.c.user_id,
+                    platform_users.c.password_hash,
+                    external_identities.c.external_identity_id,
+                ).outerjoin(
+                    external_identities,
+                    external_identities.c.user_id == platform_users.c.user_id,
+                )
+            ).all()
+        sources: dict[int, str] = {}
+        for user_id, password_hash, external_identity_id in rows:
+            linked = external_identity_id is not None
+            local = password_hash is not None
+            sources[int(user_id)] = (
+                "ORACLE_AND_LOCAL"
+                if linked and local
+                else "ORACLE_LINKED"
+                if linked
+                else "LOCAL_RECOVERY"
+            )
+        return sources
+
     def create_user(
         self,
         *,
@@ -447,6 +476,7 @@ class AccessControlService:
     ) -> UserAccount:
         """Update profile, activation, and role assignments safely."""
         current = self.require_user(user_id)
+        self._reject_linked_profile_management(user_id)
         _, normalized_name, normalized_email = self._validated_identity(
             current.username,
             display_name,
@@ -527,6 +557,7 @@ class AccessControlService:
     ) -> None:
         """Replace a password without ever returning a credential value."""
         user = self.require_user(user_id)
+        self._reject_linked_profile_management(user_id)
         password_hash = PasswordHasher.hash(password)
         with self._database.begin() as connection:
             connection.execute(
@@ -545,6 +576,21 @@ class AccessControlService:
                 success=True,
             )
 
+    def _reject_linked_profile_management(self, user_id: int) -> None:
+        """Keep externally governed profiles passwordless and mapping-managed."""
+        with self._database.connect() as connection:
+            linked = connection.execute(
+                select(external_identities.c.external_identity_id).where(
+                    external_identities.c.user_id == user_id
+                )
+            ).first()
+        if linked is not None:
+            raise AccessControlError(
+                "This Oracle-linked profile is managed through synchronized "
+                "role mappings. Its role and password cannot be changed as a "
+                "local account."
+            )
+
     def record_logout(
         self,
         user: UserAccount,
@@ -560,6 +606,128 @@ class AccessControlService:
                 actor_user_id=user.user_id,
                 success=True,
                 ip_address=ip_address,
+            )
+
+    def record_external_login(
+        self,
+        user_id: int,
+        *,
+        provider_code: str,
+        authentication_method: str,
+        ip_address: str | None = None,
+    ) -> UserAccount:
+        """Record a successful externally validated login without a password."""
+        user = self.require_user(user_id)
+        now = datetime.now(UTC)
+        with self._database.begin() as connection:
+            connection.execute(
+                update(platform_users)
+                .where(platform_users.c.user_id == user_id)
+                .values(
+                    failed_login_count=0,
+                    locked_until=None,
+                    last_login_at=now,
+                    updated_at=now,
+                )
+            )
+            self._record_event(
+                connection,
+                event_type="ORACLE_LOGIN_SUCCESS",
+                username=user.username,
+                actor_user_id=user_id,
+                success=True,
+                ip_address=ip_address,
+                details={
+                    "provider_code": provider_code,
+                    "authentication_method": authentication_method,
+                },
+            )
+        return self.require_user(user_id)
+
+    def record_external_login_failure(
+        self,
+        username: str,
+        *,
+        reason: str,
+        credential_failure: bool = False,
+        ip_address: str | None = None,
+    ) -> None:
+        """Audit an external-login rejection without storing credentials."""
+        normalized = str(username).strip()[:80] or "unknown"
+        with self._database.begin() as connection:
+            self._record_event(
+                connection,
+                event_type=(
+                    "ORACLE_CREDENTIAL_REJECTED"
+                    if credential_failure
+                    else "ORACLE_LOGIN_DENIED"
+                ),
+                username=normalized,
+                actor_user_id=None,
+                success=False,
+                ip_address=ip_address,
+                details={"reason": str(reason).strip()[:120]},
+            )
+
+    def external_login_rate_limited(
+        self,
+        username: str,
+        *,
+        ip_address: str | None = None,
+    ) -> bool:
+        """Protect Oracle accounts from repeated credential verification."""
+        normalized = str(username).strip()[:80].casefold()
+        cutoff = datetime.now(UTC) - _LOCKOUT_DURATION
+        with self._database.connect() as connection:
+            username_failures = int(
+                connection.execute(
+                    select(func.count())
+                    .select_from(authentication_events)
+                    .where(
+                        authentication_events.c.event_type
+                        == "ORACLE_CREDENTIAL_REJECTED",
+                        authentication_events.c.occurred_at >= cutoff,
+                        func.lower(authentication_events.c.username_snapshot)
+                        == normalized,
+                    )
+                ).scalar_one()
+            )
+            if username_failures >= _MAX_ORACLE_CREDENTIAL_FAILURES:
+                return True
+            if not ip_address:
+                return False
+            ip_failures = int(
+                connection.execute(
+                    select(func.count())
+                    .select_from(authentication_events)
+                    .where(
+                        authentication_events.c.event_type
+                        == "ORACLE_CREDENTIAL_REJECTED",
+                        authentication_events.c.occurred_at >= cutoff,
+                        authentication_events.c.ip_address
+                        == str(ip_address)[:45],
+                    )
+                ).scalar_one()
+            )
+            return ip_failures >= _MAX_ORACLE_IP_FAILURES
+
+    def record_external_login_throttled(
+        self,
+        username: str,
+        *,
+        ip_address: str | None = None,
+    ) -> None:
+        """Audit a protected request without extending the throttle window."""
+        normalized = str(username).strip()[:80] or "unknown"
+        with self._database.begin() as connection:
+            self._record_event(
+                connection,
+                event_type="ORACLE_LOGIN_THROTTLED",
+                username=normalized,
+                actor_user_id=None,
+                success=False,
+                ip_address=ip_address,
+                details={"reason": "TOO_MANY_CREDENTIAL_FAILURES"},
             )
 
     def _seed_roles(self) -> None:

@@ -93,6 +93,7 @@ class Settings:
     agent_max_tool_rounds: int = 4
     agent_history_messages: int = 20
     identity_provider: str = "local"
+    oracle_password_login_enabled: bool = True
     oracle_identity_issuer_url: str | None = None
     oracle_identity_client_id: str | None = None
     oracle_identity_client_secret: str | None = None
@@ -114,10 +115,18 @@ class Settings:
         if env_file is not None:
             load_dotenv(dotenv_path=env_file, override=False)
 
+        integration_username = (
+            os.getenv("EPM_INTEGRATION_USERNAME", "").strip()
+            or os.getenv("EPM_USERNAME", "").strip()
+        )
+        integration_password = (
+            os.getenv("EPM_INTEGRATION_PASSWORD")
+            or os.getenv("EPM_PASSWORD")
+            or None
+        )
         required_values = {
             "EPM_BASE_URL": os.getenv("EPM_BASE_URL", "").strip(),
-            "EPM_USERNAME": os.getenv("EPM_USERNAME", "").strip(),
-            "APPLICATION_NAME": os.getenv("APPLICATION_NAME", "").strip(),
+            "EPM_INTEGRATION_USERNAME": integration_username,
         }
         missing = [
             name for name, value in required_values.items() if not value
@@ -494,6 +503,10 @@ class Settings:
             raise ConfigurationError(
                 "IDENTITY_PROVIDER must be 'local' or 'oracle_cloud'."
             )
+        oracle_password_login_enabled = cls._parse_bool(
+            "ORACLE_PASSWORD_LOGIN_ENABLED",
+            os.getenv("ORACLE_PASSWORD_LOGIN_ENABLED", "true"),
+        )
         oracle_identity_issuer_url = os.getenv(
             "ORACLE_IDENTITY_ISSUER_URL",
             "",
@@ -557,9 +570,9 @@ class Settings:
 
         return cls(
             epm_base_url=base_url,
-            epm_username=required_values["EPM_USERNAME"],
-            epm_password=os.getenv("EPM_PASSWORD") or None,
-            application_name=required_values["APPLICATION_NAME"],
+            epm_username=required_values["EPM_INTEGRATION_USERNAME"],
+            epm_password=integration_password,
+            application_name=os.getenv("APPLICATION_NAME", "").strip(),
             deployment_mode=deployment_mode,
             request_timeout=timeout,
             verify_ssl=verify_ssl,
@@ -609,6 +622,7 @@ class Settings:
             agent_max_tool_rounds=agent_max_tool_rounds,
             agent_history_messages=agent_history_messages,
             identity_provider=identity_provider,
+            oracle_password_login_enabled=oracle_password_login_enabled,
             oracle_identity_issuer_url=oracle_identity_issuer_url,
             oracle_identity_client_id=oracle_identity_client_id,
             oracle_identity_client_secret=oracle_identity_client_secret,
@@ -638,12 +652,18 @@ class Settings:
         return self.runtime_data_dir
 
     def require_rest_password(self) -> str:
-        """Return the REST password or raise a targeted configuration error."""
+        """Return the integration password or raise a targeted error."""
         if not self.epm_password:
             raise ConfigurationError(
-                "EPM_PASSWORD is required when using the REST API."
+                "EPM_INTEGRATION_PASSWORD (or legacy EPM_PASSWORD) is "
+                "required when using the REST API."
             )
         return self.epm_password
+
+    @property
+    def oracle_execution_username(self) -> str:
+        """Return the non-secret Oracle identity used by backend execution."""
+        return self.epm_username
 
     @property
     def federated_identity_ready(self) -> bool:
@@ -652,6 +672,17 @@ class Settings:
             self.identity_provider == "oracle_cloud"
             and self.oracle_identity_issuer_url
             and self.oracle_identity_client_id
+        )
+
+    @property
+    def oracle_password_login_ready(self) -> bool:
+        """Return whether Cloud EPM credentials can drive linked-profile login."""
+        return bool(
+            self.oracle_password_login_enabled
+            and self.resolved_deployment_mode == "cloud"
+            and self.epm_username
+            and self.epm_password
+            and self.application_name
         )
 
     @property

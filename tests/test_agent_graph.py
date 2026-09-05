@@ -2061,6 +2061,50 @@ def test_graph_collects_metadata_import_and_conditional_refresh_inputs(
     assert provider.tool_names == ()
 
 
+def test_graph_accepts_exact_metadata_refresh_job_when_catalog_is_hidden(
+    tmp_path: Path,
+) -> None:
+    provider = _StepProvider(
+        requested_tool="prepare_operation_action",
+        arguments={
+            "operation_code": "metadata-import",
+            "objective": "Import the approved product hierarchy.",
+            "artifact_name": "Import Products",
+        },
+    )
+    graph = _orchestrator(
+        tmp_path,
+        provider,
+        operation_catalog=_MetadataImportRecommendationCatalog(
+            ("Import Products",)
+        ),
+    )
+    paused = graph.invoke(
+        conversation_id="conversation-metadata-hidden-refresh",
+        user_id=7,
+        messages=(_message("Run Import Products metadata job."),),
+    )
+
+    assert paused.input_request is not None
+    assert paused.input_request.context["refresh_jobs"] == []
+    approval = graph.resume_input(
+        conversation_id="conversation-metadata-hidden-refresh",
+        user_id=7,
+        request_id=paused.input_request.request_id,
+        values={
+            "file_choice": {"source": "configured"},
+            "error_file_name": "",
+            "refresh_after_import": True,
+            "refresh_job_name": "Refresh_Cube",
+        },
+    )
+
+    assert approval.approval_request is not None
+    assert approval.approval_request.input_values["refresh_job_name"] == (
+        "Refresh_Cube"
+    )
+
+
 def test_graph_carries_confirmed_metadata_import_from_previous_turn(
     tmp_path: Path,
 ) -> None:
@@ -2443,6 +2487,97 @@ def test_multi_step_intent_preserves_business_sequence() -> None:
         "business-rules",
         "data-maps",
     )
+
+
+def test_multi_step_intent_includes_pipeline_and_variable_operations() -> None:
+    steps = AgentGraphOrchestrator._requested_multi_step_codes(
+        "Run Oracle Pipeline PIPE01, then update substitution variable CurYr, "
+        "then run Business Rule Calculate Forecast."
+    )
+
+    assert steps == (
+        "pipelines",
+        "substitution-variables",
+        "business-rules",
+    )
+
+
+def test_data_integration_name_is_not_also_a_native_data_import() -> None:
+    steps = AgentGraphOrchestrator._requested_multi_step_codes(
+        "Run Revenue Load Data Integration."
+    )
+
+    assert steps == ("data-integrations",)
+
+
+def test_separate_integration_and_native_data_import_are_both_preserved() -> None:
+    steps = AgentGraphOrchestrator._requested_multi_step_codes(
+        "Run the Data Integration, then load data with the native import job."
+    )
+
+    assert steps == ("data-integrations", "data-import")
+
+
+def test_pipeline_does_not_preempt_a_multi_operation_request(
+    tmp_path: Path,
+) -> None:
+    graph = _orchestrator(
+        tmp_path,
+        _NeverCalledProvider(),
+        operation_catalog=_PipelineOperationCatalog(),
+    )
+
+    result = graph.invoke(
+        conversation_id="conversation-pipeline-then-rule",
+        user_id=7,
+        messages=(
+            _message(
+                "Run Oracle Pipeline PIPE01, then Business Rule "
+                "Calculate Forecast."
+            ),
+        ),
+    )
+
+    assert result.tool_activity[0].name == "plan_multi_step_request"
+    assert result.tool_activity[0].result["resolution"] == (
+        "STANDALONE_FLOW_DRAFT"
+    )
+    assert [
+        item["code"]
+        for item in result.tool_activity[0].result["requested_steps"]
+    ] == ["pipelines", "business-rules"]
+
+
+def test_multi_step_parser_resolves_exact_artifacts_across_catalogs(
+    tmp_path: Path,
+) -> None:
+    graph = _orchestrator(
+        tmp_path,
+        _NeverCalledProvider(),
+        operation_catalog=_RepeatedRuleFlowOperationCatalog(),
+    )
+
+    call = graph._deterministic_multi_step_plan_call(
+        {
+            "messages": [
+                {
+                    "role": AgentMessageRole.USER.value,
+                    "content": (
+                        "Run Revenue_Load_v2, then BR_Calculate_Revenue_v2, "
+                        "then BR_Aggregate_Forecast_v2."
+                    ),
+                }
+            ],
+            "allowed_tool_names": ["plan_multi_step_request"],
+        }
+    )
+
+    assert call is not None
+    assert call.arguments["requested_steps"] == [
+        "data-integrations",
+        "business-rules",
+        "business-rules",
+    ]
 
 
 def test_graph_plans_multi_step_request_without_model_or_oracle_writes(

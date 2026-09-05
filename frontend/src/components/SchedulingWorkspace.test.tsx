@@ -3,37 +3,36 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { SchedulingWorkspace } from "./SchedulingWorkspace";
 
-const catalog = {
+const pipelineCatalog = {
   status: "success",
-  processes: [{
-    code: "MONTHLY_FORECAST",
-    name: "Monthly Revenue Forecast",
-    context_mode: "PIPELINE_DEFAULTS",
-    supports_pipeline_defaults: true,
-    presets: [{
-      preset_id: 4,
-      name: "FY27 March",
-      one_click_ready: true,
-      year: "FY27",
-      start_period: "Mar",
-      end_period: "Mar",
-      inbox_files: [["DataFile", "March_Revenue.csv"]],
-      required_upload_keys: []
-    }]
-  }]
+  pipelines: [{ code: "PIPE01", name: "Monthly Revenue Forecast", description: null }],
+  artifacts: []
+};
+
+const pipelinePreview = {
+  status: "success",
+  preview: {
+    code: "PIPE01",
+    display_name: "Monthly Revenue Forecast",
+    variables: [{ name: "YEAR", display_name: "Planning year", default_value: "FY27", required: true, editable: true }],
+    file_requirements: [],
+    stages: [{ name: "LOAD", display_name: "Load and calculate", job_count: 2, runs_in_parallel: false }]
+  }
 };
 
 const schedule = {
   schedule_id: 11,
   name: "Monthly Revenue Forecast · Monthly",
-  process_code: "MONTHLY_FORECAST",
+  target_type: "ORACLE_PIPELINE",
+  target_key: "PIPE01",
   frequency: "MONTHLY",
-  frequency_label: "Monthly",
   timezone: "Asia/Kolkata",
   first_run_local: "2027-03-01T08:00:00",
-  context_mode: "PIPELINE_DEFAULTS",
-  context_label: "Oracle Pipeline defaults",
-  preset_id: null,
+  input_policy: "ORACLE_DEFAULTS",
+  variables: {},
+  inbox_files: {},
+  misfire_policy: "RUN_ONCE",
+  concurrency_policy: "SKIP_IF_ACTIVE",
   enabled: true,
   next_run_at: "2027-03-01T02:30:00+00:00",
   created_at: "2026-08-01T00:00:00+00:00",
@@ -45,59 +44,122 @@ const schedule = {
 };
 
 function response(body: unknown, status = 200) {
-  return Promise.resolve(new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json" }
-  }));
+  return Promise.resolve(new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } }));
 }
+
+const emptyHistory = {
+  status: "success",
+  summary: { total: 0, submitted: 0, completed: 0, failed: 0, skipped: 0, claimed: 0 },
+  runs: []
+};
 
 describe("SchedulingWorkspace", () => {
   beforeEach(() => {
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
-      if (url === "/api/v1/schedules/catalog") return response(catalog);
+      if (url === "/api/v1/operations/pipelines/catalog") return response(pipelineCatalog);
       if (url === "/api/v1/schedules") return response({ status: "success", schedules: [schedule] });
-      if (url === "/api/v1/jobs") return response({ status: "success", summary: { total: 0, running: 0, successful: 0, failed: 0, success_rate: 0 }, jobs: [] });
+      if (url === "/api/v1/schedules/runs/history") return response(emptyHistory);
       return response({ detail: "Unexpected request" }, 404);
     }));
   });
 
-  it("shows active schedules and their next occurrence", async () => {
+  it("shows Pipeline-first schedules and their next occurrence", async () => {
     render(<SchedulingWorkspace csrfToken="csrf-test" onOpenExecution={vi.fn()} />);
-
     expect((await screen.findAllByText("Monthly Revenue Forecast · Monthly")).length).toBeGreaterThan(0);
-    expect(screen.getByText("Oracle Pipeline defaults")).toBeTruthy();
-    expect(screen.getByText("No automatic occurrence has run yet")).toBeTruthy();
+    expect(screen.getByText("Oracle Pipeline · Monthly Revenue Forecast")).toBeTruthy();
+    expect(screen.getByText("Oracle defaults")).toBeTruthy();
   });
 
-  it("validates a guided schedule before saving it", async () => {
+  it("live-inspects the Pipeline before creating a schedule", async () => {
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url === "/api/v1/schedules/catalog") return response(catalog);
+      if (url === "/api/v1/operations/pipelines/catalog") return response(pipelineCatalog);
+      if (url === "/api/v1/operations/pipelines/PIPE01/preflight") return response(pipelinePreview);
+      if (url === "/api/v1/schedules/preview") return response({ status: "success", next_run_at: "2027-03-01T02:30:00+00:00", next_run_local: "2027-03-01T08:00:00+05:30", message: "The live Pipeline is ready." });
       if (url === "/api/v1/schedules" && init?.method === "POST") return response({ status: "success", message: "Schedule created.", schedule }, 201);
       if (url === "/api/v1/schedules") return response({ status: "success", schedules: [schedule] });
-      if (url === "/api/v1/jobs") return response({ status: "success", summary: { total: 0, running: 0, successful: 0, failed: 0, success_rate: 0 }, jobs: [] });
-      if (url === "/api/v1/schedules/preview") return response({ status: "success", next_run_at: "2027-03-01T02:30:00+00:00", next_run_local: "2027-03-01T08:00:00+05:30", message: "The Process and recurrence are ready." });
+      if (url === "/api/v1/schedules/runs/history") return response(emptyHistory);
       return response({ detail: "Unexpected request" }, 404);
     });
-    render(<SchedulingWorkspace csrfToken="csrf-test" onOpenExecution={vi.fn()} />);
 
+    render(<SchedulingWorkspace csrfToken="csrf-test" onOpenExecution={vi.fn()} />);
     fireEvent.click(await screen.findByRole("button", { name: "Create schedule" }));
-    expect(screen.getByRole("dialog", { name: "Configure the schedule" })).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: /Review schedule/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Validate & review/i }));
 
     expect(await screen.findByText("Live validation passed")).toBeTruthy();
-    const reviewDialog = screen.getByRole("dialog", { name: "Review before saving" });
-    fireEvent.click(within(reviewDialog).getByRole("button", { name: "Create schedule" }));
+    const dialog = screen.getByRole("dialog", { name: "Configure the schedule" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Create schedule" }));
 
-    await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) =>
-      String(url) === "/api/v1/schedules/preview" && init?.method === "POST"
-    )).toBe(true));
-    await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) =>
-      String(url) === "/api/v1/schedules" && init?.method === "POST"
-    )).toBe(true));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => String(url) === "/api/v1/schedules" && init?.method === "POST")).toBe(true));
     const previewCall = fetchMock.mock.calls.find(([url]) => String(url) === "/api/v1/schedules/preview");
     expect(new Headers(previewCall?.[1]?.headers).get("X-CSRF-Token")).toBe("csrf-test");
+  });
+
+  it("keeps discovered fixed Pipeline inputs visible while values are edited", async () => {
+    vi.mocked(fetch).mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/v1/operations/pipelines/catalog") return response(pipelineCatalog);
+      if (url === "/api/v1/operations/pipelines/PIPE01/preflight") return response(pipelinePreview);
+      if (url === "/api/v1/schedules") return response({ status: "success", schedules: [] });
+      if (url === "/api/v1/schedules/runs/history") return response(emptyHistory);
+      return response({ detail: "Unexpected request" }, 404);
+    });
+
+    render(<SchedulingWorkspace csrfToken="csrf-test" onOpenExecution={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Create schedule" }));
+    fireEvent.change(screen.getByLabelText("Input strategy"), { target: { value: "FIXED" } });
+    fireEvent.click(screen.getByRole("button", { name: /Load Pipeline inputs/i }));
+
+    const year = await screen.findByDisplayValue("FY27");
+    fireEvent.change(year, { target: { value: "FY28" } });
+
+    expect((screen.getByDisplayValue("FY28") as HTMLInputElement).value).toBe("FY28");
+    expect(screen.getByRole("button", { name: /Validate & review/i })).toBeTruthy();
+  });
+
+  it("schedules a fully automated RTP registry synchronization", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/v1/operations/pipelines/catalog") return response(pipelineCatalog);
+      if (url === "/api/v1/schedules/preview") return response({ status: "success", next_run_at: "2027-03-01T02:30:00+00:00", next_run_local: "2027-03-01T08:00:00+05:30", message: "Oracle can generate the Calculation Manager snapshot, and the automated recurrence is ready." });
+      if (url === "/api/v1/schedules") return response({ status: "success", schedules: [] });
+      if (url === "/api/v1/schedules/runs/history") return response(emptyHistory);
+      return response({ detail: "Unexpected request" }, 404);
+    });
+
+    render(<SchedulingWorkspace csrfToken="csrf-test" onOpenExecution={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Create schedule" }));
+    fireEvent.change(screen.getByLabelText("Automation type"), { target: { value: "RTP_REGISTRY_SYNC" } });
+    fireEvent.click(screen.getByRole("button", { name: /Validate & review/i }));
+
+    expect(await screen.findByText("Live validation passed")).toBeTruthy();
+    expect(screen.getByText("BISP_CalcManager_RTP")).toBeTruthy();
+    const previewCall = fetchMock.mock.calls.find(([url]) => String(url) === "/api/v1/schedules/preview");
+    const body = JSON.parse(String(previewCall?.[1]?.body));
+    expect(body.target_type).toBe("RTP_REGISTRY_SYNC");
+    expect(body.target_key).toBe("BISP_CalcManager_RTP");
+    expect(body.variables).toEqual({});
+  });
+
+  it("shows occurrence evidence and opens submitted execution details", async () => {
+    const openExecution = vi.fn();
+    vi.mocked(fetch).mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/v1/operations/pipelines/catalog") return response(pipelineCatalog);
+      if (url === "/api/v1/schedules") return response({ status: "success", schedules: [schedule] });
+      if (url === "/api/v1/schedules/runs/history") return response({
+        status: "success",
+        summary: { total: 1, submitted: 1, completed: 0, failed: 0, skipped: 0, claimed: 0 },
+        runs: [{ run_id: 1, schedule_id: 11, schedule_name: schedule.name, target_type: "ORACLE_PIPELINE", target_key: "PIPE01", scheduled_for: "2027-03-01T02:30:00+00:00", claimed_at: "2027-03-01T02:30:01+00:00", completed_at: "2027-03-01T02:30:02+00:00", status: "SUBMITTED", execution_id: "execution-1", error_message: null }]
+      });
+      return response({ detail: "Unexpected request" }, 404);
+    });
+
+    render(<SchedulingWorkspace csrfToken="csrf-test" onOpenExecution={openExecution} />);
+    fireEvent.click(await screen.findByRole("button", { name: "View execution" }));
+    expect(openExecution).toHaveBeenCalledWith("execution-1");
   });
 });

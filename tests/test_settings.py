@@ -113,6 +113,35 @@ def test_settings_loads_and_normalizes_environment(
     assert settings.require_epm_automate_password_file() == password_file
 
 
+def test_settings_prefers_explicit_integration_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name, value in REQUIRED_ENV.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("EPM_INTEGRATION_USERNAME", "worker.account")
+    monkeypatch.setenv("EPM_INTEGRATION_PASSWORD", "worker-secret")
+
+    settings = Settings.from_env(env_file=None)
+
+    assert settings.epm_username == "worker.account"
+    assert settings.oracle_execution_username == "worker.account"
+    assert settings.require_rest_password() == "worker-secret"
+
+
+def test_settings_accepts_legacy_execution_credential_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name, value in REQUIRED_ENV.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("EPM_INTEGRATION_USERNAME", raising=False)
+    monkeypatch.delenv("EPM_INTEGRATION_PASSWORD", raising=False)
+
+    settings = Settings.from_env(env_file=None)
+
+    assert settings.oracle_execution_username == "epm.user"
+    assert settings.require_rest_password() == "secret"
+
+
 def test_settings_selects_groq_defaults(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -140,6 +169,19 @@ def test_settings_allows_missing_rest_password_until_rest_is_used(
 
     with pytest.raises(ConfigurationError, match="EPM_PASSWORD"):
         settings.require_rest_password()
+
+
+def test_settings_allows_application_discovery_when_name_is_omitted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name, value in REQUIRED_ENV.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("APPLICATION_NAME")
+
+    settings = Settings.from_env(env_file=None)
+
+    assert settings.application_name == ""
+    assert settings.oracle_password_login_ready is False
 
 
 @pytest.mark.parametrize(

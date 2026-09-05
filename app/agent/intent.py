@@ -13,6 +13,7 @@ class AgentIntent(StrEnum):
     HISTORY_REVIEW = "HISTORY_REVIEW"
     DATA_REVIEW = "DATA_REVIEW"
     OPERATION_PREPARATION = "OPERATION_PREPARATION"
+    SCHEDULING = "SCHEDULING"
     GENERAL_GUIDANCE = "GENERAL_GUIDANCE"
 
 
@@ -118,6 +119,17 @@ class AgentIntentRouter:
         "user variable",
         "planning job",
     )
+    _SCHEDULE_TERMS = (
+        "schedule",
+        "scheduled",
+        "recurrence",
+        "recurring",
+        "every day",
+        "every week",
+        "every month",
+        "pause automation",
+        "resume automation",
+    )
 
     @classmethod
     def route(
@@ -141,7 +153,16 @@ class AgentIntentRouter:
                 term in normalized for term in cls._DATA_REFINEMENT_TERMS
             )
         )
-        if any(term in normalized for term in cls._HISTORY_TERMS):
+        history_match = any(
+            term in normalized for term in cls._HISTORY_TERMS
+        )
+        schedule_match = any(
+            term in normalized for term in cls._SCHEDULE_TERMS
+        )
+        if schedule_match:
+            selected.add("prepare_schedule_action")
+            matches.append(AgentIntent.SCHEDULING)
+        if history_match:
             selected.add("get_recent_execution_history")
             selected.add("get_execution_evidence")
             matches.append(AgentIntent.HISTORY_REVIEW)
@@ -158,8 +179,10 @@ class AgentIntentRouter:
                 }
             )
             matches.append(AgentIntent.DATA_REVIEW)
-        if explicit_operation or (
+        if (explicit_operation and not schedule_match) or (
             not contextual_refinement
+            and not history_match
+            and not schedule_match
             and any(term in normalized for term in cls._PREPARATION_TERMS)
         ):
             selected.update(

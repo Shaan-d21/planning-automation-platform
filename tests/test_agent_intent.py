@@ -16,6 +16,7 @@ ALL_TOOLS = frozenset(
         "compare_data_slices",
         "list_operation_artifacts",
         "prepare_operation_action",
+        "prepare_schedule_action",
     }
 )
 
@@ -35,6 +36,17 @@ def test_history_intent_exposes_history_without_preparation() -> None:
 def test_execution_diagnostics_exposes_evidence_without_preparation() -> None:
     decision = AgentIntentRouter.route(
         "Why did the latest failed job reject records?",
+        ALL_TOOLS,
+    )
+
+    assert decision.intent is AgentIntent.HISTORY_REVIEW
+    assert "get_execution_evidence" in decision.tool_names
+    assert "prepare_operation_action" not in decision.tool_names
+
+
+def test_last_run_statistics_do_not_expose_preparation_tools() -> None:
+    decision = AgentIntentRouter.route(
+        "How many records were processed in the last run?",
         ALL_TOOLS,
     )
 
@@ -103,3 +115,14 @@ def test_explicit_operation_still_routes_governed_with_review_context() -> None:
     )
 
     assert "prepare_operation_action" in decision.tool_names
+
+
+def test_schedule_intent_exposes_only_governed_schedule_preparation() -> None:
+    decision = AgentIntentRouter.route(
+        "Schedule the monthly forecast Pipeline to run every week.",
+        ALL_TOOLS,
+    )
+
+    assert decision.intent is AgentIntent.SCHEDULING
+    assert "prepare_schedule_action" in decision.tool_names
+    assert "prepare_operation_action" not in decision.tool_names

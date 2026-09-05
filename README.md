@@ -21,8 +21,11 @@ type configured by the Oracle administrator.
 
 Business Rules use Oracle's `RULES` REST job type or the EPM Automate
 `runBusinessRule` command. Interactive execution lists discoverable rules,
-supports exact-name manual entry, collects optional case-sensitive runtime
-prompts, and displays a confirmation summary before launch.
+supports exact-name manual entry, and displays a confirmation summary before
+launch. The web platform can import a Calc Manager XML or LCM ZIP export into
+an environment-scoped RTP registry. A synchronized rule renders ordered,
+labelled prompt fields and validates mandatory values before Oracle submission;
+rules without a registry entry retain the exact-name manual fallback.
 
 Pipelines use Oracle's `pipeline` REST job type or the EPM Automate
 `runPipeline` command. The framework retrieves the selected pipeline's live
@@ -63,16 +66,44 @@ provider can be added later without changing the Oracle workflows.
 The EPM Assistant uses LangGraph for provider-neutral, stateful orchestration.
 Google Gemini and Groq are supported model providers, selected through
 environment configuration without rewriting the application workflow.
-Conversations, tool activity, and governed action drafts
-use the existing PostgreSQL application tables; LangGraph checkpoints use its
-own PostgreSQL-managed checkpoint tables.
+Conversations, messages, tool activity, action drafts, input snapshots, and
+human approval decisions use the existing PostgreSQL application tables;
+LangGraph checkpoints use separate PostgreSQL-managed checkpoint tables.
 
-The current graph can inspect only an explicit allow-list: environment
-metadata, platform operations, recent run summaries, and live cube names. It
-may prepare a non-executable draft for a governed standalone operation, but it
-cannot execute, approve, schedule, upload, delete, or modify Oracle data. The
-retired custom process-creation service is deliberately not exposed to the
-graph or developed further in the legacy UI.
+Agent releases also have a versioned deterministic evaluation gate covering
+least-privilege routing, governed preparation, safety boundaries, and
+conservative Oracle artifact matching. Run it with
+`python -m app.agent.evaluation --fail-on-threshold`; see
+[Agent Evaluation and Release Gate](docs/AGENT_EVALUATION.md) for the suite,
+threshold policy, CI evidence, and separate live-provider UAT requirements.
+
+The graph exposes a strict, permission-aware capability allow-list. It can
+inspect the connected environment, discover Oracle artifacts, review recent
+execution history and evidence, and use live Planning Data Review tools when
+the connected Oracle version exposes the required metadata APIs. For an
+authorized user, it can prepare exact inputs and submit the following work only
+after the user approves the reviewed proposal in the platform UI:
+
+- Business Rules, including supplied Calculation Manager runtime prompts;
+- Oracle Pipelines and platform-managed multi-operation flows;
+- Data Integrations, native Planning Data Import, and Metadata Import;
+- Data Maps and saved Cube Refresh jobs; and
+- application/cube substitution variables and Planning user variables.
+
+Uploads, existing Oracle Inbox files, Pipeline variables, Data Integration
+periods and modes, Data Map controls, and optional post-metadata refreshes are
+collected through deterministic forms and revalidated immediately before the
+execution is queued. The resulting work uses the same operation manager,
+background worker, monitoring, evidence, record statistics, and permission
+checks as the rest of the platform.
+
+Conversation text is never treated as approval. The assistant cannot approve
+its own proposal, bypass platform or Oracle permissions, generate arbitrary
+REST calls, schedule work, delete Oracle objects, or silently retry an Oracle
+write. Report generation currently uses a governed handoff to the Reports
+workspace rather than direct agent execution. Natural-language Data Review is
+read-only and depends on the cube, dimension, and member metadata made
+available by the connected Oracle release.
 
 ## Requirements
 
@@ -85,6 +116,10 @@ graph or developed further in the legacy UI.
 - An existing Planning Data Map and permission to run it
 - An existing Planning form and permission to read it when generating reports
 - Oracle EPM Automate installed locally when using the `epmautomate` engine
+
+The supported release and deployment procedure, branch policy, health probes,
+and rollback controls are documented in
+[Release and Deployment Runbook](docs/RELEASE_RUNBOOK.md).
 
 ## Setup
 
@@ -100,9 +135,11 @@ Copy `.env.example` to `.env` and provide the environment-specific values:
 
 ```dotenv
 EPM_BASE_URL=https://your-epm-instance.example.com
-EPM_USERNAME=your.username
-EPM_PASSWORD=your.password
-APPLICATION_NAME=YourPlanningApplication
+# Backend integration identity used by workers and scheduled automation.
+EPM_INTEGRATION_USERNAME=service.account
+EPM_INTEGRATION_PASSWORD=service-account-password
+# Optional fallback; leave blank for Oracle application discovery.
+APPLICATION_NAME=
 
 EPM_DEPLOYMENT_MODE=auto
 EPM_REQUEST_TIMEOUT=30
@@ -223,13 +260,25 @@ and enables Cloud-first capabilities. Set it explicitly to `cloud` when a
 reverse proxy or custom hostname hides the Oracle Cloud hostname, or to
 `on_premises` for an on-premises Planning server.
 
-The connection gateway validates both the Planning REST API and the exact
-configured application. A registered report uses its approved
+At startup, the platform first uses the application selection previously saved
+for the configured base URL. When no selection exists, `APPLICATION_NAME` is
+used as a compatibility fallback. If that is also blank, the integration
+account calls Oracle's supported Get Applications REST API. A single returned
+application is selected automatically; multiple applications are shown to a
+Service Administrator under **Dashboard > Environment health > Manage**.
+Changing the selected application requires one controlled API and worker
+restart so in-flight and scheduled work cannot switch environments midway.
+Only non-secret application metadata is stored in PostgreSQL.
+
+The connection gateway validates both the Planning REST API and the resolved
+application. A registered report uses its approved
 `config/reports.json` data-slice definition consistently in Cloud and
 on-premises environments. An unregistered Planning form name or ID uses
 Oracle's newer Export Form Data API when that endpoint is available on the
 connected Cloud environment.
-`EPM_PASSWORD` is required for Basic Authentication. Never commit `.env`.
+`EPM_INTEGRATION_PASSWORD` is required for Basic Authentication. The legacy
+`EPM_USERNAME` and `EPM_PASSWORD` names remain supported during migration.
+Never commit `.env`.
 
 ### Enterprise web control center
 
@@ -254,7 +303,7 @@ For production, set `EPM_EXECUTION_RUNTIME=web` for the API service and run
 the durable worker as a separate supervised service:
 
 ```powershell
-python web_main.py
+python -m uvicorn web_main:app --host 0.0.0.0 --port 8080
 python worker.py
 ```
 
@@ -270,6 +319,12 @@ Job Console before retrying because Oracle may already have accepted it.
 Web and worker services must share `DATABASE_URL` and `RUNTIME_DATA_DIR`. Use
 controlled shared storage for uploads, logs, and generated reports when they
 run on different hosts.
+
+Production supervisors and load balancers can use `GET /health/live` for
+process liveness and `GET /health/ready` for API/PostgreSQL readiness. These
+unauthenticated probes expose no Oracle URL, application name, credentials, or
+database details. Authenticated `GET /api/v1/health` remains the live Oracle
+connection check used by the product UI.
 
 Then start the React development server in a second terminal:
 
@@ -306,7 +361,7 @@ but the database retains their lifecycle history. Temporary Oracle connection
 or permission failures preserve the last known-good state instead of deleting
 registrations.
 
-After upgrading an existing PostgreSQL installation, apply the Step 4 catalog
+After upgrading an existing PostgreSQL installation, apply every pending
 migration before starting the application:
 
 ```powershell
@@ -348,7 +403,8 @@ The web application includes:
 - Live native Planning Data Import discovery with CSV, TXT, or ZIP upload,
   existing Inbox reuse, safe replacement, and optional error output
 - Live Business Rule discovery with optional Calculation Manager runtime
-  prompts
+  prompts, governed XML/ZIP RTP synchronization, generated inputs, and
+  server-side prompt validation
 - Live Data Map discovery with clear-target protection, member overrides, and
   exclusion overrides
 - Registered Pipeline selection with live stage, runtime-variable, and
@@ -518,9 +574,16 @@ one activity without running the complete Planning lifecycle.
 For a Business Rule:
 
 1. Open **Business Rules**.
-2. Select a rule retrieved from the live Oracle Planning job catalog.
-3. Add exact, case-sensitive runtime prompt names and values only when needed.
-4. Review the execution summary, approve it, and monitor the Oracle job.
+2. A Service Administrator can import a Calc Manager XML or LCM ZIP export in
+   **Calc Manager RTP registry**. A failed parse preserves the last known-good
+   definitions.
+3. Select a rule retrieved from the live Oracle Planning job catalog.
+4. For a synchronized rule, enter mandatory values and only the optional
+   overrides needed for this run. Leaving an optional value empty lets Oracle
+   use its configured default.
+5. If no synchronized definition exists, use the exact-name manual fallback or
+   run with Calculation Manager defaults.
+6. Review the execution summary, approve it, and monitor the Oracle job.
 
 For a Metadata Import:
 
@@ -664,11 +727,57 @@ Set a long random `WEB_SESSION_SECRET` before running the web application in a
 shared environment. Set `WEB_SECURE_COOKIES=true` when the web application
 itself is served over HTTPS.
 
-### Oracle Cloud federated sign-in
+### Oracle EPM sign-in and access mapping
 
-Oracle IAM/IDCS sign-in uses OpenID Connect Authorization Code flow with state,
-nonce, PKCE, discovery metadata, signed ID-token validation, and a UserInfo
-subject check. Configure a custom OCI IAM/IDCS application with:
+For Oracle Cloud environments, the normal sign-in page accepts the user's
+Oracle EPM username and password. The platform sends those credentials once
+over HTTPS to the configured Oracle EPM environment to validate the login. It
+does not log, encrypt, cache, or store the Oracle password. Enable this mode
+with:
+
+```dotenv
+ORACLE_PASSWORD_LOGIN_ENABLED=true
+```
+
+The configured `EPM_INTEGRATION_USERNAME` integration account is then used for a read-only
+lookup of that authenticated person's current Access Control profile. A
+Platform Administrator must first:
+
+1. open **Access Control** and preview/synchronize Oracle access;
+2. map approved Oracle application roles, granular roles, or groups to one of
+   the platform's four product roles; and
+3. save those mappings.
+
+At the person's first successful Oracle sign-in, the platform creates a
+passwordless linked profile just in time. Later sign-ins refresh the profile
+and its mapped product role from the current Oracle access. An administrator
+may also use the optional combined preview to pre-provision linked profiles.
+Existing local platform accounts remain available as recovery accounts.
+Linked profiles are visibly identified in Access Control; their role and
+password cannot be edited as local account fields because those profiles are
+governed by the Oracle-to-platform mappings.
+
+Oracle Access Control remains authoritative for forms, members, data, and EPM
+operations. The mapped platform role controls only which automation-platform
+features the person can use. This separation avoids incorrectly treating an
+Oracle application role as a complete product authorization policy.
+
+The integration account used for synchronization must be allowed to list
+users and their roles in Oracle Cloud EPM Access Control. Oracle currently
+requires Service Administrator access, or the documented Access Control
+View/Manage application-role combination where supported by the environment.
+The platform prefers Oracle's enriched List Users and Available Roles REST
+resources. If an earlier Cloud monthly release returns users without enriched
+access fields, it falls back to the compatible role and group reports rather
+than clearing assignments. It retains only identity metadata, entitlement
+assignments, mappings, linked profile IDs, and audit events.
+
+#### Optional Oracle SSO
+
+OCI IAM/IDCS federation remains available as a later passwordless upgrade. It
+uses OpenID Connect Authorization Code flow with state, nonce, PKCE, discovery
+metadata, signed ID-token validation, and a UserInfo subject check. Configure a
+custom OCI IAM/IDCS application with:
 
 - Authorization Code grant;
 - redirect URI `https://<platform-host>/auth/oracle/callback`;
@@ -694,13 +803,11 @@ identity-domain origin (for example,
 OCI IAM/IDCS application. Use `WEB_SECURE_COOKIES=false` only for this local
 HTTP setup; production HTTPS deployments must use `true`.
 
-Before a person can sign in, a Platform Administrator must synchronize Oracle
-access, explicitly map one or more Oracle roles/groups to a platform role, and
-approve the passwordless shadow account. Sign-in never creates an account or
-changes a role. On first successful sign-in, the validated immutable OIDC
-subject is bound to the exact synchronized Oracle username. Oracle is the
-primary sign-in option; existing local platform accounts remain available as
-the secondary sign-in method.
+When SSO is configured it appears ahead of the Oracle credential form and uses
+the same synchronized entitlements, explicit role mappings, platform
+permissions, and audit trail. In the current SSO path, an administrator must
+pre-provision the linked profile from the governed preview before its first
+SSO login; Oracle credential login supports just-in-time provisioning.
 
 ### Prepare the EPM Automate password file
 
@@ -1296,7 +1403,14 @@ python main.py history --execution-id EXECUTION_ID
 ```
 
 History is stored in PostgreSQL. Technical request details
-remain in rotating text logs.
+remain in rotating text logs. Every HTTP request receives a safe correlation
+identifier in the `X-Request-ID` response header. The same identifier is
+included in centralized application logs and frontend error references so an
+operator can trace one browser failure without searching by timestamp alone.
+
+Jobs & Activity records both the initiating platform user and the effective
+Oracle integration username. Passwords and user session credentials are never
+written to workflow history or request logs.
 
 ### Standalone substitution-variable maintenance
 
@@ -1460,8 +1574,9 @@ python main.py process `
   --dry-run
 ```
 
-The CLI, future FastAPI application, scheduler, and AI agent will all call the
-same orchestrator instead of implementing separate Planning logic.
+The CLI, React/FastAPI application, scheduler, Excel integration, and EPM
+Assistant reuse the same typed application services, execution queue, and
+monitoring infrastructure instead of implementing separate Planning logic.
 
 After an interactive metadata load succeeds, the menu asks whether a refresh
 should run. The default answer is No. If no saved refresh job exists, nothing
@@ -1675,10 +1790,9 @@ code examples, troubleshooting guidance, tests, and current limitations.
 - `main.py` remains the composition root. Its menu and non-interactive commands
   call the same application services.
 
-Refresh jobs, snapshot operations, schedulers, and AI-agent orchestrators can
-reuse either
-`EPMClient` or `EPMAutomateRunner` without duplicating transport, process, or
-error-handling logic.
+Additional Oracle operations, scheduled workflows, and agent capabilities can
+reuse either `EPMClient` or `EPMAutomateRunner` without duplicating transport,
+process, or error-handling logic.
 
 ## Excel Pipeline Runner
 

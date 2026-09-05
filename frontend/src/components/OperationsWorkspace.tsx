@@ -116,7 +116,7 @@ export function OperationsWorkspace({ data, csrfToken, canManageCatalog, current
     if (selectedOperation.code === "report-generation") {
       return <ReportGenerationRunner operation={selectedOperation} csrfToken={csrfToken} onBack={closeRunner} />;
     }
-    return <OperationRunner operation={selectedOperation} csrfToken={csrfToken} planningTaskId={planningTaskId} agentDraftId={agentDraftId} onBack={closeRunner} />;
+    return <OperationRunner operation={selectedOperation} csrfToken={csrfToken} canManageCatalog={canManageCatalog} planningTaskId={planningTaskId} agentDraftId={agentDraftId} onBack={closeRunner} />;
   }
 
   return <section className="operations-workspace">

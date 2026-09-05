@@ -14,10 +14,11 @@ from app.utils.exceptions import EPMError, FileUploadError
 
 
 class FileService:
-    """Validate and upload files to the Oracle EPM Inbox."""
+    """Validate, upload, and download Oracle EPM repository files."""
 
     _DEFAULT_SUPPORTED_EXTENSIONS = frozenset({".csv", ".zip"})
     _UPLOAD_API_VERSION = "11.1.2.3.600"
+    _MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
 
     def __init__(
         self,
@@ -111,6 +112,61 @@ class FileService:
             result.replaced_existing,
         )
         return result
+
+    def download_from_repository(
+        self,
+        file_name: str,
+        *,
+        maximum_bytes: int = _MAX_DOWNLOAD_BYTES,
+    ) -> bytes:
+        """Download one exact repository file without persisting it locally."""
+        normalized = self._validate_repository_file_name(file_name)
+        limit = int(maximum_bytes)
+        if limit <= 0:
+            raise FileUploadError("Repository download limit must be positive.")
+        encoded_file_name = quote(normalized, safe="")
+        endpoint = (
+            f"interop/rest/{self._UPLOAD_API_VERSION}/"
+            f"applicationsnapshots/{encoded_file_name}/contents"
+        )
+        try:
+            content = self._client.get_binary(endpoint)
+        except EPMError as exc:
+            raise FileUploadError(
+                f"Unable to download Oracle repository file '{normalized}': "
+                f"{exc}"
+            ) from exc
+        if len(content) > limit:
+            raise FileUploadError(
+                f"Oracle repository file '{normalized}' exceeds the "
+                f"{limit // (1024 * 1024)} MB download limit."
+            )
+        self._logger.info(
+            "Oracle repository download completed: file='%s', size=%s bytes.",
+            normalized,
+            len(content),
+        )
+        return content
+
+    def delete_from_repository(self, file_name: str) -> None:
+        """Delete one exact repository file or snapshot."""
+        normalized = self._validate_repository_file_name(file_name)
+        self._delete_from_inbox(normalized)
+
+    @staticmethod
+    def _validate_repository_file_name(value: str) -> str:
+        normalized = str(value).strip().replace("\\", "/")
+        if (
+            not normalized
+            or normalized.startswith("/")
+            or normalized.endswith("/")
+            or any(part in {"", ".", ".."} for part in normalized.split("/"))
+        ):
+            raise FileUploadError(
+                "Oracle repository source must be an exact file name or "
+                "repository-relative path."
+            )
+        return normalized
 
     @staticmethod
     def _validate_target_file_name(value: str) -> str:

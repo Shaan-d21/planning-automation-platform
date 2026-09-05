@@ -32,19 +32,23 @@ class DataService:
 
     def start_import(
         self,
-        file_name: str,
+        file_name: str | None,
         job_name: str,
         *,
         error_file_name: str | None = None,
     ) -> DataJobSubmission:
         """Submit a saved Planning Import Data job and return its job ID."""
-        normalized_file_name = PurePath(file_name).name.strip()
+        normalized_file_name = (
+            PurePath(file_name).name.strip() if file_name else None
+        )
         normalized_job_name = job_name.strip()
-        self.validate_inputs(normalized_file_name, normalized_job_name)
+        self.validate_job_name(normalized_job_name)
+        if normalized_file_name is not None:
+            self.validate_inputs(normalized_file_name, normalized_job_name)
 
-        parameters: dict[str, str] = {
-            "importFileName": normalized_file_name,
-        }
+        parameters: dict[str, str] = {}
+        if normalized_file_name is not None:
+            parameters["importFileName"] = normalized_file_name
         if error_file_name:
             parameters["errorFile"] = PurePath(error_file_name).name
 
@@ -113,7 +117,9 @@ class DataService:
             raise DataImportError(
                 "Data filename must have a .csv, .txt, or .zip extension."
             )
+        cls.validate_job_name(job_name)
+
+    @staticmethod
+    def validate_job_name(job_name: str) -> None:
         if not job_name:
-            raise DataImportError(
-                "Data import job name cannot be empty."
-            )
+            raise DataImportError("Data import job name cannot be empty.")

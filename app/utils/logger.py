@@ -4,6 +4,31 @@ from __future__ import annotations
 
 import logging
 import sys
+from contextvars import ContextVar, Token
+
+
+_REQUEST_ID: ContextVar[str] = ContextVar(
+    "oracle_epm_request_id",
+    default="-",
+)
+
+
+class _RequestContextFilter(logging.Filter):
+    """Attach the current HTTP correlation ID to every application record."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.request_id = _REQUEST_ID.get()
+        return True
+
+
+def bind_request_id(request_id: str) -> Token[str]:
+    """Bind one HTTP correlation ID for the current async context."""
+    return _REQUEST_ID.set(request_id)
+
+
+def reset_request_id(token: Token[str]) -> None:
+    """Restore the correlation context after an HTTP request completes."""
+    _REQUEST_ID.reset(token)
 
 
 def configure_logging(level: str = "INFO") -> logging.Logger:
@@ -21,9 +46,11 @@ def configure_logging(level: str = "INFO") -> logging.Logger:
         setattr(handler, "_epm_console_handler", True)
         handler.setFormatter(
             logging.Formatter(
-                "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+                "%(asctime)s | %(levelname)s | %(name)s | "
+                "request=%(request_id)s | %(message)s"
             )
         )
+        handler.addFilter(_RequestContextFilter())
         logger.addHandler(handler)
 
     for handler in logger.handlers:

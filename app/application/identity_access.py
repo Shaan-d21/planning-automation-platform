@@ -28,6 +28,8 @@ from app.utils.exceptions import (
 class ClosableIdentityClient(Protocol):
     def get(self, endpoint: str, *, params=None): ...
 
+    def post(self, endpoint: str, *, payload=None, params=None): ...
+
     def close(self) -> None: ...
 
 
@@ -70,6 +72,9 @@ class IdentityAccessApplicationService:
             "provider_registered": provider is not None,
             "identity_provider_mode": self._settings.identity_provider,
             "sso_enabled": self._settings.federated_identity_ready,
+            "oracle_password_login_enabled": (
+                self._settings.oracle_password_login_ready
+            ),
             "synced_identities": len(identities),
             "active_identities": sum(item.active for item in identities),
             "mapped_entitlements": (
@@ -231,7 +236,7 @@ def identity_preview_payload(preview: IdentitySyncPreview) -> dict[str, object]:
 def provisioning_preview_payload(
     preview: IdentityProvisioningPreview,
 ) -> dict[str, object]:
-    """Serialize a governed shadow-account provisioning preview."""
+    """Serialize a governed linked-profile provisioning preview."""
     return {
         "provider_code": preview.provider_code,
         "checksum": preview.checksum,

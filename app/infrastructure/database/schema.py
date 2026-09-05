@@ -60,6 +60,52 @@ platform_users = Table(
     Column("last_login_at", UTC_TIMESTAMP),
     CheckConstraint("failed_login_count >= 0", name="failed_login_nonnegative"),
 )
+
+
+oracle_environment_settings = Table(
+    "oracle_environment_settings",
+    metadata,
+    Column("base_url", String(500), primary_key=True),
+    Column("deployment_mode", String(32), nullable=False),
+    Column("selected_application", String(128)),
+    Column("selection_source", String(32)),
+    Column(
+        "discovered_applications",
+        JSON_DOCUMENT,
+        nullable=False,
+        server_default=text("'[]'"),
+    ),
+    Column("last_discovered_at", UTC_TIMESTAMP),
+    Column("last_discovery_error", Text),
+    Column("selected_at", UTC_TIMESTAMP),
+    Column(
+        "selected_by_user_id",
+        IDENTITY_BIGINT,
+    ),
+    Column(
+        "created_at",
+        UTC_TIMESTAMP,
+        nullable=False,
+        server_default=func.now(),
+    ),
+    Column(
+        "updated_at",
+        UTC_TIMESTAMP,
+        nullable=False,
+        server_default=func.now(),
+    ),
+    CheckConstraint(
+        "selection_source IS NULL OR selection_source IN "
+        "('DATABASE', 'ENVIRONMENT', 'AUTO_DISCOVERY', 'ADMIN_SELECTION')",
+        name="selection_source",
+    ),
+    ForeignKeyConstraint(
+        ["selected_by_user_id"],
+        ["platform_users.user_id"],
+        name="fk_oracle_env_selected_user",
+        ondelete="SET NULL",
+    ),
+)
 Index("uq_platform_users_username_ci", func.lower(platform_users.c.username), unique=True)
 Index(
     "uq_platform_users_email_ci",
@@ -417,6 +463,108 @@ Index(
     oracle_artifacts.c.verification_status,
 )
 
+business_rule_rtp_sync_runs = Table(
+    "business_rule_rtp_sync_runs",
+    metadata,
+    Column("sync_run_id", IDENTITY_BIGINT, primary_key=True, autoincrement=True),
+    Column("environment_key", String(64), nullable=False),
+    Column("environment_base_url", String(500), nullable=False),
+    Column("application_name", String(128), nullable=False),
+    Column("source_name", String(500), nullable=False),
+    Column("source_checksum", String(64), nullable=False),
+    Column("parser_version", String(32), nullable=False),
+    Column("status", String(20), nullable=False),
+    Column("rules_imported", Integer, nullable=False, server_default="0"),
+    Column("prompts_imported", Integer, nullable=False, server_default="0"),
+    Column("warnings", JSON_DOCUMENT, nullable=False, server_default=text("'[]'")),
+    Column("error_summary", Text),
+    Column("started_at", UTC_TIMESTAMP, nullable=False),
+    Column("completed_at", UTC_TIMESTAMP),
+    CheckConstraint(
+        "status IN ('RUNNING', 'COMPLETED', 'FAILED')",
+        name="status",
+    ),
+    CheckConstraint("rules_imported >= 0", name="rules_nonnegative"),
+    CheckConstraint("prompts_imported >= 0", name="prompts_nonnegative"),
+)
+Index(
+    "ix_business_rule_rtp_sync_runs_environment_started",
+    business_rule_rtp_sync_runs.c.environment_key,
+    business_rule_rtp_sync_runs.c.started_at.desc(),
+)
+
+business_rule_rtp_definitions = Table(
+    "business_rule_rtp_definitions",
+    metadata,
+    Column("definition_id", IDENTITY_BIGINT, primary_key=True, autoincrement=True),
+    Column("environment_key", String(64), nullable=False),
+    Column("application_name", String(128), nullable=False),
+    Column("rule_name", String(250), nullable=False),
+    Column("normalized_rule_name", String(250), nullable=False),
+    Column("cube_name", String(128)),
+    Column("source_name", String(500), nullable=False),
+    Column("source_path", String(1000), nullable=False),
+    Column("source_checksum", String(64), nullable=False),
+    Column("parser_version", String(32), nullable=False),
+    Column("definition_checksum", String(64), nullable=False),
+    Column(
+        "source_sync_run_id",
+        IDENTITY_BIGINT,
+        ForeignKey("business_rule_rtp_sync_runs.sync_run_id", ondelete="RESTRICT"),
+        nullable=False,
+    ),
+    Column("is_active", Boolean, nullable=False, server_default=text("true")),
+    Column("synchronized_at", UTC_TIMESTAMP, nullable=False),
+    UniqueConstraint(
+        "environment_key",
+        "normalized_rule_name",
+        name="environment_rule",
+    ),
+)
+Index(
+    "ix_business_rule_rtp_definitions_environment_active",
+    business_rule_rtp_definitions.c.environment_key,
+    business_rule_rtp_definitions.c.is_active,
+)
+
+business_rule_rtp_parameters = Table(
+    "business_rule_rtp_parameters",
+    metadata,
+    Column("parameter_id", IDENTITY_BIGINT, primary_key=True, autoincrement=True),
+    Column(
+        "definition_id",
+        IDENTITY_BIGINT,
+        ForeignKey("business_rule_rtp_definitions.definition_id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("prompt_order", Integer, nullable=False),
+    Column("name", String(250), nullable=False),
+    Column("normalized_name", String(250), nullable=False),
+    Column("label", String(500), nullable=False),
+    Column("value_type", String(80), nullable=False),
+    Column("dimension", String(128)),
+    Column("default_value", Text),
+    Column("has_default", Boolean, nullable=False, server_default=text("false")),
+    Column("required_at_launch", Boolean, nullable=False, server_default=text("true")),
+    Column("is_hidden", Boolean, nullable=False, server_default=text("false")),
+    Column("allow_multiple", Boolean, nullable=False, server_default=text("false")),
+    Column("security_mode", String(80)),
+    Column("scope_type", String(20), nullable=False, server_default="UNKNOWN"),
+    Column("scope_name", String(500)),
+    Column("source_variable_id", String(100)),
+    Column("limit_type", String(80)),
+    Column("limit_value", Text),
+    Column("source_metadata", JSON_DOCUMENT, nullable=False, server_default=text("'{}'")),
+    UniqueConstraint("definition_id", "normalized_name", name="definition_name"),
+    UniqueConstraint("definition_id", "prompt_order", name="definition_order"),
+    CheckConstraint("prompt_order > 0", name="order_positive"),
+)
+Index(
+    "ix_business_rule_rtp_parameters_definition_order",
+    business_rule_rtp_parameters.c.definition_id,
+    business_rule_rtp_parameters.c.prompt_order,
+)
+
 planning_processes = Table(
     "planning_processes",
     metadata,
@@ -494,6 +642,7 @@ workflow_runs = Table(
     Column("initiated_by_username", String(80)),
     Column("initiated_by_display", String(120)),
     Column("trigger_source", String(20), nullable=False),
+    Column("oracle_execution_username", String(254)),
 )
 Index("ix_workflow_runs_started_at", workflow_runs.c.started_at.desc())
 Index("ix_workflow_runs_status_started_at", workflow_runs.c.status, workflow_runs.c.started_at.desc())
@@ -619,6 +768,116 @@ Index(
     process_schedules.c.next_run_at,
     postgresql_where=and_(process_schedules.c.is_enabled.is_(True), process_schedules.c.archived_at.is_(None)),
     sqlite_where=and_(process_schedules.c.is_enabled.is_(True), process_schedules.c.archived_at.is_(None)),
+)
+
+automation_schedules = Table(
+    "automation_schedules",
+    metadata,
+    Column("schedule_id", IDENTITY_BIGINT, primary_key=True, autoincrement=True),
+    Column("environment_key", String(64), nullable=False),
+    Column("name", String(160), nullable=False),
+    Column("target_type", String(32), nullable=False),
+    Column("target_key", String(300), nullable=False),
+    Column("frequency", String(20), nullable=False),
+    Column("timezone", String(64), nullable=False),
+    Column("first_run_local", DateTime(timezone=False), nullable=False),
+    Column("input_policy", String(24), nullable=False),
+    Column("configuration", JSON_DOCUMENT, nullable=False, server_default=text("'{}'")),
+    Column("concurrency_policy", String(24), nullable=False),
+    Column("misfire_policy", String(20), nullable=False),
+    Column("is_enabled", Boolean, nullable=False, server_default=text("true")),
+    Column("next_run_at", UTC_TIMESTAMP),
+    Column("created_at", UTC_TIMESTAMP, nullable=False),
+    Column("updated_at", UTC_TIMESTAMP, nullable=False),
+    Column("last_triggered_at", UTC_TIMESTAMP),
+    Column("last_execution_id", String(64)),
+    Column("last_outcome", String(20), nullable=False, server_default="NEVER"),
+    Column("last_error", Text),
+    Column("archived_at", UTC_TIMESTAMP),
+    CheckConstraint(
+        "target_type IN ('ORACLE_PIPELINE', 'RTP_REGISTRY_SYNC')",
+        name="target_type",
+    ),
+    CheckConstraint(
+        "frequency IN ('ONE_TIME', 'DAILY', 'WEEKLY', 'MONTHLY')",
+        name="frequency",
+    ),
+    CheckConstraint(
+        "input_policy IN ('ORACLE_DEFAULTS', 'FIXED', 'DYNAMIC')",
+        name="input_policy",
+    ),
+    CheckConstraint(
+        "concurrency_policy IN ('SKIP_IF_ACTIVE')",
+        name="concurrency_policy",
+    ),
+    CheckConstraint(
+        "misfire_policy IN ('RUN_ONCE', 'SKIP')",
+        name="misfire_policy",
+    ),
+    CheckConstraint(
+        "last_outcome IN ('NEVER', 'CLAIMED', 'SUBMITTED', 'COMPLETED', "
+        "'FAILED', 'SKIPPED')",
+        name="last_outcome",
+    ),
+)
+Index(
+    "uq_automation_schedules_environment_name",
+    automation_schedules.c.environment_key,
+    func.lower(automation_schedules.c.name),
+    unique=True,
+    postgresql_where=automation_schedules.c.archived_at.is_(None),
+    sqlite_where=automation_schedules.c.archived_at.is_(None),
+)
+Index(
+    "ix_automation_schedules_due",
+    automation_schedules.c.next_run_at,
+    postgresql_where=and_(
+        automation_schedules.c.is_enabled.is_(True),
+        automation_schedules.c.archived_at.is_(None),
+    ),
+    sqlite_where=and_(
+        automation_schedules.c.is_enabled.is_(True),
+        automation_schedules.c.archived_at.is_(None),
+    ),
+)
+Index(
+    "ix_automation_schedules_environment_target",
+    automation_schedules.c.environment_key,
+    automation_schedules.c.target_type,
+    automation_schedules.c.target_key,
+)
+
+automation_schedule_runs = Table(
+    "automation_schedule_runs",
+    metadata,
+    Column("run_id", IDENTITY_BIGINT, primary_key=True, autoincrement=True),
+    Column(
+        "schedule_id",
+        IDENTITY_BIGINT,
+        ForeignKey("automation_schedules.schedule_id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("scheduled_for", UTC_TIMESTAMP, nullable=False),
+    Column("claimed_at", UTC_TIMESTAMP, nullable=False),
+    Column("completed_at", UTC_TIMESTAMP),
+    Column("status", String(20), nullable=False),
+    Column("execution_id", String(64)),
+    Column("resolved_payload", JSON_DOCUMENT, nullable=False, server_default=text("'{}'")),
+    Column("error_message", Text),
+    CheckConstraint(
+        "status IN ('CLAIMED', 'SUBMITTED', 'COMPLETED', 'FAILED', 'SKIPPED')",
+        name="status",
+    ),
+    UniqueConstraint(
+        "schedule_id",
+        "scheduled_for",
+        name="uq_automation_schedule_runs_occurrence",
+    ),
+)
+Index(
+    "ix_automation_schedule_runs_schedule_time",
+    automation_schedule_runs.c.schedule_id,
+    automation_schedule_runs.c.scheduled_for.desc(),
 )
 
 planning_cycles = Table(

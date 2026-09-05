@@ -26,7 +26,6 @@ from app.application.reports import (
 )
 from app.clients.epm_client import EPMClient
 from app.config.settings import Settings
-from app.automation.epm_automate_runner import EPMAutomateRunner
 from app.models.notification import (
     TaskNotificationEvent,
     TaskNotificationStatus,
@@ -61,12 +60,12 @@ from app.services.data_integration_catalog_service import (
 )
 from app.services.data_integration_service import DataIntegrationService
 from app.services.data_service import DataService
-from app.services.epm_automate_data_service import EPMAutomateDataService
 from app.services.data_map_service import DataMapService
 from app.services.file_service import FileService
 from app.services.job_service import JobService
 from app.services.metadata_service import MetadataService
 from app.services.notification_service import create_notification_service
+from app.services.oracle_job_evidence_service import OracleJobEvidenceService
 from app.services.pipeline_catalog_service import PipelineCatalogService
 from app.services.oracle_artifact_registry import OracleArtifactRegistry
 from app.services.pipeline_preflight_service import (
@@ -78,7 +77,12 @@ from app.services.pipeline_service import PipelineService
 from app.services.user_variable_service import UserVariableService
 from app.services.workflow_engine import WorkflowEngine, WorkflowStep
 from app.services.workflow_repository import SQLWorkflowRepository
-from app.utils.exceptions import AuthenticationError, EPMError, OperationError
+from app.utils.exceptions import (
+    AuthenticationError,
+    EPMError,
+    JobFailedError,
+    OperationError,
+)
 
 
 class OperationKind(StrEnum):
@@ -1223,6 +1227,19 @@ class OperationCommandExecutor:
             self._settings.database_target
         )
 
+        def oracle_error_file_name(
+            requested: str | None,
+            *,
+            default_stem: str,
+        ) -> str:
+            token = re.sub(r"[^A-Za-z0-9]", "", execution_id)[:8] or "run"
+            if requested:
+                supplied = PurePath(requested).name.strip()
+                suffix = Path(supplied).suffix or ".zip"
+                stem = Path(supplied).stem if Path(supplied).suffix else supplied
+                return f"{stem[:90]}-{token}{suffix}"
+            return f"{default_stem}-{token}.zip"
+
         def write(message: str) -> None:
             normalized = " ".join(str(message).split())
             with log_file.open("a", encoding="utf-8") as stream:
@@ -1235,6 +1252,58 @@ class OperationCommandExecutor:
             run = workflow_repository.get(execution_id)
             if run is None:
                 return
+
+        def collect_import_evidence(
+            job_id: int,
+            *,
+            failed: bool = False,
+        ) -> dict[str, Any]:
+            if not isinstance(
+                operation_input,
+                (MetadataImportOperationInput, DataImportOperationInput),
+            ):
+                return {}
+            evidence: dict[str, Any] = {
+                "load_lineage": dict(state.get("load_lineage") or {}),
+            }
+            job_service = state.get("job_service")
+            if job_service is not None:
+                try:
+                    evidence.update(
+                        job_service.get_execution_evidence(job_id)
+                    )
+                except EPMError as exc:
+                    self._logger.warning(
+                        "Oracle import evidence unavailable for job %s: %s",
+                        job_id,
+                        exc,
+                    )
+                    evidence["evidence_message"] = (
+                        "Oracle completed the job, but detailed Job Console "
+                        "evidence was unavailable in this environment."
+                    )
+            statistics = evidence.get("record_statistics")
+            rejected = (
+                int(statistics.get("records_rejected") or 0)
+                if isinstance(statistics, Mapping)
+                else 0
+            )
+            if failed or rejected > 0:
+                error_file_name = (
+                    state.get("metadata_error_file")
+                    if isinstance(operation_input, MetadataImportOperationInput)
+                    else state.get("data_error_file")
+                )
+                artifact_evidence = OracleJobEvidenceService(
+                    FileService(client, allow_any_extension=True),
+                    self._settings.runtime_data_dir,
+                    logger=self._logger.getChild("oracle_job_evidence"),
+                ).capture_error_file(
+                    execution_id=execution_id,
+                    oracle_file_name=error_file_name,
+                )
+                evidence.update(artifact_evidence)
+            return evidence
             steps = list(run.steps)
             for index, step in enumerate(steps):
                 if step.status is not WorkflowStepStatus.RUNNING:
@@ -1360,10 +1429,9 @@ class OperationCommandExecutor:
                     file_source = "oracle_configured"
                 if file_name is not None:
                     MetadataService.validate_inputs(file_name, job_name)
-                error_file = (
-                    PurePath(operation_input.error_file_name).name.strip()
-                    if operation_input.error_file_name
-                    else None
+                error_file = oracle_error_file_name(
+                    operation_input.error_file_name,
+                    default_stem="metadata-import-errors",
                 )
                 refresh_job = (
                     str(operation_input.refresh_job_name).strip()
@@ -1373,6 +1441,19 @@ class OperationCommandExecutor:
                 state["metadata_job"] = job_name
                 state["metadata_error_file"] = error_file
                 state["refresh_job"] = refresh_job
+                state["load_lineage"] = {
+                    "operation": "Metadata import",
+                    "source_kind": file_source,
+                    "source_file": file_name,
+                    "staging_location": "Oracle EPM Inbox",
+                    "oracle_job_name": job_name,
+                    "target_application": self._settings.application_name,
+                    "target_system": "Oracle Planning metadata",
+                    "origin_note": (
+                        "The platform records the file handoff into Oracle. "
+                        "The originating ERP or source system is not inferred."
+                    ),
+                }
                 write(
                     f"Validated Metadata Import '{job_name}' using "
                     f"'{file_name or 'the Oracle configured file'}'; "
@@ -1423,17 +1504,29 @@ class OperationCommandExecutor:
                     file_source = "existing_inbox"
                 else:
                     file_name = None
-                    state["data_configured_file"] = True
+                    state["data_file"] = None
                     file_source = "oracle_configured"
                 if file_name is not None:
                     DataService.validate_inputs(file_name, job_name)
-                error_file = (
-                    PurePath(operation_input.error_file_name).name.strip()
-                    if operation_input.error_file_name
-                    else None
+                error_file = oracle_error_file_name(
+                    operation_input.error_file_name,
+                    default_stem="data-import-errors",
                 )
                 state["data_import_job"] = job_name
                 state["data_error_file"] = error_file
+                state["load_lineage"] = {
+                    "operation": "Planning data import",
+                    "source_kind": file_source,
+                    "source_file": file_name,
+                    "staging_location": "Oracle EPM Inbox",
+                    "oracle_job_name": job_name,
+                    "target_application": self._settings.application_name,
+                    "target_system": "Oracle Planning data",
+                    "origin_note": (
+                        "The platform records the file handoff into Oracle. "
+                        "The originating ERP or source system is not inferred."
+                    ),
+                }
                 write(
                     f"Validated Planning Data Import '{job_name}' using "
                     f"'{file_name or 'the Oracle configured file'}'."
@@ -1600,18 +1693,6 @@ class OperationCommandExecutor:
 
         def connect() -> Mapping[str, Any]:
             nonlocal client
-            if (
-                isinstance(operation_input, DataImportOperationInput)
-                and operation_input.use_configured_file
-            ):
-                write(
-                    "Prepared EPM Automate authentication for the saved "
-                    "Planning Data Import job."
-                )
-                return {
-                    "application": self._settings.application_name,
-                    "engine": "epm_automate",
-                }
             client = EPMClient(
                 self._settings,
                 logger=self._logger.getChild("client"),
@@ -1639,42 +1720,6 @@ class OperationCommandExecutor:
             }
 
         def run_job() -> Mapping[str, Any]:
-            if (
-                isinstance(operation_input, DataImportOperationInput)
-                and state.get("data_configured_file")
-            ):
-                runner = EPMAutomateRunner(
-                    self._settings.epm_automate_executable,
-                    timeout=self._settings.epm_automate_command_timeout,
-                    logger=self._logger.getChild("epm_automate_runner"),
-                )
-                result = EPMAutomateDataService(
-                    runner,
-                    username=self._settings.epm_username,
-                    password_file=(
-                        self._settings.require_epm_automate_password_file()
-                    ),
-                    base_url=self._settings.epm_base_url,
-                    logger=self._logger.getChild(
-                        "epm_automate_data_service"
-                    ),
-                ).load_data(
-                    data_file=None,
-                    inbox_file_name=None,
-                    job_name=state["data_import_job"],
-                    error_file_name=state["data_error_file"],
-                )
-                write(
-                    "Completed Planning Data Import using the file "
-                    "configured in the saved Oracle job."
-                )
-                return {
-                    "target_name": result.job_name,
-                    "file_name": None,
-                    "file_source": "oracle_configured",
-                    "status": "Completed",
-                    "engine": "epm_automate",
-                }
             if client is None:
                 raise OperationError(
                     "Oracle EPM connection was not initialized."
@@ -1823,6 +1868,7 @@ class OperationCommandExecutor:
                         logger=self._logger.getChild("file_service"),
                     ).upload_to_inbox(state["metadata_upload"])
                     state["metadata_file"] = upload.file_name
+                    state["load_lineage"]["source_file"] = upload.file_name
                     write(
                         f"Uploaded '{upload.file_name}' to Oracle Inbox; "
                         f"replaced existing={upload.replaced_existing}."
@@ -1848,6 +1894,7 @@ class OperationCommandExecutor:
                         logger=self._logger.getChild("file_service"),
                     ).upload_to_inbox(state["data_upload"])
                     state["data_file"] = upload.file_name
+                    state["load_lineage"]["source_file"] = upload.file_name
                     write(
                         f"Uploaded '{upload.file_name}' to Oracle Inbox; "
                         f"replaced existing={upload.replaced_existing}."
@@ -1857,7 +1904,7 @@ class OperationCommandExecutor:
                     logger=self._logger.getChild("data_service"),
                 )
                 submission = service.start_import(
-                    state["data_file"],
+                    state.get("data_file"),
                     state["data_import_job"],
                     error_file_name=state["data_error_file"],
                 )
@@ -1939,12 +1986,23 @@ class OperationCommandExecutor:
                     "engine": "rest",
                 }
             )
-            result = JobMonitor(
-                monitor_service,
-                poll_interval=self._settings.default_poll_interval,
-                timeout=self._settings.default_job_timeout,
-                logger=self._logger.getChild("job_monitor"),
-            ).wait_for_completion(submission.job_id)
+            try:
+                result = JobMonitor(
+                    monitor_service,
+                    poll_interval=self._settings.default_poll_interval,
+                    timeout=self._settings.default_job_timeout,
+                    logger=self._logger.getChild("job_monitor"),
+                ).wait_for_completion(submission.job_id)
+            except JobFailedError as exc:
+                evidence = collect_import_evidence(
+                    submission.job_id,
+                    failed=True,
+                )
+                raise JobFailedError(
+                    exc.job,
+                    diagnostics=exc.diagnostics,
+                    evidence=evidence,
+                ) from exc
             write(
                 f"Oracle job {result.job_id} completed successfully."
             )
@@ -1954,6 +2012,8 @@ class OperationCommandExecutor:
                 "status": result.descriptive_status or result.status,
                 "engine": "rest",
             }
+            import_evidence = collect_import_evidence(result.job_id)
+            execution_details.update(import_evidence)
             try:
                 statistics = JobRecordStatistics.from_response(
                     result.raw_response
@@ -1972,33 +2032,68 @@ class OperationCommandExecutor:
                     (MetadataImportOperationInput, DataImportOperationInput),
                 )
             ):
+                retained_statistics = execution_details.get(
+                    "record_statistics"
+                )
+                if isinstance(retained_statistics, Mapping):
+                    execution_details["record_statistics"] = dict(
+                        retained_statistics
+                    )
+                    statistics = None
                 job_service = state.get("job_service")
                 if job_service is not None:
-                    try:
-                        statistics = job_service.get_record_statistics(
-                            result.job_id
-                        )
-                    except EPMError as exc:
-                        self._logger.warning(
-                            "Oracle Job Details statistics unavailable for "
-                            "job %s: %s",
-                            result.job_id,
-                            exc,
-                        )
-                        write(
-                            "Oracle completed the job, but this environment "
-                            "did not expose record statistics."
-                        )
+                    if not isinstance(retained_statistics, Mapping):
+                        try:
+                            statistics = job_service.get_record_statistics(
+                                result.job_id
+                            )
+                        except EPMError as exc:
+                            self._logger.warning(
+                                "Oracle Job Details statistics unavailable for "
+                                "job %s: %s",
+                                result.job_id,
+                                exc,
+                            )
+                            write(
+                                "Oracle completed the job, but this environment "
+                                "did not expose record statistics."
+                            )
             if statistics is not None:
                 execution_details["record_statistics"] = (
                     statistics.to_payload()
                 )
+            final_statistics = execution_details.get("record_statistics")
+            if isinstance(final_statistics, Mapping):
                 write(
                     "Oracle load statistics: "
-                    f"read={statistics.records_read}, "
-                    f"processed={statistics.records_processed}, "
-                    f"rejected={statistics.records_rejected}."
+                    f"read={int(final_statistics.get('records_read') or 0)}, "
+                    f"processed={int(final_statistics.get('records_processed') or 0)}, "
+                    f"rejected={int(final_statistics.get('records_rejected') or 0)}."
                 )
+                if (
+                    isinstance(
+                        operation_input,
+                        (MetadataImportOperationInput, DataImportOperationInput),
+                    )
+                    and
+                    int(final_statistics.get("records_rejected") or 0) > 0
+                    and not execution_details.get("artifacts")
+                ):
+                    error_file_name = (
+                        state.get("metadata_error_file")
+                        if isinstance(operation_input, MetadataImportOperationInput)
+                        else state.get("data_error_file")
+                    )
+                    execution_details.update(
+                        OracleJobEvidenceService(
+                            FileService(client, allow_any_extension=True),
+                            self._settings.runtime_data_dir,
+                            logger=self._logger.getChild("oracle_job_evidence"),
+                        ).capture_error_file(
+                            execution_id=execution_id,
+                            oracle_file_name=error_file_name,
+                        )
+                    )
             return execution_details
 
         def refresh_cube() -> Mapping[str, Any]:
@@ -2068,6 +2163,9 @@ class OperationCommandExecutor:
                 tuple(steps),
                 execution_id=execution_id,
                 actor=actor,
+                oracle_execution_username=(
+                    self._settings.oracle_execution_username
+                ),
             )
         except Exception as exc:
             notification_service.publish(

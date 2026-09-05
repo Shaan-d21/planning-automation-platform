@@ -655,14 +655,22 @@ class PlanningProcessCommandExecutor:
                 f"Planning process '{execution_id}' did not create a "
                 "workflow history record."
             )
-        if actor is not None:
-            run = replace(
-                run,
-                initiated_by=actor.username,
-                initiated_by_display=actor.display_name,
-                trigger_source=actor.trigger_source,
-            )
-            SQLWorkflowRepository(
-                self._settings.database_target
-            ).save(run)
+        run = replace(
+            run,
+            oracle_execution_username=(
+                self._settings.oracle_execution_username
+            ),
+            **(
+                {
+                    "initiated_by": actor.username,
+                    "initiated_by_display": actor.display_name,
+                    "trigger_source": actor.trigger_source,
+                }
+                if actor is not None
+                else {}
+            ),
+        )
+        SQLWorkflowRepository(
+            self._settings.database_target
+        ).save(run)
         return run

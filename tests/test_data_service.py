@@ -64,6 +64,30 @@ def test_start_import_rejects_unsupported_extension(client: Mock) -> None:
     client.post.assert_not_called()
 
 
+def test_start_import_can_use_file_saved_in_oracle_job(client: Mock) -> None:
+    client.post.return_value = {
+        "jobId": 203,
+        "status": -1,
+        "descriptiveStatus": "Processing",
+    }
+
+    submission = DataService(client).start_import(
+        None,
+        "Import Plan Data",
+        error_file_name="DataErrors-run12345.zip",
+    )
+
+    assert submission.file_name is None
+    client.post.assert_called_once_with(
+        "HyperionPlanning/rest/v3/applications/Vision/jobs",
+        payload={
+            "jobType": "IMPORT_DATA",
+            "jobName": "Import Plan Data",
+            "parameters": {"errorFile": "DataErrors-run12345.zip"},
+        },
+    )
+
+
 def test_start_import_rejects_immediate_job_error(client: Mock) -> None:
     client.post.return_value = {
         "jobId": 202,

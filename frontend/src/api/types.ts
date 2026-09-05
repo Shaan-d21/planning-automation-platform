@@ -7,6 +7,31 @@ export interface ProductSummary {
 export interface EnvironmentSummary {
   application_name: string;
   deployment_mode: string;
+  base_url: string;
+  configured: boolean;
+  execution_account?: string;
+}
+
+export interface EnvironmentApplication {
+  name: string;
+  product_type: string | null;
+  application_type: string | null;
+  admin_mode: boolean | null;
+}
+
+export interface EnvironmentConfigurationResponse {
+  status: string;
+  base_url: string;
+  deployment_mode: string;
+  active_application: string | null;
+  selected_application: string | null;
+  selection_source: string | null;
+  configured: boolean;
+  restart_required: boolean;
+  applications: EnvironmentApplication[];
+  last_discovered_at: string | null;
+  last_discovery_error: string | null;
+  message: string | null;
 }
 
 export interface CurrentUser {
@@ -44,6 +69,7 @@ export interface BootstrapResponse {
   csrf_token: string;
   identity_authentication: {
     federated_enabled: boolean;
+    oracle_credentials_enabled: boolean;
     provider_name: string;
     login_url: string | null;
     local_recovery_enabled: boolean;
@@ -340,6 +366,7 @@ export interface PlatformUser {
   created_at: string;
   updated_at: string;
   last_login_at: string | null;
+  authentication_source: "LOCAL_RECOVERY" | "ORACLE_LINKED" | "ORACLE_AND_LOCAL";
 }
 
 export interface AccessControlResponse {
@@ -357,6 +384,7 @@ export interface IdentitySyncStatus {
   provider_registered: boolean;
   identity_provider_mode: string;
   sso_enabled: boolean;
+  oracle_password_login_enabled: boolean;
   synced_identities: number;
   active_identities: number;
   mapped_entitlements: number;
@@ -492,6 +520,7 @@ export interface JobActivitySummary {
   total_steps: number;
   initiated_by: string;
   trigger_source: string;
+  executed_by?: string | null;
   error_message: string | null;
 }
 
@@ -509,6 +538,47 @@ export interface JobActivityStep {
 export interface JobActivityDetail extends JobActivitySummary {
   steps: JobActivityStep[];
   record_statistics: OracleRecordStatistics | null;
+  lineage: JobLoadLineage | null;
+  oracle_messages: OracleJobMessage[];
+  rejected_records: RejectedRecordSet[];
+  artifacts: JobArtifact[];
+  notices: string[];
+}
+
+export interface JobLoadLineage {
+  operation?: string | null;
+  source_kind?: string | null;
+  source_file?: string | null;
+  staging_location?: string | null;
+  oracle_job_name?: string | null;
+  target_application?: string | null;
+  target_system?: string | null;
+  origin_note?: string | null;
+}
+
+export interface OracleJobMessage {
+  message_type: string;
+  category: string | null;
+  message: string;
+  dimension_name: string | null;
+  child_job_id: string | null;
+}
+
+export interface RejectedRecordSet {
+  file_name: string;
+  dimension_name: string | null;
+  columns: string[];
+  rows: string[][];
+  preview_count: number;
+  truncated: boolean;
+}
+
+export interface JobArtifact {
+  artifact_id: string;
+  name: string;
+  kind: string;
+  size_bytes: number;
+  download_url: string;
 }
 
 export interface JobsActivityResponse {
@@ -524,44 +594,25 @@ export interface JobsActivityResponse {
 }
 
 export type ScheduleFrequency = "ONE_TIME" | "DAILY" | "WEEKLY" | "MONTHLY";
-export type ScheduleContextMode = "PIPELINE_DEFAULTS" | "RUN_PRESET";
-export type ScheduleRunOutcome = "NEVER" | "SUBMITTED" | "FAILED" | "SKIPPED";
+export type AutomationTargetType = "ORACLE_PIPELINE" | "RTP_REGISTRY_SYNC";
+export type ScheduleRunOutcome = "NEVER" | "CLAIMED" | "SUBMITTED" | "COMPLETED" | "FAILED" | "SKIPPED";
 
-export interface SchedulePresetOption {
-  preset_id: number;
-  name: string;
-  one_click_ready: boolean;
-  year: string;
-  start_period: string;
-  end_period: string;
-  inbox_files: [string, string][];
-  required_upload_keys: string[];
-}
+export type AutomationInputPolicy = "ORACLE_DEFAULTS" | "FIXED";
+export type AutomationMisfirePolicy = "RUN_ONCE" | "SKIP";
 
-export interface ScheduleProcessOption {
-  code: string;
-  name: string;
-  context_mode: string;
-  supports_pipeline_defaults: boolean;
-  presets: SchedulePresetOption[];
-}
-
-export interface ScheduleCatalogResponse {
-  status: string;
-  processes: ScheduleProcessOption[];
-}
-
-export interface ProcessSchedule {
+export interface AutomationSchedule {
   schedule_id: number;
   name: string;
-  process_code: string;
+  target_type: AutomationTargetType;
+  target_key: string;
   frequency: ScheduleFrequency;
-  frequency_label: string;
   timezone: string;
   first_run_local: string;
-  context_mode: ScheduleContextMode;
-  context_label: string;
-  preset_id: number | null;
+  input_policy: AutomationInputPolicy;
+  variables: Record<string, string>;
+  inbox_files: Record<string, string>;
+  misfire_policy: AutomationMisfirePolicy;
+  concurrency_policy: "SKIP_IF_ACTIVE";
   enabled: boolean;
   next_run_at: string | null;
   created_at: string;
@@ -572,19 +623,51 @@ export interface ProcessSchedule {
   last_error: string | null;
 }
 
-export interface ProcessSchedulesResponse {
+export interface AutomationSchedulesResponse {
   status: string;
-  schedules: ProcessSchedule[];
+  schedules: AutomationSchedule[];
 }
 
-export interface ProcessScheduleInput {
+export type AutomationScheduleRunStatus = "CLAIMED" | "SUBMITTED" | "COMPLETED" | "FAILED" | "SKIPPED";
+
+export interface AutomationScheduleRunEvidence {
+  run_id: number;
+  schedule_id: number;
+  schedule_name: string;
+  target_type: AutomationTargetType;
+  target_key: string;
+  scheduled_for: string;
+  claimed_at: string;
+  completed_at: string | null;
+  status: AutomationScheduleRunStatus;
+  execution_id: string | null;
+  error_message: string | null;
+}
+
+export interface AutomationScheduleRunsResponse {
+  status: string;
+  summary: {
+    total: number;
+    submitted: number;
+    completed: number;
+    failed: number;
+    skipped: number;
+    claimed: number;
+  };
+  runs: AutomationScheduleRunEvidence[];
+}
+
+export interface AutomationScheduleInput {
   name: string;
-  process_code: string;
+  target_type: AutomationTargetType;
+  target_key: string;
   frequency: ScheduleFrequency;
   timezone: string;
   first_run_local: string;
-  context_mode: ScheduleContextMode;
-  preset_id: number | null;
+  input_policy: AutomationInputPolicy;
+  variables: Record<string, string>;
+  inbox_files: Record<string, string>;
+  misfire_policy: AutomationMisfirePolicy;
   enabled: boolean;
 }
 
@@ -598,14 +681,7 @@ export interface SchedulePreviewResponse {
 export interface ScheduleMutationResponse {
   status: string;
   message: string;
-  schedule: ProcessSchedule;
-}
-
-export interface ScheduleRunResponse {
-  status: string;
-  message: string;
-  execution_id: string;
-  redirect: string;
+  schedule: AutomationSchedule;
 }
 
 export interface OperationSummary {
@@ -625,6 +701,10 @@ export interface OperationsResponse {
 export interface OperationArtifactCatalog {
   status: string;
   jobs: string[];
+}
+
+export interface BusinessRuleCatalogResponse extends OperationArtifactCatalog {
+  rtp_registry?: BusinessRuleRTPRegistryStatus;
 }
 
 export type OracleFilePurpose = "data-import" | "metadata-import" | "data-integration" | "pipeline";
@@ -651,6 +731,106 @@ export interface BusinessRuleRunInput {
   rule_name: string;
   runtime_prompts: Record<string, string>;
   planning_task_id?: number | null;
+}
+
+export interface RuntimePromptDefinition {
+  name: string;
+  label: string;
+  order: number;
+  value_type: string;
+  dimension: string | null;
+  default_value: string | null;
+  has_default: boolean;
+  required: boolean;
+  hidden: boolean;
+  allow_multiple: boolean;
+  security_mode: string | null;
+  scope_type: string;
+  scope_name: string | null;
+  source_variable_id: string | null;
+  limit_type: string | null;
+  limit_value: string | null;
+}
+
+export interface BusinessRuleRTPDefinition {
+  rule_name: string;
+  cube_name: string | null;
+  source_name: string;
+  source_checksum: string;
+  parser_version: string;
+  definition_checksum: string;
+  synchronized_at: string;
+  prompts: RuntimePromptDefinition[];
+}
+
+export interface BusinessRuleRTPImportResult {
+  sync_run_id: number;
+  source_name: string;
+  source_checksum: string;
+  parser_version: string;
+  rules_imported: number;
+  prompts_imported: number;
+  warnings: string[];
+  completed_at: string;
+  rules_added?: number;
+  rules_changed?: number;
+  rules_unchanged?: number;
+}
+
+export interface BusinessRuleRTPDefinitionResponse {
+  status: string;
+  definition: BusinessRuleRTPDefinition | null;
+  fallback: boolean;
+  message: string;
+  latest_import: BusinessRuleRTPImportResult | null;
+}
+
+export interface BusinessRuleRTPImportResponse {
+  status: string;
+  message: string;
+  result: BusinessRuleRTPImportResult;
+}
+
+export interface BusinessRuleRTPRegistryDefinitionStatus {
+  rule_name: string;
+  cube_name: string | null;
+  source_name: string;
+  synchronized_at: string;
+  prompt_count: number;
+  required_prompt_count: number;
+  live_status: "SYNCHRONIZED" | "NOT_IN_LIVE_CATALOG" | "CATALOG_UNAVAILABLE" | string;
+}
+
+export interface BusinessRuleRTPRegistrySyncRun {
+  sync_run_id: number;
+  source_name: string;
+  parser_version: string;
+  status: "RUNNING" | "COMPLETED" | "FAILED" | string;
+  rules_imported: number;
+  prompts_imported: number;
+  warnings: string[];
+  error_summary: string | null;
+  started_at: string;
+  completed_at: string | null;
+}
+
+export interface BusinessRuleRTPRegistryStatus {
+  health: "HEALTHY" | "ATTENTION" | "EMPTY" | "CATALOG_UNAVAILABLE" | string;
+  application_name: string;
+  live_catalog_available: boolean;
+  live_rule_count: number | null;
+  synchronized_rule_count: number;
+  synchronized_prompt_count: number;
+  unsynchronized_live_rules: string[];
+  definitions_not_in_live_catalog: string[];
+  definitions: BusinessRuleRTPRegistryDefinitionStatus[];
+  recent_syncs: BusinessRuleRTPRegistrySyncRun[];
+}
+
+export interface BusinessRuleRTPRegistryStatusResponse {
+  status: string;
+  registry: BusinessRuleRTPRegistryStatus;
+  live_catalog_error: string | null;
 }
 
 export interface DataMapRunInput {
@@ -1047,6 +1227,7 @@ export interface OperationExecution {
   error_message: string | null;
   initiated_by: string | null;
   trigger_source: string | null;
+  executed_by?: string | null;
   steps: OperationExecutionStep[];
   completed_steps: number;
   total_steps: number;
@@ -1273,7 +1454,7 @@ export interface AgentDraftCheck {
 export interface AgentActionInputField {
   key: string;
   label: string;
-  kind: "text" | "boolean" | "choice" | "key_value" | "file_reference" | "pipeline_review" | "pipeline_variable" | "pipeline_file";
+  kind: "text" | "boolean" | "choice" | "key_value" | "file_reference" | "pipeline_review" | "pipeline_variable" | "pipeline_file" | "schedule";
   required: boolean;
   description: string;
   placeholder: string;
@@ -1340,6 +1521,7 @@ export interface AgentSendResponse {
   clarification_request: AgentClarificationRequest | null;
   input_request: AgentInputRequest | null;
   execution?: AgentApprovedExecution | null;
+  schedule?: AutomationSchedule | null;
   decision?: AgentActionDecision | null;
 }
 
@@ -1468,6 +1650,8 @@ export interface PlatformUserEditInput {
 export interface EnvironmentHealth {
   status: "ok" | "unavailable";
   application?: string;
+  active_application?: string;
+  restart_required?: boolean;
   deployment_mode?: string;
   application_type?: string | null;
   storage?: string | null;

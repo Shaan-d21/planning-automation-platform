@@ -7,10 +7,17 @@ import json
 import logging
 from collections.abc import Callable, Mapping
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path, PurePath
 from urllib.parse import urlparse
 
-from app.agent.capabilities import AgentCapabilityGateway
+from app.agent.capabilities import (
+    AgentCapabilityGateway,
+    PIPELINE_SCHEDULE_ACTIONS,
+    PIPELINE_SCHEDULE_CREATE,
+    PIPELINE_SCHEDULE_PAUSE,
+    PIPELINE_SCHEDULE_RESUME,
+)
 from app.agent.gemini_provider import GeminiAgentProvider
 from app.agent.groq_provider import GroqAgentProvider
 from app.agent.checkpoints import AgentCheckpointStore
@@ -32,6 +39,8 @@ from app.application.action_inputs import (
     normalize_action_inputs,
 )
 from app.application.operation_execution_manager import OperationExecutionManager
+from app.application.automation_schedule_targets import AutomationScheduleCoordinator
+from app.application.automation_scheduling import AutomationScheduleApplicationService
 from app.application.standalone_flow import (
     StandaloneFlowInput,
     StandaloneFlowStepInput,
@@ -55,6 +64,15 @@ from app.models.data_integration import (
     DataIntegrationFileReference,
     DataIntegrationPeriodRange,
 )
+from app.models.automation_schedule import (
+    AutomationConcurrencyPolicy,
+    AutomationInputPolicy,
+    AutomationMisfirePolicy,
+    AutomationScheduleFrequency,
+    AutomationScheduleInput,
+    AutomationTargetType,
+)
+from app.models.oracle_artifact import OracleEnvironment
 from app.services.data_integration_service import DataIntegrationService
 from app.services.data_service import DataService
 from app.services.metadata_service import MetadataService
@@ -87,7 +105,8 @@ distinguish tool-confirmed facts from general Oracle EPM guidance.
 Safety rules:
 - You cannot execute, schedule, modify, upload, delete, approve, or retry work
   autonomously. A deterministic platform workflow may submit a supported
-  operation only after the user explicitly approves the exact reviewed inputs.
+  operation or save a supported Pipeline schedule only after the user explicitly
+  approves the exact reviewed inputs.
 - When a user clearly wants to perform an operation, use the preparation tool
   to create an exact reviewable proposal. Supported direct operations run only
   after explicit platform approval; all others become governed action drafts.
@@ -98,6 +117,9 @@ Safety rules:
   separate file-loading operation and never use it for a Data Push request.
 - Never interpret conversation text as execution approval. Only the platform's
   explicit approval control can authorize a supported operation.
+- Scheduling is limited to governed Oracle Pipelines. Use the schedule tool to
+  create, pause, or resume a recurrence; never invent dates, timezones, Pipeline
+  inputs, or local-file dependencies.
 - Never ask for or reveal passwords, API keys, session tokens, or credentials.
 - Never claim that an Oracle action occurred unless a tool result says so.
 - Do not invent application artifacts, cube names, process status, or history.
@@ -132,6 +154,9 @@ class AgentApplicationService:
             "substitution-variables",
             "user-variables",
             "standalone-flow",
+            PIPELINE_SCHEDULE_CREATE,
+            PIPELINE_SCHEDULE_PAUSE,
+            PIPELINE_SCHEDULE_RESUME,
         }
     )
 
@@ -145,6 +170,8 @@ class AgentApplicationService:
         provider_factory: ProviderFactory | None = None,
         graph_orchestrator: AgentGraphOrchestrator | None = None,
         operation_manager: OperationExecutionManager | None = None,
+        schedule_service: AutomationScheduleApplicationService | None = None,
+        schedule_coordinator: AutomationScheduleCoordinator | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._settings = settings
@@ -157,6 +184,12 @@ class AgentApplicationService:
         self._logger = logger or logging.getLogger(__name__)
         self._graph = graph_orchestrator
         self._operation_manager = operation_manager
+        self._schedule_service = schedule_service
+        self._schedule_coordinator = schedule_coordinator
+        self._schedule_environment_key = OracleEnvironment.from_settings(
+            settings.epm_base_url,
+            settings.application_name,
+        ).key
         if self._graph is None and settings.agent_orchestrator == "langgraph":
             self._graph = AgentGraphOrchestrator(
                 provider_factory=self._provider_factory,
@@ -749,7 +782,7 @@ class AgentApplicationService:
             raise AgentConversationError(
                 "Approval decision must be approve or reject."
             )
-        if normalized == "approve" and not self._can_prepare_operations(user):
+        if normalized == "approve" and not self._can_prepare_agent_actions(user):
             raise AgentConversationError(
                 "You do not have permission to prepare governed operations."
             )
@@ -798,10 +831,13 @@ class AgentApplicationService:
                 operation_cleanup=operation_cleanup,
             )
             execution = response.get("execution")
+            schedule = response.get("schedule")
             execution_id = (
                 str(execution.get("execution_id"))
                 if isinstance(execution, dict)
                 and execution.get("execution_id")
+                else f"schedule:{schedule.get('schedule_id')}"
+                if isinstance(schedule, dict) and schedule.get("schedule_id")
                 else None
             )
             outcome = (
@@ -844,7 +880,7 @@ class AgentApplicationService:
     ) -> dict[str, object]:
         """Resume one durable artifact choice or cancel its preparation."""
         self._require_agent_use(user)
-        if not self._can_prepare_operations(user):
+        if not self._can_prepare_agent_actions(user):
             raise AgentConversationError(
                 "You do not have permission to prepare governed operations."
             )
@@ -879,7 +915,7 @@ class AgentApplicationService:
     ) -> dict[str, object]:
         """Validate and resume one guided operation-input request."""
         self._require_agent_use(user)
-        if not self._can_prepare_operations(user):
+        if not self._can_prepare_agent_actions(user):
             raise AgentConversationError(
                 "You do not have permission to prepare governed operations."
             )
@@ -933,12 +969,20 @@ class AgentApplicationService:
         )
         response_text = result.text
         if result.approval_request is not None:
+            schedule_action = (
+                result.approval_request.operation_code.casefold()
+                in PIPELINE_SCHEDULE_ACTIONS
+            )
             direct_run = (
                 result.approval_request.operation_code.casefold()
                 in self._DIRECT_APPROVAL_OPERATIONS
             )
             response_text = (
-                f"I can run **{result.approval_request.display_name}** with "
+                f"I can apply **{result.approval_request.display_name}** with "
+                "the reviewed schedule details below. Nothing runs until an "
+                "enabled occurrence becomes due."
+                if schedule_action
+                else f"I can run **{result.approval_request.display_name}** with "
                 "the reviewed inputs below. Approving will queue the selected "
                 "operation in Oracle and start monitored execution."
                 if direct_run
@@ -977,11 +1021,20 @@ class AgentApplicationService:
                 "the required run options below. No Oracle operation has "
                 "started."
             )
+            if result.input_request.operation_code == PIPELINE_SCHEDULE_CREATE:
+                response_text = (
+                    f"I found Pipeline **{result.input_request.artifact_name}**. "
+                    "Choose its recurrence and unattended inputs below. No "
+                    "schedule has been saved and no Pipeline has started."
+                )
         draft_payloads = tuple(
             activity.result["action_draft"]
             for activity in result.tool_activity
             if activity.status == "SUCCESS"
-            and activity.name == "prepare_operation_action"
+            and activity.name in {
+                "prepare_operation_action",
+                "prepare_schedule_action",
+            }
             and isinstance(activity.result, dict)
             and isinstance(activity.result.get("action_draft"), dict)
         )
@@ -994,6 +1047,7 @@ class AgentApplicationService:
             and isinstance(activity.result.get("standalone_flow"), dict)
         )
         execution = None
+        schedule = None
         executed_operation = False
         if execute_approved:
             flow_payload = next(
@@ -1021,6 +1075,14 @@ class AgentApplicationService:
                     operation_cleanup=operation_cleanup,
                 )
                 executed_operation = True
+            elif direct_payload is not None and str(
+                direct_payload.get("target_code") or ""
+            ).casefold() in PIPELINE_SCHEDULE_ACTIONS:
+                schedule = self._apply_approved_schedule_action(
+                    direct_payload,
+                    user,
+                )
+                executed_operation = True
             elif direct_payload is not None:
                 execution = self._submit_approved_operation(
                     direct_payload,
@@ -1034,6 +1096,21 @@ class AgentApplicationService:
                     f"Approved **{execution['target_name']}** and queued it "
                     f"for monitored Oracle execution. Execution ID: "
                     f"`{execution['execution_id']}`."
+                )
+            elif schedule is not None:
+                action = str(direct_payload.get("target_code") or "")
+                verb = {
+                    PIPELINE_SCHEDULE_CREATE: "created",
+                    PIPELINE_SCHEDULE_PAUSE: "paused",
+                    PIPELINE_SCHEDULE_RESUME: "resumed",
+                }.get(action, "updated")
+                response_text = (
+                    f"Schedule **{schedule['name']}** was {verb}. "
+                    + (
+                        f"Its next run is `{schedule['next_run_at']}`."
+                        if schedule.get("next_run_at")
+                        else "It has no active future occurrence."
+                    )
                 )
         assistant = self._repository.add_message(
             conversation_id=conversation_id,
@@ -1058,7 +1135,10 @@ class AgentApplicationService:
             for activity in result.tool_activity
             if not executed_operation
             and activity.status == "SUCCESS"
-            and activity.name == "prepare_operation_action"
+            and activity.name in {
+                "prepare_operation_action",
+                "prepare_schedule_action",
+            }
             and isinstance(activity.result, dict)
             and isinstance(activity.result.get("action_draft"), dict)
         )
@@ -1076,6 +1156,7 @@ class AgentApplicationService:
             "clarification_request": clarification_request,
             "input_request": self._personalize_input_request(result.input_request, user),
             "execution": execution,
+            "schedule": schedule,
             "decision": None,
         }
 
@@ -1112,10 +1193,11 @@ class AgentApplicationService:
             ).strip()
             values = raw_step.get("input_values")
             input_values = values if isinstance(values, dict) else {}
+            step_prefix = f"step_{index}:"
             step_uploads = {
-                "source_file": path
+                key[len(step_prefix) :]: path
                 for key, path in uploads.items()
-                if key == f"step_{index}:source_file"
+                if key.startswith(step_prefix)
             }
             operation_input = self._standalone_flow_operation_input(
                 operation_code,
@@ -1204,11 +1286,21 @@ class AgentApplicationService:
                 raise AgentConversationError(
                     "Business Rule runtime prompts are invalid."
                 )
+            normalized_prompts = (
+                self._gateway.normalize_business_rule_runtime_prompts(
+                    canonical,
+                    prompts,
+                )
+            )
             return BusinessRuleOperationInput(
                 rule_name=canonical,
-                runtime_prompts={
-                    str(name): str(value) for name, value in prompts.items()
-                },
+                runtime_prompts=normalized_prompts,
+            )
+        if operation_code == "pipelines":
+            return self._pipeline_operation_input(
+                canonical,
+                input_values,
+                operation_uploads,
             )
         if operation_code == "data-maps":
             members = input_values.get("member_overrides", {})
@@ -1310,7 +1402,20 @@ class AgentApplicationService:
     ) -> dict[str, object]:
         """Return the first decision outcome without submitting work again."""
         execution = None
-        if decision.execution_id:
+        schedule = None
+        if decision.execution_id and decision.execution_id.startswith("schedule:"):
+            try:
+                schedule_id = int(decision.execution_id.split(":", 1)[1])
+                item = (
+                    self._schedule_service.get(schedule_id)
+                    if self._schedule_service is not None
+                    else None
+                )
+                if item is not None:
+                    schedule = self._schedule_payload(item)
+            except (EPMError, ValueError):
+                schedule = None
+        elif decision.execution_id:
             get_execution = (
                 getattr(self._operation_manager, "get", None)
                 if self._operation_manager is not None
@@ -1342,7 +1447,10 @@ class AgentApplicationService:
             )
         elif decision.outcome_status == "SUBMITTED":
             text = (
-                "This reviewed approval was already submitted. The platform "
+                "This reviewed schedule change was already applied. The "
+                "platform returned the saved schedule instead of applying it again."
+                if decision.operation_code in PIPELINE_SCHEDULE_ACTIONS
+                else "This reviewed approval was already submitted. The platform "
                 "returned the original execution instead of starting it again."
             )
         elif decision.outcome_status == "REJECTED":
@@ -1378,6 +1486,7 @@ class AgentApplicationService:
             "clarification_request": None,
             "input_request": None,
             "execution": execution,
+            "schedule": schedule,
             "decision": decision,
         }
 
@@ -1443,6 +1552,142 @@ class AgentApplicationService:
             return value
         return str(value)
 
+    def _apply_approved_schedule_action(
+        self,
+        payload: dict[str, object],
+        user: UserAccount,
+    ) -> dict[str, object]:
+        """Apply one explicitly approved change through the shared scheduler."""
+        if not user.has_permission(Permission.SCHEDULE_MANAGE):
+            raise AgentConversationError(
+                "You do not have permission to manage automation schedules."
+            )
+        if self._schedule_service is None or self._schedule_coordinator is None:
+            raise AgentConversationError(
+                "Agent scheduling is not configured for this environment."
+            )
+        action = str(payload.get("target_code") or "").strip().casefold()
+        values = payload.get("input_values")
+        input_values = values if isinstance(values, dict) else {}
+        try:
+            if action == PIPELINE_SCHEDULE_CREATE:
+                requested = str(payload.get("artifact_name") or "").strip()
+                canonical = self._gateway.resolve_artifact_choice(
+                    PIPELINE_SCHEDULE_CREATE,
+                    requested,
+                )
+                if canonical is None:
+                    raise AgentConversationError(
+                        "The selected Oracle Pipeline is no longer available."
+                    )
+                first_run = datetime.fromisoformat(
+                    str(input_values.get("first_run_local") or "")
+                )
+                if first_run.tzinfo is not None:
+                    raise AgentConversationError(
+                        "The reviewed first run must be a local date and time."
+                    )
+                policy = AutomationInputPolicy(
+                    str(input_values.get("input_policy") or "")
+                )
+                variables = self._string_values(input_values.get("variables"))
+                inbox_files = self._string_values(input_values.get("inbox_files"))
+                schedule_input = AutomationScheduleInput(
+                    environment_key=self._schedule_environment_key,
+                    name=str(input_values.get("name") or "").strip(),
+                    target_type=AutomationTargetType.ORACLE_PIPELINE,
+                    target_key=canonical,
+                    frequency=AutomationScheduleFrequency(
+                        str(input_values.get("frequency") or "")
+                    ),
+                    timezone=str(input_values.get("timezone") or "").strip(),
+                    first_run_local=first_run,
+                    input_policy=policy,
+                    configuration=(
+                        {"variables": variables, "inbox_files": inbox_files}
+                        if policy is AutomationInputPolicy.FIXED
+                        else {}
+                    ),
+                    concurrency_policy=AutomationConcurrencyPolicy.SKIP_IF_ACTIVE,
+                    misfire_policy=AutomationMisfirePolicy(
+                        str(input_values.get("misfire_policy") or "RUN_ONCE")
+                    ),
+                    enabled=bool(input_values.get("enabled", True)),
+                )
+                schedule = self._schedule_coordinator.create(schedule_input)
+            else:
+                identifier = str(payload.get("artifact_name") or "").strip()
+                canonical = self._gateway.resolve_artifact_choice(action, identifier)
+                if canonical is None or not canonical.casefold().startswith("schedule:"):
+                    raise AgentConversationError(
+                        "The selected automation schedule is no longer available."
+                    )
+                schedule_id = int(canonical.split(":", 1)[1])
+                schedule = self._schedule_service.get(schedule_id)
+                if schedule.environment_key != self._schedule_environment_key:
+                    raise AgentConversationError(
+                        "The selected automation schedule belongs to another environment."
+                    )
+                expected_enabled = action == PIPELINE_SCHEDULE_PAUSE
+                if schedule.enabled is not expected_enabled:
+                    state = "active" if schedule.enabled else "paused"
+                    raise AgentConversationError(
+                        f"Schedule '{schedule.name}' is already {state}."
+                    )
+                schedule = self._schedule_coordinator.set_enabled(
+                    schedule_id,
+                    action == PIPELINE_SCHEDULE_RESUME,
+                )
+        except AgentConversationError:
+            raise
+        except (EPMError, ValueError) as exc:
+            raise AgentConversationError(str(exc)) from exc
+        return self._schedule_payload(schedule)
+
+    @staticmethod
+    def _string_values(value: object) -> dict[str, str]:
+        if not isinstance(value, Mapping):
+            return {}
+        return {
+            str(name).strip(): str(item).strip()
+            for name, item in value.items()
+            if str(name).strip() and str(item).strip()
+        }
+
+    @staticmethod
+    def _schedule_payload(schedule) -> dict[str, object]:
+        configuration = dict(schedule.configuration)
+        return {
+            "schedule_id": schedule.schedule_id,
+            "name": schedule.name,
+            "target_type": schedule.target_type.value,
+            "target_key": schedule.target_key,
+            "frequency": schedule.frequency.value,
+            "timezone": schedule.timezone,
+            "first_run_local": schedule.first_run_local.isoformat(),
+            "input_policy": schedule.input_policy.value,
+            "variables": dict(configuration.get("variables") or {}),
+            "inbox_files": dict(configuration.get("inbox_files") or {}),
+            "misfire_policy": schedule.misfire_policy.value,
+            "concurrency_policy": schedule.concurrency_policy.value,
+            "enabled": schedule.enabled,
+            "next_run_at": (
+                schedule.next_run_at.isoformat()
+                if schedule.next_run_at is not None
+                else None
+            ),
+            "last_outcome": schedule.last_outcome.value,
+            "created_at": schedule.created_at.isoformat(),
+            "updated_at": schedule.updated_at.isoformat(),
+            "last_triggered_at": (
+                schedule.last_triggered_at.isoformat()
+                if schedule.last_triggered_at is not None
+                else None
+            ),
+            "last_execution_id": schedule.last_execution_id,
+            "last_error": schedule.last_error,
+        }
+
     def _submit_approved_operation(
         self,
         payload: dict[str, object],
@@ -1499,12 +1744,15 @@ class AgentApplicationService:
                     raise AgentConversationError(
                         "Business Rule runtime prompts are invalid."
                     )
+                normalized_prompts = (
+                    self._gateway.normalize_business_rule_runtime_prompts(
+                        canonical,
+                        runtime_prompts,
+                    )
+                )
                 operation_input = BusinessRuleOperationInput(
                     rule_name=canonical,
-                    runtime_prompts={
-                        str(name): str(value)
-                        for name, value in runtime_prompts.items()
-                    },
+                    runtime_prompts=normalized_prompts,
                 )
             elif operation_code == "data-maps":
                 member_overrides = input_values.get("member_overrides", {})
@@ -1978,6 +2226,8 @@ class AgentApplicationService:
             allowed.add("plan_multi_step_request")
             allowed.add("prepare_operation_action")
             allowed.add("prepare_standalone_flow_action")
+        if user.has_permission(Permission.SCHEDULE_MANAGE):
+            allowed.add("prepare_schedule_action")
         return frozenset(allowed)
 
     @staticmethod
@@ -1989,6 +2239,13 @@ class AgentApplicationService:
                 Permission.VARIABLE_UPDATE,
                 Permission.USER_VARIABLE_UPDATE,
             )
+        )
+
+    @staticmethod
+    def _can_prepare_agent_actions(user: UserAccount) -> bool:
+        return (
+            AgentApplicationService._can_prepare_operations(user)
+            or user.has_permission(Permission.SCHEDULE_MANAGE)
         )
 
     @staticmethod

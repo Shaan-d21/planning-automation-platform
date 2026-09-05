@@ -55,6 +55,7 @@ class WorkflowEngine:
         *,
         execution_id: str | None = None,
         actor: ExecutionActor | None = None,
+        oracle_execution_username: str | None = None,
     ) -> WorkflowRun:
         """Execute steps sequentially and return their durable run record."""
         name = str(workflow_name).strip()
@@ -83,6 +84,7 @@ class WorkflowEngine:
             initiated_by=(actor.username if actor else None),
             initiated_by_display=(actor.display_name if actor else None),
             trigger_source=(actor.trigger_source if actor else TriggerSource.API),
+            oracle_execution_username=oracle_execution_username,
         )
         self._repository.save(run)
         self._logger.info(

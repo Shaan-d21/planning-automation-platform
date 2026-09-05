@@ -145,6 +145,9 @@ class StandaloneFlowCommandExecutor:
             trigger_source=(
                 actor.trigger_source if actor else TriggerSource.API
             ),
+            oracle_execution_username=(
+                self._settings.oracle_execution_username
+            ),
         )
         self._repository.save(run)
         for index, step in enumerate(flow_input.steps, start=1):

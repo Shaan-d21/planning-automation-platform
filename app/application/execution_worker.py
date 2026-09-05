@@ -258,6 +258,9 @@ class DurableExecutionWorker:
                 workflow_name=job.target_key,
                 status=WorkflowStatus.FAILED,
                 started_at=job.created_at,
+                oracle_execution_username=(
+                    self._settings.oracle_execution_username
+                ),
             )
         if existing.status is WorkflowStatus.SUCCESS:
             return
@@ -267,6 +270,10 @@ class DurableExecutionWorker:
                 status=WorkflowStatus.FAILED,
                 completed_at=now,
                 error_message=message,
+                oracle_execution_username=(
+                    existing.oracle_execution_username
+                    or self._settings.oracle_execution_username
+                ),
             )
         )
 

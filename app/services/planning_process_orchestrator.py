@@ -40,6 +40,7 @@ class PlanningProcessOrchestrator:
         handlers: Mapping[PlanningProcessStepType, ProcessStepHandler],
         enabled_overrides: Mapping[PlanningProcessStepType, bool] | None = None,
         execution_id: str | None = None,
+        oracle_execution_username: str | None = None,
     ) -> WorkflowRun:
         """Execute configured steps in order and persist every transition."""
         overrides = dict(enabled_overrides or {})
@@ -75,6 +76,7 @@ class PlanningProcessOrchestrator:
             definition.code,
             workflow_steps,
             execution_id=execution_id,
+            oracle_execution_username=oracle_execution_username,
         )
 
     @staticmethod

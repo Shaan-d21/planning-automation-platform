@@ -23,7 +23,7 @@ from app.models.identity import (
 from app.services.access_control_service import AccessControlService
 from app.services.federated_provisioning_service import FederatedProvisioningService
 from app.services.identity_directory_service import IdentityDirectoryService
-from app.utils.exceptions import IdentitySnapshotChangedError
+from app.utils.exceptions import AccessControlError, IdentitySnapshotChangedError
 
 
 PROVIDER_CODE = "oracle-cloud-main"
@@ -43,6 +43,12 @@ def _setup(database_path: Path, *, admin_username: str = "admin"):
             code=PROVIDER_CODE,
             provider_type=IdentityProviderType.ORACLE_CLOUD,
             display_name="Oracle Cloud EPM",
+            safe_configuration={
+                "source": "EPM_ACCESS_CONTROL",
+                "base_url": "https://planning.example.oraclecloud.com",
+                "application_name": "OriginalPlanning",
+                "subject_strategy": "NORMALIZED_USER_LOGIN",
+            },
         )
     )
     planner = ExternalEntitlementSnapshot(
@@ -81,10 +87,14 @@ def _setup(database_path: Path, *, admin_username: str = "admin"):
     return access, administrator, directory
 
 
-def _entitlement_id(directory: IdentityDirectoryService, name: str) -> int:
+def _entitlement_id(
+    directory: IdentityDirectoryService,
+    name: str,
+    provider_code: str = PROVIDER_CODE,
+) -> int:
     return next(
         item.entitlement_id
-        for item in directory.list_entitlements(PROVIDER_CODE)
+        for item in directory.list_entitlements(provider_code)
         if item.display_name == name
     )
 
@@ -189,6 +199,145 @@ def test_local_username_collision_is_protected_and_never_linked(
     assert external["user_id"] is None
 
 
+def test_application_change_reuses_same_oracle_managed_profile(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "application-change.sqlite3"
+    access, administrator, directory = _setup(database_path)
+    directory.set_role_mapping(
+        PROVIDER_CODE,
+        _entitlement_id(directory, "Planning User"),
+        RoleCode.USER,
+        actor_user_id=administrator.user_id,
+    )
+    service = FederatedProvisioningService(database_path)
+    original_user_id = service.provision_identity(PROVIDER_CODE, "oracle-1")
+
+    changed_provider = "oracle-cloud-changed-application"
+    directory.register_provider(
+        IdentityProviderDefinition(
+            code=changed_provider,
+            provider_type=IdentityProviderType.ORACLE_CLOUD,
+            display_name="Oracle Cloud EPM - NewPlanning",
+            safe_configuration={
+                "source": "EPM_ACCESS_CONTROL",
+                "base_url": "https://planning.example.oraclecloud.com/",
+                "application_name": "NewPlanning",
+                "subject_strategy": "NORMALIZED_USER_LOGIN",
+            },
+        )
+    )
+    planning_user = ExternalEntitlementSnapshot(
+        external_key="Planning User",
+        display_name="Planning User",
+        entitlement_type=ExternalEntitlementType.APPLICATION_ROLE,
+    )
+    directory.synchronize(
+        changed_provider,
+        IdentityDirectorySnapshot(
+            identities=(ExternalIdentitySnapshot(
+                subject="oracle-1",
+                username="planner@example.com",
+                display_name="Planning User",
+                email="planner@example.com",
+                entitlements=(planning_user,),
+            ),),
+            retrieved_at=datetime.now(UTC),
+        ),
+        initiated_by_user_id=administrator.user_id,
+    )
+    directory.set_role_mapping(
+        changed_provider,
+        _entitlement_id(directory, "Planning User", changed_provider),
+        RoleCode.POWER_USER,
+        actor_user_id=administrator.user_id,
+    )
+
+    preview = service.preview(changed_provider)
+    entry = preview.entries[0]
+
+    assert preview.conflicts == 0
+    assert preview.updates == 1
+    assert entry.user_id == original_user_id
+    assert "same Oracle user and environment" in entry.explanation
+    result, _ = service.apply(
+        changed_provider,
+        preview.checksum,
+        actor_user_id=administrator.user_id,
+    )
+    assert result.updated == 1
+    reused_user_id = service.provision_identity(changed_provider, "oracle-1")
+    assert reused_user_id == original_user_id
+    assert access.require_user(original_user_id).roles == (RoleCode.POWER_USER,)
+    with database_for(database_path).connect() as connection:
+        linked_user_ids = connection.execute(
+            select(external_identities.c.user_id).where(
+                external_identities.c.subject == "oracle-1"
+            )
+        ).scalars().all()
+    assert linked_user_ids == [original_user_id, original_user_id]
+
+
+def test_same_username_from_different_oracle_environment_remains_conflict(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "different-environment.sqlite3"
+    _, administrator, directory = _setup(database_path)
+    directory.set_role_mapping(
+        PROVIDER_CODE,
+        _entitlement_id(directory, "Planning User"),
+        RoleCode.USER,
+        actor_user_id=administrator.user_id,
+    )
+    service = FederatedProvisioningService(database_path)
+    service.provision_identity(PROVIDER_CODE, "oracle-1")
+
+    other_provider = "oracle-cloud-other-environment"
+    directory.register_provider(
+        IdentityProviderDefinition(
+            code=other_provider,
+            provider_type=IdentityProviderType.ORACLE_CLOUD,
+            display_name="Different Oracle Cloud EPM",
+            safe_configuration={
+                "source": "EPM_ACCESS_CONTROL",
+                "base_url": "https://other.example.oraclecloud.com",
+                "application_name": "Planning",
+                "subject_strategy": "NORMALIZED_USER_LOGIN",
+            },
+        )
+    )
+    planning_user = ExternalEntitlementSnapshot(
+        external_key="Planning User",
+        display_name="Planning User",
+        entitlement_type=ExternalEntitlementType.APPLICATION_ROLE,
+    )
+    directory.synchronize(
+        other_provider,
+        IdentityDirectorySnapshot(
+            identities=(ExternalIdentitySnapshot(
+                subject="oracle-1",
+                username="planner@example.com",
+                display_name="Planning User",
+                email="planner@example.com",
+                entitlements=(planning_user,),
+            ),),
+            retrieved_at=datetime.now(UTC),
+        ),
+        initiated_by_user_id=administrator.user_id,
+    )
+    directory.set_role_mapping(
+        other_provider,
+        _entitlement_id(directory, "Planning User", other_provider),
+        RoleCode.USER,
+        actor_user_id=administrator.user_id,
+    )
+
+    preview = service.preview(other_provider)
+
+    assert preview.conflicts == 1
+    assert preview.entries[0].action == IdentityProvisioningAction.CONFLICT
+
+
 def test_removing_last_mapping_deactivates_managed_shadow_users(
     tmp_path: Path,
 ) -> None:
@@ -249,5 +398,41 @@ def test_mapping_change_invalidates_reviewed_provisioning_checksum(
         service.apply(
             PROVIDER_CODE,
             preview.checksum,
+            actor_user_id=administrator.user_id,
+        )
+
+
+def test_just_in_time_provisioning_creates_only_the_authenticated_profile(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "jit.sqlite3"
+    access, administrator, directory = _setup(database_path)
+    directory.set_role_mapping(
+        PROVIDER_CODE,
+        _entitlement_id(directory, "Finance Planners"),
+        RoleCode.POWER_USER,
+        actor_user_id=administrator.user_id,
+    )
+    service = FederatedProvisioningService(database_path)
+
+    user_id = service.provision_identity(PROVIDER_CODE, "oracle-1")
+
+    linked = access.require_user(user_id)
+    assert linked.username == "planner@example.com"
+    assert linked.roles == (RoleCode.POWER_USER,)
+    assert access.authentication_sources()[user_id] == "ORACLE_LINKED"
+    assert not any(
+        user.username == "viewer@example.com" for user in access.list_users()
+    )
+    database = database_for(database_path)
+    with database.connect() as connection:
+        stored = connection.execute(
+            select(platform_users).where(platform_users.c.user_id == user_id)
+        ).mappings().one()
+    assert stored["password_hash"] is None
+    with pytest.raises(AccessControlError, match="Oracle-linked"):
+        access.reset_password(
+            user_id,
+            "A local password must not be set!",
             actor_user_id=administrator.user_id,
         )

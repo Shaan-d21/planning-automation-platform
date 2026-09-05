@@ -83,6 +83,15 @@ workbook.
 
 ### Oracle and process configuration
 
+#### `oracle_environment_settings`
+
+One non-secret connection-configuration record per normalized Oracle base
+URL. It retains the selected Planning application, its selection source, the
+latest supported Get Applications response, discovery timestamps, and a
+bounded failure message. Credentials and tokens are never stored. A selection
+change is activated only after the API and worker restart, preventing running
+or scheduled work from changing applications mid-execution.
+
 #### `oracle_pipelines`
 
 Administrator-approved Oracle Pipeline catalog with natural key `code`, name,
@@ -169,7 +178,8 @@ job twice when the first worker's final outcome is uncertain.
 
 One durable automation execution. Stores a 64-character execution/correlation
 ID (normally a UUID), workflow name, status, UTC timestamps, error message,
-triggering source, and immutable username/display-name snapshots. The
+triggering source, immutable username/display-name snapshots, and the
+effective Oracle integration username used for execution. The
 snapshots are intentional because
 scheduled/API actors may not map to a retained platform user.
 
@@ -208,7 +218,7 @@ documents. Draft records never represent approval or execution.
 ## Complete data dictionary
 
 The following is the production storage contract implemented through Alembic
-revision `0010_unified_oracle_catalog`. `PK`, `FK`, and `UQ` mean primary key,
+revision `0020_execution_identity`. `PK`, `FK`, and `UQ` mean primary key,
 foreign key, and unique constraint/index. Columns are required unless marked
 optional.
 
@@ -260,6 +270,16 @@ optional.
 
 | Table | Column | PostgreSQL type | Key/default/purpose |
 |---|---|---|---|
+| `oracle_environment_settings` | `base_url` | `VARCHAR(500)` | PK; non-secret Oracle environment identity |
+|  | `deployment_mode` | `VARCHAR(32)` | Resolved cloud/on-premises mode |
+|  | `selected_application` | `VARCHAR(128)` | Optional active-on-next-start Planning application |
+|  | `selection_source` | `VARCHAR(32)` | Environment fallback, auto-discovery, or administrator selection |
+|  | `discovered_applications` | `JSONB` | Latest non-secret Oracle application metadata |
+|  | `last_discovered_at` | `TIMESTAMPTZ` | Optional discovery attempt time |
+|  | `last_discovery_error` | `TEXT` | Optional bounded failure detail |
+|  | `selected_at` | `TIMESTAMPTZ` | Optional selection time |
+|  | `selected_by_user_id` | `BIGINT` | Optional FK to administrator; set null on delete |
+|  | `created_at`, `updated_at` | `TIMESTAMPTZ` | Audit timestamps |
 | `oracle_artifacts` | `artifact_id` | `BIGINT IDENTITY` | PK |
 |  | `environment_key` | `VARCHAR(64)` | Hashed server/application identity; part of UQ |
 |  | `environment_base_url` | `VARCHAR(500)` | Non-secret environment reference |
@@ -370,6 +390,7 @@ optional.
 |  | `initiated_by_username` | `VARCHAR(80)` | Optional immutable actor snapshot |
 |  | `initiated_by_display` | `VARCHAR(120)` | Optional immutable actor snapshot |
 |  | `trigger_source` | `VARCHAR(20)` | UI, CLI, scheduler, API, or agent handoff |
+|  | `oracle_execution_username` | `VARCHAR(254)` | Optional effective Oracle integration identity; never a password |
 | `workflow_steps` | `execution_id` | `VARCHAR(64)` | PK, FK to run; cascade delete |
 |  | `sequence` | `INTEGER` | PK; must be positive |
 |  | `name` | `VARCHAR(200)` | Step name |
@@ -501,6 +522,12 @@ scoped Oracle catalogs; `0009_durable_execution_queue` adds production worker
 dispatch and leases; and `0010_unified_oracle_catalog` extends the same
 environment catalog to Business Rules, Data Maps, import jobs, Cube Refresh
 jobs, and Planning cubes without creating a duplicate registry table.
+Revisions `0011` through `0018` add agent decisions, standalone-flow queueing,
+federated identity, Business Rule RTP synchronization, and generic automation
+scheduling. Revision `0019_environment_selection` adds non-secret
+Oracle application discovery and persisted selection. Revision
+`0020_execution_identity` records the effective Oracle integration username
+for each durable execution, while retaining the separate initiating user.
 Prototype SQLite data is intentionally not imported. Initial startup then seeds system roles
 and the administrator through the explicit bootstrap workflow. The SQLite
 file may be archived or deleted separately after the PostgreSQL deployment

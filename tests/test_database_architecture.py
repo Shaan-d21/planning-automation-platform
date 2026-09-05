@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 from alembic.config import Config
 from alembic.script import ScriptDirectory
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.schema import CreateTable
 
 from app.agent import repository as agent_repository
 from app.infrastructure.database.engine import database_for
@@ -16,10 +18,13 @@ from app.infrastructure.database.schema import metadata
 from app.services import (
     access_control_service,
     api_token_service,
+    business_rule_rtp_registry,
+    automation_schedule_repository,
     oracle_artifact_registry,
     execution_queue_repository,
     federated_authentication_service,
     federated_provisioning_service,
+    environment_configuration_service,
     identity_directory_service,
     pipeline_process_repository,
     pipeline_registry,
@@ -46,11 +51,17 @@ EXPECTED_TABLES = {
     "identity_role_mappings",
     "identity_sync_runs",
     "api_tokens",
+    "oracle_environment_settings",
     "oracle_artifacts",
+    "business_rule_rtp_sync_runs",
+    "business_rule_rtp_definitions",
+    "business_rule_rtp_parameters",
     "planning_processes",
     "planning_process_versions",
     "process_run_profiles",
     "process_schedules",
+    "automation_schedules",
+    "automation_schedule_runs",
     "planning_cycles",
     "planning_cycle_stages",
     "planning_tasks",
@@ -74,14 +85,24 @@ def test_schema_contains_only_documented_tables() -> None:
     assert set(metadata.tables) == EXPECTED_TABLES
 
 
+def test_schema_compiles_for_postgresql_identifier_limits() -> None:
+    dialect = postgresql.dialect()
+
+    for table in metadata.sorted_tables:
+        CreateTable(table).compile(dialect=dialect)
+
+
 def test_repositories_do_not_mutate_schema_at_runtime() -> None:
     modules = (
         access_control_service,
         api_token_service,
+        business_rule_rtp_registry,
+        automation_schedule_repository,
         oracle_artifact_registry,
         execution_queue_repository,
         federated_authentication_service,
         federated_provisioning_service,
+        environment_configuration_service,
         identity_directory_service,
         workflow_repository,
         pipeline_process_repository,
@@ -103,7 +124,8 @@ def test_alembic_has_one_production_head() -> None:
     scripts = ScriptDirectory.from_config(
         Config(str(project_root / "alembic.ini"))
     )
-    assert scripts.get_heads() == ["0014_oracle_oidc_sign_in"]
+    assert scripts.get_heads() == ["0020_execution_identity"]
+    assert all(len(revision.revision) <= 32 for revision in scripts.walk_revisions())
 
 
 def test_runtime_rejects_sqlite_url() -> None:
