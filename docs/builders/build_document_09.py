@@ -297,15 +297,16 @@ def add_page_break(doc: Document) -> None:
     doc.add_page_break()
 
 
-def add_chapter(doc: Document, number: int, title: str, lead: str) -> None:
+def add_chapter(doc: Document, number: int, title: str, lead: str, *, new_page: bool = True) -> None:
     kicker = doc.add_paragraph(f"CHAPTER {number:02d}", style="Kicker")
-    kicker.paragraph_format.page_break_before = True
+    kicker.paragraph_format.page_break_before = new_page
     doc.add_paragraph(title, style="Heading 1")
     doc.add_paragraph(lead, style="Lead")
 
 
-def add_heading(doc: Document, text: str, level: int = 2) -> None:
-    doc.add_paragraph(text, style=f"Heading {level}")
+def add_heading(doc: Document, text: str, level: int = 2, *, new_page: bool = False) -> None:
+    paragraph = doc.add_paragraph(text, style=f"Heading {level}")
+    paragraph.paragraph_format.page_break_before = new_page
 
 
 def add_note(doc: Document, lead: str, text: str) -> None:
@@ -480,6 +481,7 @@ def build_document() -> Path:
         1,
         "Understand the administration model",
         "Administration connects business ownership to technical controls. No single administrator should treat the web screen, PostgreSQL, or Oracle EPM as an isolated system.",
+        new_page=False,
     )
     add_figure(
         doc,
@@ -582,7 +584,7 @@ def build_document() -> Path:
         "The user, Service Administrator assignment, and BOOTSTRAP_ADMIN_CREATED event are committed atomically.",
         "After the first record exists, the bootstrap endpoint cannot be used again.",
     ])
-    add_heading(doc, "Local account controls")
+    add_heading(doc, "Local account controls", new_page=True)
     add_table(
         doc,
         ["Control", "Current behavior", "Administrator action"],
@@ -651,7 +653,7 @@ def build_document() -> Path:
     add_heading(doc, "Same-origin and CORS design")
     add_para(doc, "FastAPI does not currently install CORSMiddleware. In local development, Vite proxies /api, /app, /auth, /login, /logout, /setup, and /static to FastAPI, so the browser still sees one frontend origin. In production, serve the built React application and API from one HTTPS origin or use a reverse proxy that presents them as one origin.")
     add_note(doc, "If separate origins become necessary.", "Add a deliberate FastAPI CORS allowlist for exact trusted frontend origins, enable credentials only when required, test cookies and CSRF together, and never use a wildcard origin for authenticated browser traffic.")
-    add_heading(doc, "Security headers")
+    add_heading(doc, "Security headers", new_page=True)
     add_table(
         doc,
         ["Header", "Current policy", "Purpose"],
@@ -702,7 +704,7 @@ def build_document() -> Path:
         ],
         [2100, 3500, 3760],
     )
-    add_heading(doc, "Schedule secret rejection")
+    add_heading(doc, "Schedule secret rejection", new_page=True)
     add_para(doc, "The schedule service recursively rejects JSON keys containing password, secret, token, API key, credential, or private key. Schedules store only safe target and runtime configuration; workers obtain credentials from their own deployment environment.")
     add_heading(doc, "Database and log redaction boundary")
     add_bullets(doc, [
@@ -787,6 +789,7 @@ def build_document() -> Path:
         ],
         [3000, 6360],
     )
+    add_note(doc, "Current workflow direction.", "Planning-cycle creation and Oracle-owned Pipelines are the supported workflow focus. Retained process-definition tables remain installed for compatibility; their retired interface is outside this handbook.")
     add_heading(doc, "Execution process and scheduling tables")
     add_table(
         doc,
@@ -795,17 +798,14 @@ def build_document() -> Path:
             ["workflow_runs", "Durable top-level execution identity, workflow name, status, actor snapshot, trigger source, effective Oracle username, and terminal error."],
             ["workflow_steps", "Ordered execution steps with status, timestamps, safe details, and step error."],
             ["execution_queue", "Serializable Oracle work, priority, active state, worker lease, heartbeat, attempts, completion, and recovery-required evidence."],
-            ["automation_schedules", "Current generic allowlisted recurrences for Oracle Pipelines and RTP registry synchronization."],
+            ["automation_schedules; process_schedules (legacy)", "Current allowlisted recurrences plus retained legacy process recurrence history."],
             ["automation_schedule_runs", "Every claimed occurrence, resolved safe payload, execution link, status, and error."],
-            ["planning_processes", "Stable process code used by the retained process-definition subsystem."],
-            ["planning_process_versions", "Versioned process and cycle definitions with draft or active status."],
-            ["process_run_profiles", "Archived-or-active reusable process input profiles such as year, periods, variables, and file references."],
-            ["process_schedules", "Earlier process-specific recurrence records retained for compatibility and history; generic automation_schedules is the current schedule model for allowlisted unattended automation."],
+            ["planning_processes", "Stable code for the retained process-definition subsystem."],
+            ["planning_process_versions", "Versioned process and cycle definitions."],
+            ["process_run_profiles", "Archived-or-active reusable process inputs."],
         ],
         [3000, 6360],
     )
-    add_note(doc, "Current workflow direction.", "Planning-cycle creation and Oracle-owned Pipelines are the supported business workflow focus. The retained process-definition tables remain part of the installed schema, but the retired interface and discontinued custom process-creation experience are not part of this handbook.")
-
     add_chapter(
         doc,
         9,
@@ -1000,7 +1000,7 @@ def build_document() -> Path:
             ["FAILED", "Worker observed a definite failure and persisted a safe error.", "Correct the cause, revalidate inputs and artifact, then authorize a new run."],
             ["RECOVERY_REQUIRED", "The worker lease expired while Oracle outcome may be unknown.", "Reconcile with Oracle Job Console and platform evidence before any retry."],
         ],
-        [1800, 3900, 3660],
+        [2050, 3800, 3510],
     )
     add_heading(doc, "Worker deployment")
     add_code_block(
