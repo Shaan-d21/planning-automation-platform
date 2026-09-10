@@ -615,7 +615,7 @@ export function App() {
           <SchedulingWorkspace key={scheduleRefreshKey} csrfToken={bootstrap.csrf_token} onOpenExecution={openScheduledExecution} />
         </Suspense>
       ) : activeView === "data-review" ? (
-        <DataReviewWorkspace csrfToken={bootstrap.csrf_token} />
+        <DataReviewWorkspace csrfToken={bootstrap.csrf_token} canSaveViews={bootstrap.user?.permissions.includes("report.generate") ?? false} />
       ) : activeView === "reports" ? (
         <ReportGenerationRunner csrfToken={bootstrap.csrf_token} onBack={() => { window.location.hash = "#home"; }} />
       ) : activeView === "assistant" ? (

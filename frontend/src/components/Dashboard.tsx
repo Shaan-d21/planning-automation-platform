@@ -127,7 +127,7 @@ export function Dashboard({
           <EmptyState
             icon={isViewer ? "reports" : "activity"}
             title={isViewer ? "No published report activity yet" : "No recent activity"}
-            description={isViewer ? "Open Reports to review the business outputs available to you." : "Completed and running automations will appear here automatically."}
+            description={isViewer ? "Open Data Explorer to review the approved business outputs available to you." : "Completed and running automations will appear here automatically."}
             compact
           />
         )}
@@ -216,14 +216,14 @@ function ViewerWorkspace({ cycle, navigation }: { cycle: PlanningCycle | null; n
     <div className="viewer-grid">
       <section className="panel viewer-cycle">
         <PanelHeading eyebrow="Planning outlook" title="Current approved business context" description="Operational controls are intentionally hidden from this read-only experience." />
-        {cycle ? <CycleCard cycle={cycle} /> : <EmptyState icon="calendar" title="No active Planning cycle" description="Approved reporting remains available from the Reports workspace." />}
+        {cycle ? <CycleCard cycle={cycle} /> : <EmptyState icon="calendar" title="No active Planning cycle" description="Approved reporting remains available from Data Explorer." />}
       </section>
       <section className="panel viewer-report-card">
         <span className="viewer-report-card__icon"><Icon name="reports" /></span>
         <span className="eyebrow">Management reporting</span>
         <h2>Review approved results</h2>
         <p>Open the report library for Forecast, Budget, variance, and management outputs authorized for your account.</p>
-        {reports ? <a className="button button--primary" href="#reports">Open Reports <Icon name="arrow" /></a> : <span className="muted">No report workspace is assigned to this role.</span>}
+        {reports ? <a className="button button--primary" href="#reports">Open Data Explorer <Icon name="arrow" /></a> : <span className="muted">No data workspace is assigned to this role.</span>}
       </section>
     </div>
   );

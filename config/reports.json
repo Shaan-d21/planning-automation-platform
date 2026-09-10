@@ -2,57 +2,6 @@
   "version": 1,
   "reports": [
     {
-      "name": "Product_Revenue_Forecast_Reporting",
-      "title": "Product Revenue Forecast Reporting",
-      "cube": "VisASO",
-      "pov": {
-        "HSP_View": "BaseData",
-        "Scenario": "Actual",
-        "Version": "Working",
-        "Entity": "Vision Operations Inventory",
-        "Year": "FY22"
-      },
-      "columns": [
-        {
-          "dimensions": [
-            "Period",
-            "Product"
-          ],
-          "members": [
-            [
-              "Jan",
-              "Feb",
-              "Mar"
-            ],
-            [
-              "iPhone 15",
-              "Galaxy S24",
-              "MacBook Pro",
-              "Smart TVs"
-            ]
-          ]
-        }
-      ],
-      "rows": [
-        {
-          "dimensions": [
-            "Account"
-          ],
-          "members": [
-            [
-              "4110",
-              "4150",
-              "Total Revenue",
-              "5110",
-              "5300",
-              "Total Cost of Sales and Service",
-              "Gross Profit"
-            ]
-          ]
-        }
-      ]
-    },
-    {
       "name": "Revenue Trends Forecast",
       "title": "Revenue Trends Forecast Report",
       "cube": "Plan1",

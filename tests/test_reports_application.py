@@ -68,6 +68,8 @@ def test_report_workspace_lists_registered_definitions(
     assert catalog[0].name == "Revenue Report"
     assert catalog[0].cube == "Plan1"
     assert catalog[0].default_pov == (("Year", "FY25"),)
+    assert catalog[0].rows == (("Account", ("Revenue",)),)
+    assert catalog[0].columns == (("Period", ("Jan", "Feb")),)
 
 
 def test_registered_report_preflight_uses_catalog_without_oracle(

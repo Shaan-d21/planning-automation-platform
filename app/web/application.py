@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import csv
+import io
 import logging
 import os
 import secrets
@@ -83,6 +85,7 @@ from app.models.access_control import (
     TriggerSource,
     UserAccount,
 )
+from app.models.data_validation import FormGrid
 from app.models.api_token import ApiTokenScope
 from app.models.automation_schedule import (
     AutomationSchedule,
@@ -365,6 +368,7 @@ def create_app(
             resolved_settings,
             control_center=app.state.control_center,
             data_review=app.state.data_review,
+            report_workspace=app.state.report_workspace,
             operation_catalog=app.state.operation_catalog,
             user_variables=app.state.user_variables,
             business_rule_rtps=app.state.business_rule_rtp_registry,
@@ -1748,6 +1752,31 @@ def create_app(
             return _data_review_error("Data Review export failed.", exc)
         return _excel_response(content, f"{grid.cube}-data-review.xlsx")
 
+    @app.post("/api/data-review/grid/export/csv")
+    async def export_data_review_grid_csv(
+        request: Request,
+        payload: DataReviewSliceRequest,
+    ):
+        require_api_session(request)
+        try:
+            grid = await run_in_threadpool(
+                request.app.state.data_review.load_slice,
+                payload.to_domain(),
+            )
+            content = await run_in_threadpool(_data_review_csv, grid.grid)
+        except EPMError as exc:
+            return _data_review_error("Data Review CSV export failed.", exc)
+        return Response(
+            content=content,
+            media_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="{_safe_download_name(grid.cube)}-data.csv"'
+                ),
+                "Cache-Control": "no-store",
+            },
+        )
+
     @app.post("/api/data-review/validate")
     async def validate_data_review(
         request: Request,
@@ -1920,6 +1949,64 @@ def create_app(
         return {
             "status": "success",
             "reports": [asdict(item) for item in reports],
+        }
+
+    @app.get("/api/data-explorer/views")
+    async def data_explorer_views(request: Request):
+        """Expose existing registered layouts as optional saved views."""
+        require_api_session(request)
+        try:
+            views = await run_in_threadpool(
+                request.app.state.report_workspace.catalog
+            )
+        except EPMError as exc:
+            return _data_review_error("Saved views could not be loaded.", exc)
+        return {
+            "status": "success",
+            "views": [
+                asdict(item)
+                for item in views
+                if item.rows and item.columns
+            ],
+        }
+
+    @app.post("/api/data-explorer/views")
+    async def save_data_explorer_view(
+        request: Request,
+        payload: ReportRegistrationRequest,
+    ):
+        """Save the current rectangular cube layout for optional reuse."""
+        require_api_session(request)
+        try:
+            saved = await run_in_threadpool(
+                request.app.state.report_workspace.register,
+                payload.to_domain(),
+            )
+        except EPMError as exc:
+            return _data_review_error("Saved view could not be created.", exc)
+        return JSONResponse(
+            status_code=201,
+            content={
+                "status": "success",
+                "message": f"Saved view '{saved.name}' was created.",
+                "view": asdict(saved),
+            },
+        )
+
+    @app.delete("/api/data-explorer/views/{name}")
+    async def delete_data_explorer_view(request: Request, name: str):
+        """Delete one saved layout without touching Oracle data."""
+        require_api_session(request)
+        try:
+            deleted = await run_in_threadpool(
+                request.app.state.report_workspace.delete,
+                name,
+            )
+        except EPMError as exc:
+            return _data_review_error("Saved view could not be deleted.", exc)
+        return {
+            "status": "success",
+            "message": f"Saved view '{deleted.name}' was deleted.",
         }
 
     @app.post("/api/reports/catalog")
@@ -4576,6 +4663,40 @@ def _excel_response(content: bytes, filename: str) -> Response:
     )
 
 
+def _data_review_csv(grid: FormGrid) -> bytes:
+    """Flatten a multidimensional Planning grid into auditable cell records."""
+    output = io.StringIO(newline="")
+    dimensions = (
+        *(dimension for dimension, _ in grid.pov),
+        *grid.row_dimensions,
+        *grid.column_dimensions,
+    )
+    writer = csv.writer(output, lineterminator="\n")
+    writer.writerow((*dimensions, "Value"))
+    pov_members = tuple(member for _, member in grid.pov)
+    for row in grid.rows:
+        for index, column in enumerate(grid.columns):
+            value = row.data[index] if index < len(row.data) else ""
+            writer.writerow(
+                (
+                    *pov_members,
+                    *row.headers,
+                    *column,
+                    "" if value is None else value,
+                )
+            )
+    # UTF-8 BOM keeps Planning member names readable when opened in Excel.
+    return ("\ufeff" + output.getvalue()).encode("utf-8")
+
+
+def _safe_download_name(value: str) -> str:
+    normalized = "".join(
+        character if character.isalnum() or character in {"-", "_"} else "-"
+        for character in str(value).strip()
+    ).strip("-")
+    return normalized or "planning"
+
+
 def _agent_tool_activity_payload(
     activity: AgentToolActivity,
 ) -> dict[str, object]:
@@ -4591,6 +4712,8 @@ def _agent_tool_activity_payload(
             "list_planning_cubes",
             "list_cube_dimensions",
             "search_dimension_members",
+            "list_data_explorer_views",
+            "review_saved_data_view",
             "review_data_slice",
             "compare_data_slices",
             "plan_multi_step_request",

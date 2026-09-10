@@ -98,7 +98,7 @@ _NAVIGATION = (
     ),
     _NavigationDefinition(
         "data-review",
-        "Data Review",
+        "Data Explorer",
         "#data-review",
         "planning",
         (Permission.DATA_REVIEW,),
@@ -119,9 +119,9 @@ _NAVIGATION = (
     ),
     _NavigationDefinition(
         "reports",
-        "Reports",
+        "Data Explorer",
         "#reports",
-        "analysis",
+        "planning",
         (Permission.REPORT_GENERATE,),
     ),
     _NavigationDefinition(
@@ -1394,6 +1394,10 @@ def _navigation_for(user: UserAccount) -> list[NavigationItem]:
             group=item.group,
         )
         for item in _NAVIGATION
+        if not (
+            item.code == "reports"
+            and user.has_permission(Permission.DATA_REVIEW)
+        )
         if not item.permissions
         or any(user.has_permission(permission) for permission in item.permissions)
     ]

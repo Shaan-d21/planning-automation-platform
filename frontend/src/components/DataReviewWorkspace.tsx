@@ -7,10 +7,11 @@ import type {
   DataReviewDimension,
   DataReviewResult,
   DataReviewSliceInput,
-  DataReviewTaskContextResponse
+  DataReviewTaskContextResponse,
+  ReportCatalogItem
 } from "../api/types";
 import { Icon } from "./Icon";
-import { FeedbackBanner } from "./Feedback";
+import { ConfirmationDialog, FeedbackBanner } from "./Feedback";
 import { MemberSelector } from "./MemberSelector";
 import { DataValidationWorkbench } from "./DataValidationWorkbench";
 
@@ -33,9 +34,10 @@ const AGENT_DATA_REVIEW_CUBE_KEY = "bisp-epm-agent-data-review-cube";
 
 interface DataReviewWorkspaceProps {
   csrfToken: string;
+  canSaveViews?: boolean;
 }
 
-export function DataReviewWorkspace({ csrfToken }: DataReviewWorkspaceProps) {
+export function DataReviewWorkspace({ csrfToken, canSaveViews = false }: DataReviewWorkspaceProps) {
   const planningTaskId = planningTaskIdFromLocation();
   const [cubes, setCubes] = useState<DataReviewCube[]>([]);
   const [cube, setCube] = useState("");
@@ -52,7 +54,7 @@ export function DataReviewWorkspace({ csrfToken }: DataReviewWorkspaceProps) {
   const [loadingCubes, setLoadingCubes] = useState(true);
   const [loadingDimensions, setLoadingDimensions] = useState(false);
   const [loadingGrid, setLoadingGrid] = useState(false);
-  const [exportingGrid, setExportingGrid] = useState(false);
+  const [exportingGrid, setExportingGrid] = useState<"excel" | "csv" | null>(null);
   const [layoutOpen, setLayoutOpen] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [cubeDiscoveryError, setCubeDiscoveryError] = useState<string | null>(null);
@@ -62,6 +64,16 @@ export function DataReviewWorkspace({ csrfToken }: DataReviewWorkspaceProps) {
   const [restoredLayout, setRestoredLayout] = useState(false);
   const [taskContext, setTaskContext] = useState<DataReviewTaskContextResponse | null>(null);
   const [loadingTask, setLoadingTask] = useState(Boolean(planningTaskId));
+  const [savedViews, setSavedViews] = useState<ReportCatalogItem[]>([]);
+  const [selectedView, setSelectedView] = useState("");
+  const [loadingViews, setLoadingViews] = useState(true);
+  const [viewEditorOpen, setViewEditorOpen] = useState(false);
+  const [viewName, setViewName] = useState("");
+  const [viewTitle, setViewTitle] = useState("");
+  const [savingView, setSavingView] = useState(false);
+  const [deletingView, setDeletingView] = useState<ReportCatalogItem | null>(null);
+  const [deletingViewBusy, setDeletingViewBusy] = useState(false);
+  const [viewFeedback, setViewFeedback] = useState<{ tone: "success" | "error"; message: string } | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -82,6 +94,15 @@ export function DataReviewWorkspace({ csrfToken }: DataReviewWorkspaceProps) {
         setCubeDiscoveryError(errorMessage(reason));
       })
       .finally(() => active && setLoadingCubes(false));
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    api.dataExplorerViews()
+      .then((response) => active && setSavedViews(response.views))
+      .catch((reason: unknown) => active && setViewFeedback({ tone: "error", message: errorMessage(reason) }))
+      .finally(() => active && setLoadingViews(false));
     return () => { active = false; };
   }, []);
 
@@ -265,23 +286,124 @@ export function DataReviewWorkspace({ csrfToken }: DataReviewWorkspaceProps) {
     }
   }
 
-  async function exportGrid() {
+  async function exportGrid(format: "excel" | "csv") {
     setError(null);
     try {
       const payload = reviewedSlice ?? buildPayload(cube, pov, rows, columns);
-      setExportingGrid(true);
-      const blob = await api.exportDataReviewGrid(payload, csrfToken);
-      downloadBlob(blob, `${safeFilename(payload.cube)}-data-review.xlsx`);
+      setExportingGrid(format);
+      const blob = format === "csv"
+        ? await api.exportDataReviewGridCsv(payload, csrfToken)
+        : await api.exportDataReviewGrid(payload, csrfToken);
+      downloadBlob(blob, `${safeFilename(payload.cube)}-data.${format === "csv" ? "csv" : "xlsx"}`);
     } catch (reason) {
       setError(errorMessage(reason));
     } finally {
-      setExportingGrid(false);
+      setExportingGrid(null);
+    }
+  }
+
+  async function openSavedView(name: string) {
+    if (!name) {
+      startFreshView();
+      return;
+    }
+    setSelectedView(name);
+    const saved = savedViews.find((item) => item.name === name);
+    if (!saved) return;
+    try {
+      const selection = savedViewSlice(saved);
+      setLoadingGrid(true);
+      await chooseCube(selection.cube, selection);
+      const response = await api.dataReviewGrid(selection, csrfToken);
+      setReview(response.review);
+      setReviewedSlice(selection);
+      saveLayout(selection);
+      setSelectedCell(null);
+      setPage(1);
+      setQuery("");
+      setLayoutOpen(false);
+      setViewFeedback({ tone: "success", message: `Loaded '${saved.title}' with current Oracle values.` });
+    } catch (reason) {
+      setViewFeedback({ tone: "error", message: errorMessage(reason) });
+    } finally {
+      setLoadingGrid(false);
+    }
+  }
+
+  function startFreshView() {
+    setSelectedView("");
+    setCube("");
+    setDimensions([]);
+    setPov([]);
+    setRows([]);
+    setColumns([]);
+    setReview(null);
+    setReviewedSlice(null);
+    setSelectedCell(null);
+    setQuery("");
+    setPage(1);
+    setError(null);
+    setDimensionDiscoveryError(null);
+    setManualCube("");
+    setManualMetadata(false);
+    setRestoredLayout(false);
+    setViewFeedback(null);
+    setLayoutOpen(true);
+  }
+
+  function beginSaveView() {
+    if (!reviewedSlice) return;
+    setViewName("");
+    setViewTitle(`${reviewedSlice.cube} data view`);
+    setViewFeedback(null);
+    setViewEditorOpen(true);
+  }
+
+  async function saveCurrentView(event: FormEvent) {
+    event.preventDefault();
+    if (!reviewedSlice || !viewName.trim() || !viewTitle.trim()) return;
+    setSavingView(true);
+    setViewFeedback(null);
+    try {
+      const response = await api.saveDataExplorerView({
+        name: viewName.trim(),
+        title: viewTitle.trim(),
+        cube: reviewedSlice.cube,
+        pov: reviewedSlice.pov,
+        rows: reviewedSlice.rows,
+        columns: reviewedSlice.columns
+      }, csrfToken);
+      setSavedViews((current) => [...current.filter((item) => item.name.toLowerCase() !== response.view.name.toLowerCase()), response.view].sort((left, right) => left.title.localeCompare(right.title)));
+      setSelectedView(response.view.name);
+      setViewEditorOpen(false);
+      setViewFeedback({ tone: "success", message: response.message });
+    } catch (reason) {
+      setViewFeedback({ tone: "error", message: errorMessage(reason) });
+    } finally {
+      setSavingView(false);
+    }
+  }
+
+  async function confirmDeleteView() {
+    if (!deletingView) return;
+    setDeletingViewBusy(true);
+    try {
+      const response = await api.deleteDataExplorerView(deletingView.name, csrfToken);
+      setSavedViews((current) => current.filter((item) => item.name !== deletingView.name));
+      if (selectedView === deletingView.name) setSelectedView("");
+      setViewFeedback({ tone: "success", message: response.message });
+      setDeletingView(null);
+    } catch (reason) {
+      setViewFeedback({ tone: "error", message: errorMessage(reason) });
+      setDeletingView(null);
+    } finally {
+      setDeletingViewBusy(false);
     }
   }
 
   return <section className="data-review-workspace">
     <header className="page-intro data-review-intro">
-      <div><span className="eyebrow">{taskContext ? "Assigned Planning validation" : "Read-only Planning analysis"}</span><h1>{taskContext?.task.title ?? "Data Review"}</h1><p>{taskContext?.task.description || "Build an ad-hoc Planning grid by choosing a cube, POV, rows, and columns—similar to Smart View, without changing Oracle data."}</p></div>
+      <div><span className="eyebrow">{taskContext ? "Assigned Planning validation" : "Read-only Planning analysis"}</span><h1>{taskContext?.task.title ?? "Data Explorer"}</h1><p>{taskContext?.task.description || "Select, inspect, validate, compare, and export live Planning data from one workspace. Saving the layout is optional."}</p></div>
       <div className="data-review-intro__actions"><span className="read-only-badge"><Icon name="check" /> Read-only</span></div>
     </header>
 
@@ -289,6 +411,16 @@ export function DataReviewWorkspace({ csrfToken }: DataReviewWorkspaceProps) {
     {taskContext && <div className="task-validation-context task-validation-context--ready"><Icon name="tasks" /><div><strong>{taskContext.task.cycle_name} · {taskContext.task.stage_name}</strong><small>{taskContext.suggested_slice ? "The assigned data intersection has been restored. Run the validation below to complete this responsibility." : "No fixed layout was configured. Your first validated layout becomes the reusable context for this responsibility."}</small></div></div>}
 
     {error && <FeedbackBanner tone="error" title="Review the layout" message={error} />}
+    {viewFeedback && <FeedbackBanner tone={viewFeedback.tone} title={viewFeedback.tone === "success" ? "Saved views updated" : "Saved views need attention"} message={viewFeedback.message} onDismiss={() => setViewFeedback(null)} />}
+
+    <section className="panel data-explorer-library">
+      <div><span className="eyebrow">Optional shortcuts</span><h2>Start fresh or reuse a saved view</h2><p>Saved views contain only the cube and dimensional layout. Values are always retrieved live from Oracle.</p></div>
+      <div className="data-explorer-library__actions">
+        <label className="runner-field"><span>Saved view</span><select aria-label="Saved data view" value={selectedView} disabled={loadingViews || !savedViews.length} onChange={(event) => void openSavedView(event.target.value)}><option value="">{loadingViews ? "Loading saved views..." : savedViews.length ? "Choose a saved view" : "No saved views yet"}</option>{savedViews.map((item) => <option value={item.name} key={item.name}>{item.title} · {item.cube}</option>)}</select></label>
+        <button type="button" className="button button--secondary" disabled={loadingGrid} onClick={startFreshView}><Icon name="data" /> Start new view</button>
+        {selectedView && canSaveViews && <button type="button" className="button button--quiet is-danger" onClick={() => setDeletingView(savedViews.find((item) => item.name === selectedView) ?? null)}><Icon name="close" /> Delete view</button>}
+      </div>
+    </section>
 
     <form className={`panel slice-designer${layoutOpen ? " is-open" : ""}`} onSubmit={(event) => void loadGrid(event)}>
       <header className="slice-designer__header">
@@ -299,8 +431,10 @@ export function DataReviewWorkspace({ csrfToken }: DataReviewWorkspaceProps) {
       {layoutOpen && <div className="slice-designer__body">
         <section className="cube-picker">
           <label className="runner-field"><span>Live cube / plan type *</span><select aria-label="Cube or plan type" value={cube} disabled={loadingCubes || cubes.length === 0} onChange={(event) => void chooseCube(event.target.value)}><option value="">{loadingCubes ? "Loading cubes from Oracle..." : cubes.length ? "Select a cube" : "No live cubes available"}</option>{cubes.map((item) => <option value={item.name} key={item.name}>{cubeLabel(item)}</option>)}</select><small>{cubes.length ? `${cubes.length} current cube${cubes.length === 1 ? "" : "s"} fetched from Oracle.` : "The list is never populated from registered reports."}</small></label>
-          <button type="button" className="button button--secondary" disabled={loadingCubes} onClick={() => void refreshCubes()}>{loadingCubes ? <><span className="spinner" /> Refreshing...</> : <>Refresh from Oracle <Icon name="refresh" /></>}</button>
-          {dimensions.length > 0 && <button type="button" className="button button--quiet" onClick={() => applySmartLayout()}><Icon name="sparkle" /> Smart layout</button>}
+          <div className="cube-picker__actions">
+            <button type="button" className="button button--secondary" disabled={loadingCubes} onClick={() => void refreshCubes()}>{loadingCubes ? <><span className="spinner" /> Refreshing...</> : <><Icon name="refresh" /> Refresh from Oracle</>}</button>
+            {dimensions.length > 0 && <button type="button" className="button button--quiet" onClick={() => applySmartLayout()}><Icon name="sparkle" /> Smart layout</button>}
+          </div>
         </section>
 
         {cubeDiscoveryError && <section className="metadata-compatibility"><div><Icon name="alert" /><span><strong>Live cube discovery is unavailable</strong><small>{cubeDiscoveryError}</small></span></div><details><summary>Advanced compatibility fallback</summary><p>Use this only for an older on-premise environment that does not expose live plan-type discovery.</p><label className="runner-field"><span>Exact cube name</span><input value={manualCube} onChange={(event) => setManualCube(event.target.value)} placeholder="Plan1" /></label><button type="button" className="button button--quiet" disabled={!manualCube.trim()} onClick={() => void chooseCube(manualCube)}>Try exact cube</button></details></section>}
@@ -324,8 +458,10 @@ export function DataReviewWorkspace({ csrfToken }: DataReviewWorkspaceProps) {
       {layoutOpen && <footer className="runner-actions"><span className="slice-safety"><Icon name={layoutReady ? "check" : "alert"} /> {layoutReady ? "Layout ready · maximum 250,000 requested cells" : "Choose one or more members for every dimension"}</span><button className="button button--primary" disabled={!layoutReady || loadingGrid}>{loadingGrid ? <><span className="spinner" /> Loading Oracle data...</> : <>Load live data <Icon name="arrow" /></>}</button></footer>}
     </form>
 
-    {review && <SpreadsheetReview review={review} selectedCell={selectedCell} query={query} page={page} pageSize={pageSize} exporting={exportingGrid} onSelectedCell={setSelectedCell} onQuery={(value) => { setQuery(value); setPage(1); }} onPage={setPage} onPageSize={(value) => { setPageSize(value); setPage(1); }} onRefresh={() => void loadGrid()} onExport={() => void exportGrid()} />}
+    {review && <SpreadsheetReview review={review} selectedCell={selectedCell} query={query} page={page} pageSize={pageSize} exporting={exportingGrid} canSave={canSaveViews} onSelectedCell={setSelectedCell} onQuery={(value) => { setQuery(value); setPage(1); }} onPage={setPage} onPageSize={(value) => { setPageSize(value); setPage(1); }} onRefresh={() => void loadGrid()} onExport={(format) => void exportGrid(format)} onSave={beginSaveView} />}
     {reviewedSlice && <DataValidationWorkbench slice={reviewedSlice} cubes={cubes} csrfToken={csrfToken} planningTaskId={planningTaskId} configuration={taskContext?.configuration ?? null} initialEvidence={taskContext?.task.latest_validation ?? null} />}
+    {viewEditorOpen && reviewedSlice && <div className="modal-backdrop" role="presentation"><section className="access-dialog data-view-modal" role="dialog" aria-modal="true" aria-labelledby="save-view-title"><header><div><span className="eyebrow">Reusable shortcut</span><h2 id="save-view-title">Save this data view</h2><p>Save the cube, POV, rows, and columns. No Oracle data values are stored.</p></div><button type="button" className="icon-button" aria-label="Close save view" onClick={() => setViewEditorOpen(false)}><Icon name="close" /></button></header><form onSubmit={(event) => void saveCurrentView(event)}><div className="data-view-modal__summary"><span><small>Cube</small><strong>{reviewedSlice.cube}</strong></span><span><small>POV</small><strong>{Object.keys(reviewedSlice.pov).length}</strong></span><span><small>Rows</small><strong>{reviewedSlice.rows.length}</strong></span><span><small>Columns</small><strong>{reviewedSlice.columns.length}</strong></span></div><label className="runner-field"><span>Saved view name *</span><input aria-label="Saved view name" value={viewName} maxLength={250} onChange={(event) => setViewName(event.target.value)} placeholder="monthly-revenue-review" /></label><label className="runner-field"><span>Display title *</span><input aria-label="Saved view title" value={viewTitle} maxLength={250} onChange={(event) => setViewTitle(event.target.value)} /></label><footer><button type="button" className="button button--secondary" disabled={savingView} onClick={() => setViewEditorOpen(false)}>Cancel</button><button type="submit" className="button button--primary" disabled={savingView || !viewName.trim() || !viewTitle.trim()}>{savingView ? <><span className="spinner" /> Saving...</> : <>Save view <Icon name="check" /></>}</button></footer></form></section></div>}
+    {deletingView && <ConfirmationDialog title="Delete saved view?" description={`Delete '${deletingView.title}'? This removes only the reusable layout; Oracle data is not changed.`} confirmLabel="Delete view" busy={deletingViewBusy} tone="danger" onConfirm={() => void confirmDeleteView()} onClose={() => setDeletingView(null)} />}
   </section>;
 }
 
@@ -351,14 +487,14 @@ function AxisCard({ cube, axis, item, dimensions, assigned, onUpdate, onRemove }
   </article>;
 }
 
-function SpreadsheetReview({ review, selectedCell, query, page, pageSize, exporting, onSelectedCell, onQuery, onPage, onPageSize, onRefresh, onExport }: { review: DataReviewResult; selectedCell: SelectedCell | null; query: string; page: number; pageSize: number; exporting: boolean; onSelectedCell: (cell: SelectedCell) => void; onQuery: (value: string) => void; onPage: (page: number) => void; onPageSize: (size: number) => void; onRefresh: () => void; onExport: () => void }) {
+function SpreadsheetReview({ review, selectedCell, query, page, pageSize, exporting, canSave, onSelectedCell, onQuery, onPage, onPageSize, onRefresh, onExport, onSave }: { review: DataReviewResult; selectedCell: SelectedCell | null; query: string; page: number; pageSize: number; exporting: "excel" | "csv" | null; canSave: boolean; onSelectedCell: (cell: SelectedCell) => void; onQuery: (value: string) => void; onPage: (page: number) => void; onPageSize: (size: number) => void; onRefresh: () => void; onExport: (format: "excel" | "csv") => void; onSave: () => void }) {
   const filtered = review.grid.rows.filter((row) => !query.trim() || row.headers.join(" ").toLowerCase().includes(query.trim().toLowerCase()));
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
   const safePage = Math.min(page, totalPages);
   const start = (safePage - 1) * pageSize;
   const visible = filtered.slice(start, start + pageSize);
   return <section className="panel spreadsheet-panel">
-    <header className="spreadsheet-header"><div><span className="eyebrow">Live Oracle data</span><h2>{review.cube} planning grid</h2><p>{review.row_count.toLocaleString()} rows and {review.column_count.toLocaleString()} columns returned from the selected intersection.</p></div><div><span className="read-only-badge"><Icon name="check" /> Read-only</span><button type="button" className="button button--quiet" disabled={exporting} onClick={onExport}>{exporting ? <><span className="spinner" /> Creating Excel...</> : <><Icon name="reports" /> Export Excel</>}</button><button type="button" className="button button--quiet" onClick={onRefresh}><Icon name="refresh" /> Refresh</button></div></header>
+    <header className="spreadsheet-header"><div><span className="eyebrow">Live Oracle data</span><h2>{review.cube} planning grid</h2><p>{review.row_count.toLocaleString()} rows and {review.column_count.toLocaleString()} columns returned from the selected intersection.</p></div><div><span className="read-only-badge"><Icon name="check" /> Read-only</span>{canSave && <button type="button" className="button button--quiet" onClick={onSave}><Icon name="check" /> Save view</button>}<button type="button" className="button button--quiet" disabled={Boolean(exporting)} onClick={() => onExport("excel")}>{exporting === "excel" ? <><span className="spinner" /> Creating...</> : <><Icon name="reports" /> Excel</>}</button><button type="button" className="button button--quiet" disabled={Boolean(exporting)} onClick={() => onExport("csv")}>{exporting === "csv" ? <><span className="spinner" /> Creating...</> : <><Icon name="data" /> CSV</>}</button><button type="button" className="button button--quiet" onClick={onRefresh}><Icon name="refresh" /> Refresh</button></div></header>
     <div className="sheet-pov">{review.grid.pov.length ? review.grid.pov.map(([dimension, member]) => <span key={dimension}><small>{dimension}</small><strong>{member}</strong></span>) : <span><small>Point of view</small><strong>No fixed POV returned</strong></span>}</div>
     <div className="sheet-metrics"><span><small>Rows</small><strong>{review.row_count.toLocaleString()}</strong></span><span><small>Columns</small><strong>{review.column_count.toLocaleString()}</strong></span><span><small>Data cells</small><strong>{review.cell_count.toLocaleString()}</strong></span><span className={review.missing_cell_count ? "has-warning" : ""}><small>Missing</small><strong>{review.missing_cell_count.toLocaleString()}</strong></span></div>
     <div className="sheet-toolbar"><label className="search-field"><Icon name="search" /><span className="sr-only">Search row members</span><input value={query} onChange={(event) => onQuery(event.target.value)} placeholder="Search row members" /></label><label><span>Rows per page</span><select value={pageSize} onChange={(event) => onPageSize(Number(event.target.value))}><option value="25">25</option><option value="50">50</option><option value="100">100</option></select></label></div>
@@ -389,6 +525,18 @@ function buildPayload(cube: string, pov: AxisEntry[], rows: AxisEntry[], columns
     pov: Object.fromEntries(pov.map((item) => [item.dimension.trim(), item.members[0].trim()])),
     rows: axisPayload(rows),
     columns: axisPayload(columns)
+  };
+}
+
+function savedViewSlice(view: ReportCatalogItem): DataReviewSliceInput {
+  if (!view.rows?.length || !view.columns?.length) {
+    throw new Error(`Saved view '${view.title}' does not contain a reusable rectangular layout.`);
+  }
+  return {
+    cube: view.cube,
+    pov: Object.fromEntries(view.default_pov),
+    rows: view.rows.map(([dimension, members]) => ({ dimension, members })),
+    columns: view.columns.map(([dimension, members]) => ({ dimension, members }))
   };
 }
 

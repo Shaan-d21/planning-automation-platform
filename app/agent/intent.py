@@ -55,6 +55,8 @@ class AgentIntentRouter:
         "cube",
         "slice",
         "data review",
+        "data explorer",
+        "saved view",
         "show data",
         "planning data",
         "data for",
@@ -174,6 +176,8 @@ class AgentIntentRouter:
                     "list_planning_cubes",
                     "list_cube_dimensions",
                     "search_dimension_members",
+                    "list_data_explorer_views",
+                    "review_saved_data_view",
                     "review_data_slice",
                     "compare_data_slices",
                 }

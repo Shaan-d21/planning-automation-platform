@@ -123,3 +123,16 @@ def test_catalog_registration_does_not_replace_existing_report(
         ReportCatalogService().register(catalog, definition)
 
     assert len(ReportCatalogService().load(catalog)) == 1
+
+
+def test_catalog_deletes_only_the_selected_saved_view(tmp_path: Path) -> None:
+    catalog = tmp_path / "reports.json"
+    _write_catalog(catalog)
+
+    deleted = ReportCatalogService().delete(catalog, "revenue report")
+
+    assert deleted.name == "Revenue Report"
+    assert ReportCatalogService().load(catalog) == ()
+
+    with pytest.raises(ConfigurationError, match="was not found"):
+        ReportCatalogService().delete(catalog, "Revenue Report")

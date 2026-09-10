@@ -282,12 +282,12 @@ OPERATION_DEFINITIONS = (
     OperationDefinition(
         kind=OperationKind.REPORT_GENERATION,
         code="report-generation",
-        display_name="Report Generation",
+        display_name="Data Explorer Export",
         description=(
-            "Export a registered report or Planning form POV and create a "
+            "Export an approved saved Data Explorer view and create a "
             "downloadable Excel workbook."
         ),
-        category="Reporting",
+        category="Analysis",
         risk_level="Read only",
         route="/app/reports",
     ),

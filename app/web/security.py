@@ -220,6 +220,10 @@ def required_permissions(
         return (Permission.REPORT_GENERATE,)
     if path == "/app/data-review" or path.startswith("/api/data-review"):
         return (Permission.DATA_REVIEW,)
+    if path.startswith("/api/data-explorer"):
+        if mutation:
+            return (Permission.REPORT_GENERATE,)
+        return (Permission.DATA_REVIEW, Permission.REPORT_GENERATE)
     if "substitution-variables" in path:
         return (Permission.VARIABLE_UPDATE,)
     if "user-variables" in path:

@@ -33,7 +33,7 @@ export function AppShell({
   );
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell${activeView === "assistant" ? " app-shell--assistant" : ""}`}>
       <button
         className="mobile-menu"
         aria-label="Open navigation"
@@ -73,7 +73,7 @@ export function AppShell({
         </div>
       </aside>
 
-      <div className="workspace">
+      <div className={`workspace${activeView === "assistant" ? " workspace--assistant" : ""}`}>
         <header className="topbar">
           <div className="topbar-context">
             <span>Oracle EPM</span><Icon name="chevron" /><strong>{viewLabel(activeView)}</strong>
@@ -140,6 +140,6 @@ function navigationHref(code: string, fallback: string) {
 }
 
 function viewLabel(view: AppShellProps["activeView"]) {
-  const labels = { home: "Home", tasks: "My Work", cycles: "Planning Cycles", approvals: "Approvals", notifications: "Notifications", access: "Access Control", jobs: "Jobs & Activity", operations: "Operations", schedules: "Schedules", "data-review": "Data Review", reports: "Reports", assistant: "EPM Assistant" };
+  const labels = { home: "Home", tasks: "My Work", cycles: "Planning Cycles", approvals: "Approvals", notifications: "Notifications", access: "Access Control", jobs: "Jobs & Activity", operations: "Operations", schedules: "Schedules", "data-review": "Data Explorer", reports: "Data Explorer", assistant: "EPM Assistant" };
   return labels[view];
 }

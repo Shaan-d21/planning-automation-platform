@@ -57,3 +57,19 @@ def test_standalone_administration_operations_remain_restricted() -> None:
     assert required_permissions(
         "POST", "/api/operations/user-variables/runs"
     ) == (Permission.USER_VARIABLE_UPDATE,)
+
+
+def test_data_explorer_separates_read_access_from_shared_view_changes() -> None:
+    assert set(required_permissions("GET", "/api/data-explorer/views")) == {
+        Permission.DATA_REVIEW,
+        Permission.REPORT_GENERATE,
+    }
+    assert required_permissions("POST", "/api/data-explorer/views") == (
+        Permission.REPORT_GENERATE,
+    )
+    assert required_permissions(
+        "DELETE", "/api/data-explorer/views/monthly-forecast"
+    ) == (Permission.REPORT_GENERATE,)
+    assert required_permissions("POST", "/api/data-review/grid") == (
+        Permission.DATA_REVIEW,
+    )

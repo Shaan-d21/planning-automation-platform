@@ -26,6 +26,7 @@ from app.application.data_review import (
     DataReviewSliceSelection,
     DataReviewWorkspaceService,
 )
+from app.application.reports import ReportCatalogItem, ReportWorkspaceService
 from app.application.execution_evidence import agent_execution_evidence
 from app.application.operations import OPERATION_DEFINITIONS, OperationCatalogService
 from app.application.substitution_variables import (
@@ -77,6 +78,7 @@ class AgentCapabilityGateway:
         *,
         control_center: ControlCenterService,
         data_review: DataReviewWorkspaceService,
+        report_workspace: ReportWorkspaceService | None = None,
         operation_catalog: OperationCatalogService | None = None,
         substitution_variables: SubstitutionVariableApplicationService | None = None,
         user_variables: UserVariableApplicationService | None = None,
@@ -87,6 +89,7 @@ class AgentCapabilityGateway:
         self._settings = settings
         self._control_center = control_center
         self._data_review = data_review
+        self._report_workspace = report_workspace or ReportWorkspaceService(settings)
         self._operation_catalog = operation_catalog
         self._substitution_variables = substitution_variables or (
             SubstitutionVariableApplicationService(settings)
@@ -109,6 +112,8 @@ class AgentCapabilityGateway:
             "list_planning_cubes": self._planning_cubes,
             "list_cube_dimensions": self._cube_dimensions,
             "search_dimension_members": self._dimension_members,
+            "list_data_explorer_views": self._data_explorer_views,
+            "review_saved_data_view": self._review_saved_data_view,
             "review_data_slice": self._review_data_slice,
             "compare_data_slices": self._compare_data_slices,
             "list_operation_artifacts": self._operation_artifacts,
@@ -121,7 +126,7 @@ class AgentCapabilityGateway:
         }
 
     _REQUIRED_INPUTS = {
-        "report-generation": ("Registered report", "Point of view"),
+        "report-generation": ("Saved Data Explorer view", "Point of view"),
         "cube-refresh": ("Saved Cube Refresh job",),
         "substitution-variables": ("Variable scope", "Variable name", "New value"),
         "user-variables": ("Oracle user", "User variable", "New member"),
@@ -290,6 +295,29 @@ class AgentCapabilityGateway:
                         },
                     },
                     "required": ["cube", "dimension"],
+                    "additionalProperties": False,
+                },
+            ),
+            AgentToolDefinition(
+                name="list_data_explorer_views",
+                description=(
+                    "List reusable Data Explorer views saved in this platform. "
+                    "A saved view contains an exact cube, POV, row, and column "
+                    "layout, but no stored Oracle data values."
+                ),
+                parameters_schema=empty,
+            ),
+            AgentToolDefinition(
+                name="review_saved_data_view",
+                description=(
+                    "Load current read-only Oracle data using one exact saved "
+                    "Data Explorer view. Use the saved view name returned by "
+                    "list_data_explorer_views; never reconstruct its layout."
+                ),
+                parameters_schema={
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}},
+                    "required": ["name"],
                     "additionalProperties": False,
                 },
             ),
@@ -487,6 +515,7 @@ class AgentCapabilityGateway:
                 "query",
                 "limit",
             },
+            "review_saved_data_view": {"name"},
             "review_data_slice": {"cube", "pov", "rows", "columns"},
             "compare_data_slices": {
                 "source",
@@ -922,6 +951,91 @@ class AgentCapabilityGateway:
             limit=limit,
         )
         return asdict(result)
+
+    def _data_explorer_views(self, _arguments: dict[str, Any]) -> dict[str, Any]:
+        """List only saved layouts that the unified Data Explorer can reopen."""
+        views = self._compatible_data_explorer_views()
+        maximum_views = 50
+        returned = views[:maximum_views]
+        return {
+            "count": len(returned),
+            "total_count": len(views),
+            "truncated": len(returned) < len(views),
+            "views": [
+                {
+                    "name": item.name,
+                    "title": item.title,
+                    "cube": item.cube,
+                    "pov": [
+                        {"dimension": dimension, "member": member}
+                        for dimension, member in item.default_pov
+                    ],
+                    "row_dimensions": [
+                        dimension for dimension, _members in item.rows
+                    ],
+                    "column_dimensions": [
+                        dimension for dimension, _members in item.columns
+                    ],
+                }
+                for item in returned
+            ],
+        }
+
+    def _review_saved_data_view(
+        self,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Resolve a saved layout server-side, then retrieve its live values."""
+        name = self._required_text(arguments, "name", "Saved Data Explorer view")
+        view, selection = self._saved_data_view_selection(name)
+        review = self._data_review.load_slice(selection)
+        return {
+            **self._agent_grid(review, selection),
+            "saved_view": {"name": view.name, "title": view.title},
+        }
+
+    def saved_data_view_selection_payload(self, name: str) -> dict[str, Any]:
+        """Return a saved view's validated slice for safe conversation resume."""
+        _view, selection = self._saved_data_view_selection(name)
+        return self._selection_payload(selection)
+
+    def _saved_data_view_selection(
+        self,
+        name: str,
+    ) -> tuple[ReportCatalogItem, DataReviewSliceSelection]:
+        normalized = str(name or "").strip()
+        view = next(
+            (
+                item
+                for item in self._compatible_data_explorer_views()
+                if item.name.casefold() == normalized.casefold()
+            ),
+            None,
+        )
+        if view is None:
+            raise AgentCapabilityError(
+                f"Saved Data Explorer view '{normalized}' was not found. "
+                "List the current saved views and choose its exact name."
+            )
+        return view, DataReviewSliceSelection(
+            cube=view.cube,
+            pov=dict(view.default_pov),
+            rows=tuple(
+                DataReviewAxisSelection(dimension, members)
+                for dimension, members in view.rows
+            ),
+            columns=tuple(
+                DataReviewAxisSelection(dimension, members)
+                for dimension, members in view.columns
+            ),
+        )
+
+    def _compatible_data_explorer_views(self) -> tuple[ReportCatalogItem, ...]:
+        return tuple(
+            item
+            for item in self._report_workspace.catalog()
+            if item.rows and item.columns
+        )
 
     def _review_data_slice(self, arguments: dict[str, Any]) -> dict[str, Any]:
         selection = self._data_review_selection(arguments)

@@ -52,6 +52,8 @@ GRAPH_TOOL_NAMES = frozenset(
         "list_planning_cubes",
         "list_cube_dimensions",
         "search_dimension_members",
+        "list_data_explorer_views",
+        "review_saved_data_view",
         "review_data_slice",
         "compare_data_slices",
         "list_operation_artifacts",
@@ -449,6 +451,8 @@ class AgentGraphOrchestrator:
             }
         deterministic_call = (
             self._deterministic_execution_evidence_call(state)
+            or self._deterministic_saved_data_view_call(state)
+            or self._deterministic_data_explorer_views_call(state)
             or self._deterministic_data_review_slice_call(state)
             or self._deterministic_data_review_cube_call(state)
             or self._deterministic_schedule_call(state)
@@ -464,6 +468,8 @@ class AgentGraphOrchestrator:
         if deterministic_call is not None:
             deterministic_operation = {
                 "get_execution_evidence": "execution-evidence",
+                "list_data_explorer_views": "data-explorer-views",
+                "review_saved_data_view": "saved-data-view",
                 "list_cube_dimensions": "data-review-dimensions",
                 "review_data_slice": "data-review-slice",
                 "plan_multi_step_request": "multi-step-plan",
@@ -643,9 +649,9 @@ class AgentGraphOrchestrator:
         )[:6_000]
         return (
             f"{self._system_instruction}\n\n"
-            "Current tool-validated Data Review context:\n"
+            "Current tool-validated Data Explorer context:\n"
             f"{serialized}\n"
-            "For a follow-up Data Review request, preserve every prior cube, "
+            "For a follow-up Data Explorer request, preserve every prior cube, "
             "POV, row, column, and member selection except fields the user "
             "explicitly changes. Use review_data_slice or compare_data_slices "
             "with the complete updated selection. If a requested change is "
@@ -715,6 +721,69 @@ class AgentGraphOrchestrator:
         )
 
     @classmethod
+    def _deterministic_saved_data_view_call(
+        cls,
+        state: AgentGraphState,
+    ) -> AgentToolCall | None:
+        """Load an exact saved-view choice emitted by the trusted UI card."""
+        allowed = {
+            str(item).strip()
+            for item in state.get("allowed_tool_names", [])
+        }
+        if "review_saved_data_view" not in allowed:
+            return None
+        user_messages = [
+            str(item.get("content") or "").strip()
+            for item in state.get("messages", [])
+            if item.get("role") == AgentMessageRole.USER.value
+        ]
+        if not user_messages:
+            return None
+        latest = user_messages[-1]
+        prefix = "use saved data explorer view "
+        suffix = " and load its current oracle data."
+        lowered = latest.casefold()
+        if not lowered.startswith(prefix) or not lowered.endswith(suffix):
+            return None
+        name = latest[len(prefix) : len(latest) - len(suffix)].strip()
+        if not name:
+            return None
+        return AgentToolCall(
+            name="review_saved_data_view",
+            arguments={"name": name},
+            call_id="deterministic-saved-data-view",
+        )
+
+    @staticmethod
+    def _deterministic_data_explorer_views_call(
+        state: AgentGraphState,
+    ) -> AgentToolCall | None:
+        """List saved Data Explorer layouts for an explicit saved-view request."""
+        allowed = {
+            str(item).strip()
+            for item in state.get("allowed_tool_names", [])
+        }
+        if "list_data_explorer_views" not in allowed:
+            return None
+        user_messages = [
+            str(item.get("content") or "").strip()
+            for item in state.get("messages", [])
+            if item.get("role") == AgentMessageRole.USER.value
+        ]
+        if not user_messages:
+            return None
+        latest = " ".join(user_messages[-1].casefold().split())
+        if "saved" not in latest or "view" not in latest:
+            return None
+        if not any(word in latest for word in ("show", "list", "choose", "open", "review")):
+            return None
+        return AgentToolCall(
+            name="list_data_explorer_views",
+            arguments={},
+            call_id="deterministic-data-explorer-views",
+        )
+
+    @classmethod
     def _deterministic_data_review_cube_call(
         cls,
         state: AgentGraphState,
@@ -743,7 +812,7 @@ class AgentGraphOrchestrator:
         match = re.search(
             r"\buse\s+cube\s+[`'\"]?"
             r"([A-Za-z0-9][A-Za-z0-9_. -]{0,119}?)"
-            r"[`'\"]?\s+for\s+(?:this\s+)?data\s+review\b",
+            r"[`'\"]?\s+for\s+(?:this\s+)?data\s+(?:review|explorer)\b",
             latest,
             re.IGNORECASE,
         )
@@ -794,8 +863,11 @@ class AgentGraphOrchestrator:
             for line in str(text or "").replace("\r\n", "\n").split("\n")
             if line.strip()
         ]
-        marker = "run an exact data review using this validated layout."
-        if not lines or lines[0].casefold() != marker:
+        markers = {
+            "run an exact data review using this validated layout.",
+            "run an exact data explorer query using this validated layout.",
+        }
+        if not lines or lines[0].casefold() not in markers:
             return None
 
         cube = ""
@@ -1818,6 +1890,50 @@ class AgentGraphOrchestrator:
                 "exact-layout compatibility step below. You will not need to "
                 "choose the cube again."
             )
+        if operation_code == "data-explorer-views":
+            activity = next(
+                (
+                    item
+                    for item in reversed(activities)
+                    if item.get("name") == "list_data_explorer_views"
+                ),
+                None,
+            )
+            if isinstance(activity, dict) and str(
+                activity.get("status") or ""
+            ).upper() == "SUCCESS":
+                return (
+                    "I loaded the reusable Data Explorer views saved in this "
+                    "platform. Choose one below to retrieve its current Oracle "
+                    "values, or start a fresh cube layout in Data Explorer."
+                )
+            return "The saved Data Explorer views could not be loaded."
+        if operation_code == "saved-data-view":
+            activity = next(
+                (
+                    item
+                    for item in reversed(activities)
+                    if item.get("name") == "review_saved_data_view"
+                ),
+                None,
+            )
+            if isinstance(activity, dict) and str(
+                activity.get("status") or ""
+            ).upper() == "SUCCESS":
+                return (
+                    "I reopened the saved layout and retrieved its current "
+                    "Oracle values. Review the read-only Data Explorer grid "
+                    "below or export it to Excel or CSV."
+                )
+            error = ""
+            if isinstance(activity, dict) and isinstance(
+                activity.get("result"), dict
+            ):
+                error = str(activity["result"].get("error") or "").strip()
+            return (
+                "The saved Data Explorer view could not be loaded. "
+                + (f"The platform returned: {error}" if error else "")
+            ).strip()
         if operation_code == "data-review-slice":
             activity = next(
                 (
@@ -1832,7 +1948,7 @@ class AgentGraphOrchestrator:
             ).upper() == "SUCCESS":
                 return (
                     "I loaded the requested live Planning slice. Review the "
-                    "read-only grid below or export it to Excel."
+                    "read-only Data Explorer grid below or export it."
                 )
             error = ""
             if isinstance(activity, dict) and isinstance(

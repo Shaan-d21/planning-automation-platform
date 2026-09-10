@@ -22,6 +22,7 @@ from app.application.operations import (
     PipelineStagePreview,
     PipelineVariablePreview,
 )
+from app.application.reports import ReportCatalogItem
 from app.application.data_review import DataReviewGrid
 from app.application.substitution_variables import SubstitutionVariableCatalog
 from app.application.user_variables import UserVariableCatalog
@@ -128,6 +129,20 @@ class _ExactSliceDataReview(_UndiscoverableDataReview):
             column_count=3,
             cell_count=3,
             missing_cell_count=0,
+        )
+
+
+class _ReportWorkspace:
+    def catalog(self):
+        return (
+            ReportCatalogItem(
+                name="revenue-forecast",
+                title="Revenue Forecast",
+                cube="Plan2",
+                default_pov=(("Scenario", "Actual"), ("Year", "FY24")),
+                rows=(("Account", ("Revenue",)),),
+                columns=(("Period", ("Jan", "Feb")),),
+            ),
         )
 
 
@@ -594,12 +609,14 @@ def _orchestrator(
     user_variables=None,
     control_center=None,
     data_review=None,
+    report_workspace=None,
 ):
     settings = _settings(tmp_path)
     gateway = AgentCapabilityGateway(
         settings,
         control_center=control_center or _ControlCenter(),
         data_review=data_review or _DataReview(),
+        report_workspace=report_workspace,
         operation_catalog=operation_catalog,
         substitution_variables=substitution_variables,
         user_variables=user_variables,
@@ -746,6 +763,37 @@ Period=Jan|Feb|Mar"""
     assert "live Planning slice" in result.text
 
 
+def test_graph_opens_saved_data_explorer_view_without_model_interpretation(
+    tmp_path: Path,
+) -> None:
+    data_review = _ExactSliceDataReview()
+    graph = _orchestrator(
+        tmp_path,
+        _NeverCalledProvider(),
+        data_review=data_review,
+        report_workspace=_ReportWorkspace(),
+    )
+
+    result = graph.invoke(
+        conversation_id="conversation-saved-data-view",
+        user_id=7,
+        messages=(
+            _message(
+                "Use saved Data Explorer view revenue-forecast and load its "
+                "current Oracle data."
+            ),
+        ),
+        allowed_tool_names=("review_saved_data_view",),
+    )
+
+    assert result.tool_activity[0].name == "review_saved_data_view"
+    assert result.tool_activity[0].status == "SUCCESS"
+    assert result.tool_activity[0].arguments == {"name": "revenue-forecast"}
+    assert data_review.selection is not None
+    assert data_review.selection.cube == "Plan2"
+    assert "current Oracle values" in result.text
+
+
 def test_graph_includes_only_validated_data_review_selection_context(
     tmp_path: Path,
 ) -> None:
@@ -766,7 +814,7 @@ def test_graph_includes_only_validated_data_review_selection_context(
         },
     )
 
-    assert "Current tool-validated Data Review context" in (
+    assert "Current tool-validated Data Explorer context" in (
         provider.system_instruction
     )
     assert '"cube":"Plan1"' in provider.system_instruction

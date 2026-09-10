@@ -126,11 +126,14 @@ Safety rules:
 - When asked why a run failed, for job details, or for record counts, inspect
   retained execution evidence. Report unavailable counters as unavailable;
   never estimate them.
-- For Planning data questions, use the read-only Data Review tools. Discover
+- For Planning data questions, use the read-only Data Explorer tools. Discover
   cubes, dimensions, and members before querying whenever Oracle exposes that
   metadata. Never guess a dimension or member. If metadata discovery is not
   available, ask for the exact missing cube layout. Keep requested slices
   narrow and state when the returned grid is truncated.
+- When the user refers to a saved Data Explorer view, list the current saved
+  views and load the exact selected view. Never recreate a saved view's layout
+  from conversation text. Saved views store layouts only; values are read live.
 - Direct users to the appropriate governed screen for actions you cannot take.
 - Keep answers clear, practical, and concise.
 - Format longer answers with short paragraphs, descriptive Markdown headings,
@@ -726,13 +729,26 @@ class AgentApplicationService:
         activity = self._repository.latest_successful_tool_activity(
             conversation_id=conversation_id,
             user_id=user.user_id,
-            tool_names=("review_data_slice", "compare_data_slices"),
+            tool_names=(
+                "review_data_slice",
+                "review_saved_data_view",
+                "compare_data_slices",
+            ),
         )
         if activity is None or not activity.arguments:
             return None
+        selection: dict[str, object] = activity.arguments
+        if activity.name == "review_saved_data_view":
+            name = str(activity.arguments.get("name") or "").strip()
+            if not name:
+                return None
+            try:
+                selection = self._gateway.saved_data_view_selection_payload(name)
+            except (AgentCapabilityError, EPMError):
+                return None
         return {
             "tool": activity.name,
-            "selection": activity.arguments,
+            "selection": selection,
         }
 
     @staticmethod
@@ -749,7 +765,7 @@ class AgentApplicationService:
         )[:6_000]
         return (
             f"{SYSTEM_INSTRUCTION}\n\n"
-            "Current tool-validated Data Review context:\n"
+            "Current tool-validated Data Explorer context:\n"
             f"{serialized}\n"
             "Preserve all prior selections except fields explicitly changed "
             "by the user. Re-run the complete updated read-only slice or "
@@ -2217,6 +2233,8 @@ class AgentApplicationService:
                     "list_planning_cubes",
                     "list_cube_dimensions",
                     "search_dimension_members",
+                    "list_data_explorer_views",
+                    "review_saved_data_view",
                     "review_data_slice",
                     "compare_data_slices",
                 }

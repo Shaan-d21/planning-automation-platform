@@ -1043,8 +1043,8 @@ describe("App", () => {
     window.location.hash = "#data-review";
     const planner = {
       ...bootstrap,
-      user: { ...bootstrap.user!, permissions: ["data.review"] },
-      navigation: [...bootstrap.navigation, { code: "data-review", label: "Data Review", path: "/app/data-review", group: "Analysis" }]
+      user: { ...bootstrap.user!, permissions: ["data.review", "report.generate"] },
+      navigation: [...bootstrap.navigation, { code: "data-review", label: "Data Explorer", path: "/app/data-review", group: "Analysis" }]
     };
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
@@ -1052,6 +1052,11 @@ describe("App", () => {
       if (url === "/api/v1/bootstrap") return response(planner);
       if (url === "/api/v1/home") return response(home);
       if (url === "/api/v1/notifications") return response(notificationInbox);
+      if (url === "/api/v1/data-explorer/views" && (!init?.method || init.method === "GET")) return response({ status: "success", views: [] });
+      if (url === "/api/v1/data-explorer/views" && init?.method === "POST") {
+        const payload = JSON.parse(String(init.body));
+        return response({ status: "success", message: `Saved view '${payload.name}' was created.`, view: { name: payload.name, title: payload.title, cube: payload.cube, default_pov: Object.entries(payload.pov), rows: payload.rows.map((item: { dimension: string; members: string[] }) => [item.dimension, item.members]), columns: payload.columns.map((item: { dimension: string; members: string[] }) => [item.dimension, item.members]) } }, 201);
+      }
       if (url === "/api/v1/data-review/cubes") return response({ status: "success", cubes: [{ name: "Plan1", cube_name: "Plan1", cube_type: 0, dimension_count: 4 }, { name: "Rpt", cube_name: "Rpt", cube_type: 1, dimension_count: 4 }] });
       if (url === "/api/v1/data-review/cubes/Plan1/dimensions") return response({ status: "success", cube: "Plan1", dimensions: [{ name: "Account", dimension_type: "Account" }, { name: "Period", dimension_type: "Period" }, { name: "Scenario", dimension_type: "Scenario" }, { name: "Year", dimension_type: "Year" }] });
       if (url.startsWith("/api/v1/data-review/cubes/Plan1/dimensions/") && url.includes("/members?")) {
@@ -1061,6 +1066,7 @@ describe("App", () => {
         return response({ status: "success", cube: "Plan1", dimension, query: "", members, total_matches: members.length, has_more: false });
       }
       if (url === "/api/v1/data-review/grid" && init?.method === "POST") return response({ status: "success", review: { cube: "Plan1", form_name: "Plan1 data slice", row_count: 2, column_count: 2, cell_count: 4, missing_cell_count: 1, grid: { row_dimensions: ["Account"], column_dimensions: ["Period"], columns: [["Jan"], ["Feb"]], rows: [{ headers: ["Revenue"], data: [1000, 1100] }, { headers: ["Gross Profit"], data: [400, "#Missing"] }], pov: [["Scenario", "Forecast"], ["Year", "FY27"]] } } });
+      if (url === "/api/v1/data-review/grid/export/csv" && init?.method === "POST") return Promise.resolve(new Response("Scenario,Account,Period,Value\nForecast,Revenue,Jan,1000\n", { status: 200, headers: { "Content-Type": "text/csv" } }));
       if (url === "/api/v1/data-review/validate" && init?.method === "POST") return response({ status: "success", validation: { cube: "Plan1", form_name: "Plan1 validation slice", result: { status: "FAIL", checked_cells: 4, passed_cells: 3, issue_count: 1, missing_count: 1, zero_count: 0, below_minimum_count: 0, above_maximum_count: 0, non_numeric_count: 0, truncated: false, rules: { check_missing: true, check_zero: false, minimum: null, maximum: null, max_issues: 500 }, issues: [{ code: "MISSING", severity: "ERROR", message: "The selected Planning intersection has no data.", pov: [["Scenario", "Forecast"], ["Year", "FY27"]], row_headers: ["Gross Profit"], column_headers: ["Feb"], raw_value: "#Missing", numeric_value: null }] } } });
       if (url === "/api/v1/data-review/compare" && init?.method === "POST") return response({ status: "success", comparison: { source_cube: "Plan1", target_cube: "Rpt", result: { source_form: "Plan1 source slice", target_form: "Rpt target slice", compared_cells: 4, matched_cells: 3, tolerance: 0, mismatches: [], cells: [{ row_headers: ["Gross Profit"], column_headers: ["Feb"], source_value: 400, target_value: 390, difference: 10, matches: false }] } } });
       return response({ detail: "Unexpected request" }, 404);
@@ -1090,6 +1096,17 @@ describe("App", () => {
     expect(screen.getByText("1,100")).toBeTruthy();
     fireEvent.click(screen.getByText("1,000"));
     expect(screen.getByText("Revenue × Jan")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /^CSV$/ }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url) === "/api/v1/data-review/grid/export/csv")).toBe(true));
+    fireEvent.click(screen.getByRole("button", { name: /Save view/ }));
+    fireEvent.change(screen.getByLabelText("Saved view name"), { target: { value: "monthly-revenue" } });
+    fireEvent.change(screen.getByLabelText("Saved view title"), { target: { value: "Monthly Revenue" } });
+    fireEvent.click(screen.getAllByRole("button", { name: /^Save view/ }).at(-1)!);
+    expect(await screen.findByText("Saved view 'monthly-revenue' was created.")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Saved data view"), { target: { value: "" } });
+    fireEvent.change(screen.getByLabelText("Saved data view"), { target: { value: "monthly-revenue" } });
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => String(url) === "/api/v1/data-review/grid").length).toBe(2));
+    expect(await screen.findByText("Loaded 'Monthly Revenue' with current Oracle values.")).toBeTruthy();
 
     expect(screen.getByRole("heading", { name: "Validate this Planning grid" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /Run quality checks/ }));
@@ -1109,6 +1126,9 @@ describe("App", () => {
     expect(new Headers(validated?.[1]?.headers).get("X-CSRF-Token")).toBe("test-csrf");
     const compared = fetchMock.mock.calls.find(([url]) => String(url) === "/api/v1/data-review/compare");
     expect(JSON.parse(String(compared?.[1]?.body)).target.cube).toBe("Rpt");
+    fireEvent.click(screen.getByRole("button", { name: /Start new view/ }));
+    expect((screen.getByLabelText("Cube or plan type") as HTMLSelectElement).value).toBe("");
+    expect(screen.queryByRole("heading", { name: "Plan1 planning grid" })).toBeNull();
   });
 
   it("provides a governed EPM Assistant conversation and action handoff", async () => {
@@ -1639,12 +1659,12 @@ describe("App", () => {
     expect(JSON.parse(String(inputs?.[1]?.body))).toEqual({ request_id: "input-user-variable", values: { user_name: "planner", new_member: "Sales East" } });
   });
 
-  it("generates and downloads a registered Excel report from the modern Reports workspace", async () => {
+  it("generates and downloads a saved-view Excel output from the restricted Data Explorer", async () => {
     window.location.hash = "#reports";
     const reportUser = {
       ...bootstrap,
       user: { ...bootstrap.user!, permissions: ["report.generate"] },
-      navigation: [...bootstrap.navigation, { code: "reports", label: "Reports", path: "/app/reports", group: "Operate" }]
+      navigation: [...bootstrap.navigation, { code: "reports", label: "Data Explorer", path: "/app/reports", group: "Planning" }]
     };
     const preflight = {
       form_name: "Revenue Forecast",
@@ -1687,13 +1707,14 @@ describe("App", () => {
     });
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "Report Generation" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Data Explorer" })).toBeTruthy();
+    expect(screen.queryByLabelText("Planning form name or ID")).toBeNull();
     fireEvent.click(await screen.findByRole("button", { name: /Inspect layout/ }));
     fireEvent.change(await screen.findByLabelText("Report POV Year"), { target: { value: "FY26" } });
-    fireEvent.click(screen.getByRole("button", { name: /Review Report/ }));
-    expect(await screen.findByRole("heading", { name: "Review the Excel report" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Review output/ }));
+    expect(await screen.findByRole("heading", { name: "Review the Excel output" })).toBeTruthy();
     fireEvent.click(screen.getByLabelText(/I reviewed the source/));
-    fireEvent.click(screen.getByRole("button", { name: /Generate Excel Report/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^Generate Excel/ }));
 
     expect(await screen.findByRole("heading", { name: "Operation completed successfully" })).toBeTruthy();
     const download = screen.getByRole("link", { name: /Revenue_Forecast_Report.xlsx/ });
@@ -1703,12 +1724,12 @@ describe("App", () => {
     expect(new Headers(submitted?.[1]?.headers).get("X-CSRF-Token")).toBe("test-csrf");
   });
 
-  it("registers a reusable report when direct Planning form inspection is unavailable", async () => {
+  it("keeps the unsupported Planning-form workflow out of the restricted Data Explorer", async () => {
     window.location.hash = "#reports";
     const reportUser = {
       ...bootstrap,
       user: { ...bootstrap.user!, permissions: ["report.generate"] },
-      navigation: [...bootstrap.navigation, { code: "reports", label: "Reports", path: "/app/reports", group: "Operate" }]
+      navigation: [...bootstrap.navigation, { code: "reports", label: "Data Explorer", path: "/app/reports", group: "Planning" }]
     };
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
@@ -1716,48 +1737,19 @@ describe("App", () => {
       if (url === "/api/v1/bootstrap") return response(reportUser);
       if (url === "/api/v1/home") return response(home);
       if (url === "/api/v1/notifications") return response(notificationInbox);
-      if (url === "/api/v1/reports/catalog" && init?.method === "POST") return response({ status: "success", message: "Registered", report: { name: "Gross Margin", title: "Gross Margin Workbook", cube: "Plan1", default_pov: [["Scenario", "Forecast"]] } }, 201);
       if (url === "/api/v1/reports/catalog") return response({ status: "success", reports: [] });
-      if (url === "/api/v1/reports/preflight" && init?.method === "POST") {
-        const payload = JSON.parse(String(init.body));
-        if (payload.form_name === "Gross Margin") return response({ status: "success", preflight: { form_name: "Gross Margin", title: "Gross Margin Workbook", cube: "Plan1", registered: true, page_dimensions: ["Scenario"], row_dimensions: ["Account"], column_dimensions: ["Period"], current_pov: [["Scenario", "Forecast"]], allowed_page_members: [] } });
-        return response({ detail: "Oracle EPM API returned HTTP 404: Not Found" }, 400);
-      }
       return response({ detail: "Unexpected request" }, 404);
     });
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "Report Generation" })).toBeTruthy();
-    fireEvent.change(screen.getByLabelText("Planning form name or ID"), { target: { value: "Gross Margin" } });
-    const inspect = screen.getByRole("button", { name: /Inspect layout/ }) as HTMLButtonElement;
-    await waitFor(() => expect(inspect.disabled).toBe(false));
-    fireEvent.click(inspect);
-    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url) === "/api/v1/reports/preflight")).toBe(true));
-    if (!screen.queryByRole("heading", { name: "Register a report definition" })) {
-      fireEvent.click(screen.getByRole("button", { name: "Register report" }));
-    }
-    expect(await screen.findByRole("heading", { name: "Register a report definition" })).toBeTruthy();
-    fireEvent.change(screen.getByLabelText("Registered workbook title"), { target: { value: "Gross Margin Workbook" } });
-    fireEvent.change(screen.getByLabelText("Registered report cube"), { target: { value: "Plan1" } });
-    fireEvent.change(screen.getByLabelText("Column axis dimension"), { target: { value: "Period" } });
-    fireEvent.change(screen.getByLabelText("Column axis members"), { target: { value: "Jan | Feb | Mar" } });
-    fireEvent.change(screen.getByLabelText("Row axis dimension"), { target: { value: "Account" } });
-    fireEvent.change(screen.getByLabelText("Row axis members"), { target: { value: "Revenue | Gross Profit" } });
-    fireEvent.click(screen.getByRole("button", { name: /Save Registered Report/ }));
-
-    expect(await screen.findByText("Registered layout")).toBeTruthy();
-    const registered = fetchMock.mock.calls.find(([url, init]) => String(url) === "/api/v1/reports/catalog" && init?.method === "POST");
-    expect(JSON.parse(String(registered?.[1]?.body))).toEqual({
-      name: "Gross Margin",
-      title: "Gross Margin Workbook",
-      cube: "Plan1",
-      pov: {},
-      columns: [{ dimension: "Period", members: ["Jan", "Feb", "Mar"] }],
-      rows: [{ dimension: "Account", members: ["Revenue", "Gross Profit"] }]
-    });
+    expect(await screen.findByRole("heading", { name: "Data Explorer" })).toBeTruthy();
+    expect(screen.getByText("No saved views are available for this account.")).toBeTruthy();
+    expect(screen.queryByLabelText("Planning form name or ID")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Register report" })).toBeNull();
+    expect(fetchMock.mock.calls.some(([url]) => String(url) === "/api/v1/reports/preflight")).toBe(false);
   });
 
-  it("renders a live Data Review grid returned by the EPM Assistant", async () => {
+  it("renders a live Data Explorer grid returned by the EPM Assistant", async () => {
     window.location.hash = "#assistant";
     const assistantUser = {
       ...bootstrap,
@@ -1804,11 +1796,61 @@ describe("App", () => {
     fireEvent.change(await screen.findByLabelText("Message the EPM Assistant"), { target: { value: "Show Plan1 revenue for Jan and Feb." } });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
-    expect(await screen.findByRole("heading", { name: "Plan1 data review" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Plan1 data explorer" })).toBeTruthy();
     expect(screen.getByText("1,200")).toBeTruthy();
     expect(screen.getByText("1,350")).toBeTruthy();
     expect(screen.getByRole("button", { name: /Export Excel/ })).toBeTruthy();
-    expect(screen.getByRole("button", { name: /Open Data Review/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Export CSV/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Open Data Explorer/ })).toBeTruthy();
+    expect(screen.queryByText(/groq\s*·\s*test/i)).toBeNull();
+    expect(document.querySelector(".app-shell--assistant")).toBeTruthy();
+  });
+
+  it("lets the EPM Assistant reopen a saved Data Explorer view with one choice", async () => {
+    window.location.hash = "#assistant";
+    const assistantUser = {
+      ...bootstrap,
+      user: { ...bootstrap.user!, permissions: ["agent.use", "data.review"] },
+      navigation: [...bootstrap.navigation, { code: "assistant", label: "EPM Assistant", path: "/app/agent", group: "Workspace" }]
+    };
+    const conversation = { conversation_id: "conv-saved-view", user_id: 7, title: "Explore saved data", provider: "groq", model: "test", created_at: "2026-08-19T10:00:00Z", updated_at: "2026-08-19T10:00:00Z" };
+    let sent = 0;
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/v1/bootstrap") return response(assistantUser);
+      if (url === "/api/v1/home") return response(home);
+      if (url === "/api/v1/notifications") return response(notificationInbox);
+      if (url === "/api/v1/agent/status") return response({ enabled: true, configured: true, provider: "groq", model: "test", mode: "governed", message: "Ready" });
+      if (url === "/api/v1/agent/conversations") return response({ status: "success", conversations: [conversation] });
+      if (url === "/api/v1/agent/conversations/conv-saved-view/messages" && init?.method === "POST") {
+        sent += 1;
+        if (sent === 1) return response({
+          status: "success",
+          message: { message_id: 2, conversation_id: "conv-saved-view", role: "assistant", content: "Choose a saved view.", created_at: "2026-08-19T10:01:00Z" },
+          tool_activity: [{ name: "list_data_explorer_views", arguments: {}, status: "SUCCESS", summary: "Saved views returned.", result: { count: 1, total_count: 1, truncated: false, views: [{ name: "revenue-forecast", title: "Revenue Forecast", cube: "Plan1", pov: [{ dimension: "Scenario", member: "Forecast" }], row_dimensions: ["Account"], column_dimensions: ["Period"] }] } }],
+          action_drafts: [], approval_request: null, clarification_request: null, input_request: null
+        });
+        return response({
+          status: "success",
+          message: { message_id: 3, conversation_id: "conv-saved-view", role: "assistant", content: "Current Oracle values loaded.", created_at: "2026-08-19T10:02:00Z" },
+          tool_activity: [{ name: "review_saved_data_view", arguments: { name: "revenue-forecast" }, status: "SUCCESS", summary: "Saved view loaded.", result: { cube: "Plan1", name: "Plan1 data slice", saved_view: { name: "revenue-forecast", title: "Revenue Forecast" }, row_count: 1, column_count: 1, cell_count: 1, missing_cell_count: 0, returned_row_count: 1, truncated: false, request: { cube: "Plan1", pov: { Scenario: "Forecast" }, rows: [{ dimension: "Account", members: ["Revenue"] }], columns: [{ dimension: "Period", members: ["Jan"] }] }, grid: { row_dimensions: ["Account"], column_dimensions: ["Period"], columns: [["Jan"]], rows: [{ headers: ["Revenue"], data: [1200] }], pov: [["Scenario", "Forecast"]] } } }],
+          action_drafts: [], approval_request: null, clarification_request: null, input_request: null
+        });
+      }
+      if (url === "/api/v1/agent/conversations/conv-saved-view/messages") return response({ status: "success", messages: [], action_drafts: [], approval_request: null, clarification_request: null, input_request: null });
+      return response({ detail: "Unexpected request" }, 404);
+    });
+    render(<App />);
+
+    fireEvent.change(await screen.findByLabelText("Message the EPM Assistant"), { target: { value: "Show my saved Data Explorer views." } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Revenue Forecast/ }));
+
+    expect(await screen.findByRole("heading", { name: "Revenue Forecast" })).toBeTruthy();
+    expect(screen.getByText("1,200")).toBeTruthy();
+    const secondRequest = fetchMock.mock.calls.filter(([url, init]) => String(url).endsWith("/messages") && init?.method === "POST")[1];
+    expect(JSON.parse(String(secondRequest?.[1]?.body)).content).toBe("Use saved Data Explorer view revenue-forecast and load its current Oracle data.");
   });
 
   it("keeps the selected agent cube when Oracle dimension discovery is unavailable", async () => {

@@ -222,7 +222,7 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
       const response = await api.sendAgentMessage(conversationId, prompt, csrfToken);
       setMessages((current) => [...current, response.message]);
       rememberReviewActivity(response.message, response.tool_activity);
-      if (response.tool_activity.some((item) => ["review_data_slice", "compare_data_slices"].includes(item.name) && item.status === "SUCCESS")) setReviewContext(null);
+      if (response.tool_activity.some((item) => ["review_data_slice", "review_saved_data_view", "compare_data_slices"].includes(item.name) && item.status === "SUCCESS")) setReviewContext(null);
       setDrafts((current) => [...current, ...response.action_drafts]);
       setApproval(response.approval_request);
       setClarification(response.clarification_request);
@@ -425,6 +425,8 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
         "list_planning_cubes",
         "list_cube_dimensions",
         "search_dimension_members",
+        "list_data_explorer_views",
+        "review_saved_data_view",
         "review_data_slice",
         "compare_data_slices",
         "plan_multi_step_request"
@@ -434,7 +436,7 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
         return false;
       }
       return item.status === "SUCCESS"
-        || (["list_cube_dimensions", "review_data_slice"].includes(item.name) && item.status === "FAILED");
+        || (["list_cube_dimensions", "review_saved_data_view", "review_data_slice"].includes(item.name) && item.status === "FAILED");
     });
     if (!reviews.length) return;
     setReviewActivity((current) => ({
@@ -448,8 +450,8 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
 
   return <section className="assistant-workspace">
     <header className="page-intro assistant-intro">
-      <div><span className="eyebrow">Governed intelligence</span><h1>EPM Assistant</h1><p>Understand the connected Planning environment, investigate platform activity, and prepare safe actions for governed review.</p></div>
-      <div className="assistant-intro__status"><span className={`assistant-status${status?.enabled ? " is-ready" : " is-warning"}`}><i />{status?.enabled ? "Assistant ready" : "Configuration required"}</span><span>{status?.provider ?? "Provider"} · {status?.model ?? "Model"}</span></div>
+      <div><span className="eyebrow">Planning copilot</span><h1>EPM Assistant</h1><p>Ask questions, inspect Planning, or prepare a governed action.</p></div>
+      <div className="assistant-intro__status"><span className={`assistant-status${status?.enabled ? " is-ready" : " is-warning"}`}><i />{status?.enabled ? "Ready" : "Configuration required"}</span></div>
     </header>
 
     {error && <FeedbackBanner tone="error" title="The assistant could not complete that request" message={error} onDismiss={() => setError(null)} />}
@@ -459,11 +461,11 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
       <aside className="panel assistant-history" aria-label="Assistant conversations">
         <header><div><span className="eyebrow">Your workspace</span><h2>Conversations</h2></div><button type="button" className="button button--primary" disabled={creating || !status?.enabled} onClick={() => void createConversation()}>{creating ? <span className="spinner" /> : "+ New"}</button></header>
         <div className="assistant-history__list">{conversations.length ? conversations.map((conversation) => <button type="button" className={conversation.conversation_id === activeId ? "is-active" : ""} onClick={() => void openConversation(conversation.conversation_id)} key={conversation.conversation_id}><span className="assistant-history__icon"><Icon name="assistant" /></span><span><strong>{conversation.title || "New conversation"}</strong><small>{formatConversationDate(conversation.updated_at)}</small></span></button>) : <div className="assistant-history__empty"><Icon name="assistant" /><strong>No conversations yet</strong><p>Start with one of the suggested questions.</p></div>}</div>
-        <div className="assistant-privacy"><Icon name="check" /><div><strong>Protected by design</strong><p>Credentials and uploaded file contents are never exposed. Live Planning grids are read-only and available only to users with Data Review access.</p></div></div>
+        <div className="assistant-privacy"><Icon name="check" /><span>Governed workspace</span></div>
       </aside>
 
       <section className="panel assistant-chat">
-        <header className="assistant-chat__header"><div><span className="eyebrow">Governed copilot</span><h2>{activeConversation?.title || "Start a conversation"}</h2><p>{activeConversation ? `${activeConversation.provider} · ${activeConversation.model}` : status?.message}</p></div>{activeId && <button type="button" className="icon-button" aria-label="Delete conversation" onClick={() => setConfirmDelete(true)}><Icon name="close" /></button>}</header>
+        <header className="assistant-chat__header"><div><span className="eyebrow">Conversation</span><h2>{activeConversation?.title || "Start a conversation"}</h2></div>{activeId && <button type="button" className="icon-button" aria-label="Delete conversation" title="Delete conversation" onClick={() => setConfirmDelete(true)}><Icon name="close" /></button>}</header>
 
         <div ref={messageViewport} className={`assistant-messages${loadingMessages ? " is-loading" : ""}`} aria-live="polite" onScroll={trackConversationScroll}>
           {loadingMessages ? <AssistantMessageSkeleton /> : messages.length ? messages.map((message) => <Fragment key={message.message_id}><MessageBubble message={message} />{(reviewActivity[message.message_id] ?? []).map((activity, index) => <AgentDataReviewCard activity={activity} csrfToken={csrfToken} onPrompt={preparePrompt} onPrepare={(prompt) => void sendMessage(undefined, prompt)} busy={sending} key={`${activity.name}-${index}`} />)}{drafts.filter((draft) => draft.message_id === message.message_id).map((draft) => <ActionDraftCard draft={draft} csrfToken={csrfToken} onUpdate={updateDraft} key={draft.draft_id} />)}</Fragment>) : <AssistantEmpty onPrompt={preparePrompt} />}
@@ -507,6 +509,21 @@ interface AgentGridReviewResult {
   truncated: boolean;
   request: DataReviewSliceInput;
   grid: DataReviewGrid;
+  saved_view?: { name: string; title: string };
+}
+
+interface AgentSavedViewsResult {
+  count: number;
+  total_count: number;
+  truncated: boolean;
+  views: Array<{
+    name: string;
+    title: string;
+    cube: string;
+    pov: Array<{ dimension: string; member: string }>;
+    row_dimensions: string[];
+    column_dimensions: string[];
+  }>;
 }
 
 interface AgentComparisonResult {
@@ -540,16 +557,60 @@ function AgentDataReviewCard({ activity, csrfToken, onPrompt, onPrepare, busy }:
   if (activity.name === "review_data_slice" && activity.status === "FAILED") {
     return <AgentDataReviewFailureCard activity={activity} />;
   }
+  if (activity.name === "review_saved_data_view" && activity.status === "FAILED") {
+    return <AgentSavedViewFailureCard activity={activity} onPrompt={onPrompt} />;
+  }
+  if (activity.name === "list_data_explorer_views" && isAgentSavedViews(activity.result)) {
+    return <AgentSavedViewChoiceCard result={activity.result} busy={busy} onSelect={onPrepare} />;
+  }
   if (["list_planning_cubes", "list_cube_dimensions", "search_dimension_members"].includes(activity.name) && activity.result) {
     return <AgentMetadataChoiceCard activity={activity} onPrompt={onPrompt} />;
   }
-  if (activity.name === "review_data_slice" && isAgentGridReview(activity.result)) {
+  if (["review_data_slice", "review_saved_data_view"].includes(activity.name) && isAgentGridReview(activity.result)) {
     return <AgentGridReviewCard review={activity.result} csrfToken={csrfToken} onPrompt={onPrompt} />;
   }
   if (activity.name === "compare_data_slices" && isAgentComparison(activity.result)) {
     return <AgentComparisonCard comparison={activity.result} csrfToken={csrfToken} onPrompt={onPrompt} />;
   }
   return null;
+}
+
+function AgentSavedViewChoiceCard({ result, busy, onSelect }: {
+  result: AgentSavedViewsResult;
+  busy: boolean;
+  onSelect: (prompt: string) => void;
+}) {
+  function openDataExplorer() {
+    window.location.hash = "#data-review";
+  }
+
+  return <article className="assistant-data-choice assistant-saved-views" aria-label="Saved Data Explorer views">
+    <header><span className="assistant-guided-input__icon"><Icon name="reports" /></span><div><span className="eyebrow">Reusable live layouts</span><h3>{result.views.length ? "Choose a saved Data Explorer view" : "No saved views yet"}</h3><p>{result.views.length ? "Each choice reuses its validated layout and retrieves current values from Oracle. No financial values are stored in the view." : "Start a fresh layout in Data Explorer, then save it if you want to reuse the same intersection later."}</p></div></header>
+    {result.views.length > 0 && <div className="assistant-data-choice__options">{result.views.map((view) => <button type="button" disabled={busy} onClick={() => onSelect(`Use saved Data Explorer view ${view.name} and load its current Oracle data.`)} key={view.name}><Icon name="reports" /><span><strong>{view.title || view.name}</strong><small>{view.cube} · Rows: {view.row_dimensions.join(", ")} · Columns: {view.column_dimensions.join(", ")}</small></span><Icon name="arrow" /></button>)}</div>}
+    {result.truncated && <p className="assistant-data-review__notice"><Icon name="alert" /> Showing {result.count} of {result.total_count} saved views. Open Data Explorer to search the complete list.</p>}
+    <footer><button type="button" className="button button--secondary" onClick={openDataExplorer}>{result.views.length ? "Start a fresh view" : "Open Data Explorer"} <Icon name="arrow" /></button></footer>
+  </article>;
+}
+
+function AgentSavedViewFailureCard({ activity, onPrompt }: {
+  activity: AgentToolActivity;
+  onPrompt: (prompt: string) => void;
+}) {
+  const name = String(activity.arguments?.name ?? "the saved view");
+  const error = String(activity.result?.error ?? "The saved layout could not be loaded.");
+  return <article className="assistant-data-choice assistant-data-review-failure">
+    <header><span className="assistant-guided-input__icon"><Icon name="alert" /></span><div><span className="eyebrow">Saved view needs attention</span><h3>{name} could not be opened</h3><p>The view may have been deleted, or its cube layout may no longer be valid in the connected Planning application.</p></div></header>
+    <div className="assistant-draft__error"><Icon name="alert" />{error}</div>
+    <footer><button type="button" className="button button--secondary" onClick={() => onPrompt("Show my current saved Data Explorer views.")}>Choose another saved view</button></footer>
+  </article>;
+}
+
+function isAgentSavedViews(value: unknown): value is AgentSavedViewsResult {
+  if (!value || typeof value !== "object") return false;
+  const item = value as Record<string, unknown>;
+  return Array.isArray(item.views)
+    && typeof item.count === "number"
+    && typeof item.total_count === "number";
 }
 
 interface AgentMultiStepPlanStep {
@@ -642,7 +703,7 @@ function AgentDimensionCompatibilityCard({ activity, onPrompt }: {
   }
 
   return <article className="assistant-data-choice assistant-dimension-fallback">
-    <header><span className="assistant-guided-input__icon"><Icon name="settings" /></span><div><span className="eyebrow">Exact-layout compatibility</span><h3>{cube} remains selected</h3><p>Oracle did not expose its member catalog for this cube. Map every exact dimension to the member or members you want. The platform will send this structure directly to the read-only Data Review tool without asking the AI to reinterpret it.</p></div></header>
+    <header><span className="assistant-guided-input__icon"><Icon name="settings" /></span><div><span className="eyebrow">Exact-layout compatibility</span><h3>{cube} remains selected</h3><p>Oracle did not expose its member catalog for this cube. Map every exact dimension to the member or members you want. The platform sends this structure directly to the read-only Data Explorer tool without asking the AI to reinterpret it.</p></div></header>
     <div className="assistant-dimension-fallback__example"><Icon name="data" /><p><strong>Use Dimension=Member.</strong> The left side is the dimension, such as <code>Scenario</code>; the right side is its member, such as <code>Actual</code>. Separate multiple row or column members with <code>|</code>.</p></div>
     <div className="assistant-dimension-fallback__fields">
       <label className="is-pov"><span>POV mappings *</span><textarea aria-label="POV mappings" rows={5} value={pov} onChange={(event) => setPov(event.target.value)} placeholder={"Scenario=Actual\nVersion=Working\nEntity=No Entity\nYear=FY24"} /><small>One exact Dimension=Member mapping per line. POV dimensions accept one member each.</small></label>
@@ -650,7 +711,7 @@ function AgentDimensionCompatibilityCard({ activity, onPrompt }: {
       <label><span>Column mappings *</span><textarea aria-label="Column mappings" rows={4} value={columns} onChange={(event) => setColumns(event.target.value)} placeholder="Period=Jan|Feb|Mar" /><small>One dimension per line; separate multiple members with |.</small></label>
     </div>
     {!canContinue && (pov || rows || columns) && <p className="assistant-dimension-fallback__validation"><Icon name="alert" /> Every line must use Dimension=Member. Rows and columns may use Member1|Member2.</p>}
-    <footer><button type="button" className="button button--quiet" onClick={openDataReview}>Open Data Review</button><button type="button" className="button button--primary" disabled={!canContinue} onClick={continueWithExactLayout}>Use this exact layout <Icon name="arrow" /></button></footer>
+    <footer><button type="button" className="button button--quiet" onClick={openDataReview}>Open Data Explorer</button><button type="button" className="button button--primary" disabled={!canContinue} onClick={continueWithExactLayout}>Use this exact layout <Icon name="arrow" /></button></footer>
   </article>;
 }
 
@@ -664,9 +725,9 @@ function AgentDataReviewFailureCard({ activity }: { activity: AgentToolActivity 
   }
 
   return <article className="assistant-data-choice assistant-data-review-failure">
-    <header><span className="assistant-guided-input__icon"><Icon name="alert" /></span><div><span className="eyebrow">Exact slice needs correction</span><h3>{cube} layout was not accepted</h3><p>The request reached the read-only Data Review service. Correct the exact Oracle dimension or member named in the error, then try the mapping card again.</p></div></header>
+    <header><span className="assistant-guided-input__icon"><Icon name="alert" /></span><div><span className="eyebrow">Exact slice needs correction</span><h3>{cube} layout was not accepted</h3><p>The request reached the read-only Data Explorer service. Correct the exact Oracle dimension or member named in the error, then try the mapping card again.</p></div></header>
     <div className="assistant-draft__error"><Icon name="alert" />{error}</div>
-    <footer><button type="button" className="button button--secondary" onClick={openDataReview}>Open Data Review</button></footer>
+    <footer><button type="button" className="button button--secondary" onClick={openDataReview}>Open Data Explorer</button></footer>
   </article>;
 }
 
@@ -685,7 +746,7 @@ function exactReviewMappingsValid(value: string, multipleMembers: boolean) {
 
 function exactDataReviewPrompt(cube: string, pov: string, rows: string, columns: string) {
   return [
-    "Run an exact Data Review using this validated layout.",
+    "Run an exact Data Explorer query using this validated layout.",
     `Cube: ${cube}`,
     "POV:",
     pov.trim(),
@@ -704,19 +765,19 @@ function AgentMetadataChoiceCard({ activity, onPrompt }: {
   if (activity.name === "list_planning_cubes") {
     const cubes = recordList(result.cubes);
     if (!cubes.length) return null;
-    return <article className="assistant-data-choice"><header><span className="assistant-guided-input__icon"><Icon name="data" /></span><div><span className="eyebrow">Choose a live cube</span><h3>Where should I review data?</h3><p>These plan types were retrieved from the connected Planning application.</p></div></header><div className="assistant-data-choice__options">{cubes.map((cube) => { const name = String(cube.name ?? cube.cube_name ?? ""); return <button type="button" onClick={() => onPrompt(`Use cube ${name} for this data review and help me choose the remaining POV, rows, and columns.`)} key={name}><Icon name="data" /><span><strong>{name}</strong><small>{cube.dimension_count ? `${cube.dimension_count} dimensions` : "Live Planning cube"}</small></span><Icon name="arrow" /></button>; })}</div></article>;
+    return <article className="assistant-data-choice"><header><span className="assistant-guided-input__icon"><Icon name="data" /></span><div><span className="eyebrow">Choose a live cube</span><h3>Where should I explore data?</h3><p>These plan types were retrieved from the connected Planning application.</p></div></header><div className="assistant-data-choice__options">{cubes.map((cube) => { const name = String(cube.name ?? cube.cube_name ?? ""); return <button type="button" onClick={() => onPrompt(`Use cube ${name} for this Data Explorer query and help me choose the remaining POV, rows, and columns.`)} key={name}><Icon name="data" /><span><strong>{name}</strong><small>{cube.dimension_count ? `${cube.dimension_count} dimensions` : "Live Planning cube"}</small></span><Icon name="arrow" /></button>; })}</div></article>;
   }
   if (activity.name === "list_cube_dimensions") {
     const cube = String(result.cube ?? "the selected cube");
     const dimensions = recordList(result.dimensions);
     if (!dimensions.length) return null;
-    return <article className="assistant-data-choice"><header><span className="assistant-guided-input__icon"><Icon name="settings" /></span><div><span className="eyebrow">Build the grid</span><h3>Place a dimension</h3><p>Choose where a live {cube} dimension belongs. The agent will preserve the choice and continue collecting the layout.</p></div></header><div className="assistant-dimension-choices">{dimensions.map((dimension) => { const name = String(dimension.name ?? ""); return <div key={name}><strong>{name}</strong><span><button type="button" onClick={() => onPrompt(`Place ${name} in the POV for the ${cube} data review.`)}>POV</button><button type="button" onClick={() => onPrompt(`Place ${name} on rows for the ${cube} data review.`)}>Rows</button><button type="button" onClick={() => onPrompt(`Place ${name} on columns for the ${cube} data review.`)}>Columns</button></span></div>; })}</div></article>;
+    return <article className="assistant-data-choice"><header><span className="assistant-guided-input__icon"><Icon name="settings" /></span><div><span className="eyebrow">Build the grid</span><h3>Place a dimension</h3><p>Choose where a live {cube} dimension belongs. The agent will preserve the choice and continue collecting the layout.</p></div></header><div className="assistant-dimension-choices">{dimensions.map((dimension) => { const name = String(dimension.name ?? ""); return <div key={name}><strong>{name}</strong><span><button type="button" onClick={() => onPrompt(`Place ${name} in the POV for the ${cube} Data Explorer query.`)}>POV</button><button type="button" onClick={() => onPrompt(`Place ${name} on rows for the ${cube} Data Explorer query.`)}>Rows</button><button type="button" onClick={() => onPrompt(`Place ${name} on columns for the ${cube} Data Explorer query.`)}>Columns</button></span></div>; })}</div></article>;
   }
   const cube = String(result.cube ?? "the selected cube");
   const dimension = String(result.dimension ?? "dimension");
   const members = recordList(result.members);
   if (!members.length) return null;
-  return <article className="assistant-data-choice"><header><span className="assistant-guided-input__icon"><Icon name="search" /></span><div><span className="eyebrow">Choose live members</span><h3>{dimension}</h3><p>Select a member retrieved from {cube}; you can continue adding members conversationally.</p></div></header><div className="assistant-data-choice__options">{members.slice(0, 40).map((member) => { const name = String(member.name ?? ""); const alias = String(member.alias ?? ""); return <button type="button" onClick={() => onPrompt(`Use member ${name} for dimension ${dimension} in the previous ${cube} data review.`)} key={name}><Icon name="check" /><span><strong>{alias || name}</strong>{alias && alias !== name && <small>{name}</small>}</span><Icon name="arrow" /></button>; })}</div></article>;
+  return <article className="assistant-data-choice"><header><span className="assistant-guided-input__icon"><Icon name="search" /></span><div><span className="eyebrow">Choose live members</span><h3>{dimension}</h3><p>Select a member retrieved from {cube}; you can continue adding members conversationally.</p></div></header><div className="assistant-data-choice__options">{members.slice(0, 40).map((member) => { const name = String(member.name ?? ""); const alias = String(member.alias ?? ""); return <button type="button" onClick={() => onPrompt(`Use member ${name} for dimension ${dimension} in the previous ${cube} Data Explorer query.`)} key={name}><Icon name="check" /><span><strong>{alias || name}</strong>{alias && alias !== name && <small>{name}</small>}</span><Icon name="arrow" /></button>; })}</div></article>;
 }
 
 function AgentReviewResumeCard({ context, onPrompt }: {
@@ -736,7 +797,7 @@ function AgentReviewResumeCard({ context, onPrompt }: {
     window.location.hash = "#data-review";
   }
 
-  return <article className="assistant-review-resume"><span className="assistant-review-resume__icon"><Icon name="data" /></span><div><span className="eyebrow">Validated review context</span><h3>Continue {comparison ? "the comparison" : `${slice.cube} data review`}</h3><p>The prior financial values were not stored. The exact cube intersection is available to query live again.</p><div>{pov.slice(0, 5).map(([dimension, member]) => <span key={dimension}>{dimension}: <strong>{member}</strong></span>)}<span>Rows: <strong>{slice.rows.map((item) => item.dimension).join(", ")}</strong></span><span>Columns: <strong>{slice.columns.map((item) => item.dimension).join(", ")}</strong></span></div></div><footer><button type="button" className="button button--secondary" onClick={() => onPrompt("Show the previous data review again using live Oracle data.")}>Reload live data</button><button type="button" className="button button--quiet" onClick={() => onPrompt("Compare the previous data review with ")}>Compare</button><button type="button" className="button button--quiet" onClick={openWorkspace}>Open Data Review <Icon name="arrow" /></button></footer></article>;
+  return <article className="assistant-review-resume"><span className="assistant-review-resume__icon"><Icon name="data" /></span><div><span className="eyebrow">Validated explorer context</span><h3>Continue {comparison ? "the comparison" : `${slice.cube} exploration`}</h3><p>The prior financial values were not stored. The exact cube intersection is available to query live again.</p><div>{pov.slice(0, 5).map(([dimension, member]) => <span key={dimension}>{dimension}: <strong>{member}</strong></span>)}<span>Rows: <strong>{slice.rows.map((item) => item.dimension).join(", ")}</strong></span><span>Columns: <strong>{slice.columns.map((item) => item.dimension).join(", ")}</strong></span></div></div><footer><button type="button" className="button button--secondary" onClick={() => onPrompt("Show the previous Data Explorer grid again using live Oracle data.")}>Reload live data</button><button type="button" className="button button--quiet" onClick={() => onPrompt("Compare the previous Data Explorer grid with ")}>Compare</button><button type="button" className="button button--quiet" onClick={openWorkspace}>Open Data Explorer <Icon name="arrow" /></button></footer></article>;
 }
 
 function AgentGridReviewCard({ review, csrfToken, onPrompt }: {
@@ -745,7 +806,7 @@ function AgentGridReviewCard({ review, csrfToken, onPrompt }: {
   onPrompt: (prompt: string) => void;
 }) {
   const [page, setPage] = useState(1);
-  const [exporting, setExporting] = useState(false);
+  const [exporting, setExporting] = useState<"excel" | "csv" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const pageSize = 20;
   const totalPages = Math.max(1, Math.ceil(review.grid.rows.length / pageSize));
@@ -753,15 +814,28 @@ function AgentGridReviewCard({ review, csrfToken, onPrompt }: {
   const rows = review.grid.rows.slice((safePage - 1) * pageSize, safePage * pageSize);
 
   async function exportExcel() {
-    setExporting(true);
+    setExporting("excel");
     setError(null);
     try {
       const blob = await api.exportDataReviewGrid(review.request, csrfToken);
-      downloadAgentBlob(blob, `${safeAgentFilename(review.cube)}-data-review.xlsx`);
+      downloadAgentBlob(blob, `${safeAgentFilename(review.saved_view?.name || review.cube)}-data.xlsx`);
     } catch (reason) {
       setError(errorMessage(reason));
     } finally {
-      setExporting(false);
+      setExporting(null);
+    }
+  }
+
+  async function exportCsv() {
+    setExporting("csv");
+    setError(null);
+    try {
+      const blob = await api.exportDataReviewGridCsv(review.request, csrfToken);
+      downloadAgentBlob(blob, `${safeAgentFilename(review.saved_view?.name || review.cube)}-data.csv`);
+    } catch (reason) {
+      setError(errorMessage(reason));
+    } finally {
+      setExporting(null);
     }
   }
 
@@ -773,16 +847,16 @@ function AgentGridReviewCard({ review, csrfToken, onPrompt }: {
     window.location.hash = "#data-review";
   }
 
-  return <article className="assistant-data-review" aria-label="Live Planning data review">
-    <header><div><span className="eyebrow">Live Oracle data</span><h3>{review.cube} data review</h3><p>The grid below is read-only and uses the exact validated intersection selected in this conversation.</p></div><span className="read-only-badge"><Icon name="check" /> Read-only</span></header>
+  return <article className="assistant-data-review" aria-label="Live Planning Data Explorer grid">
+    <header><div><span className="eyebrow">Live Oracle data</span><h3>{review.saved_view?.title || `${review.cube} data explorer`}</h3><p>{review.saved_view ? <>Saved view <strong>{review.saved_view.name}</strong> reopened its exact layout and retrieved current values from {review.cube}.</> : "The grid below is read-only and uses the exact validated intersection selected in this conversation."}</p></div><span className="read-only-badge"><Icon name="check" /> Read-only</span></header>
     <div className="assistant-data-review__pov">{review.grid.pov.map(([dimension, member]) => <span key={dimension}><small>{dimension}</small><strong>{member}</strong></span>)}</div>
     <div className="assistant-data-review__metrics"><span><small>Rows</small><strong>{review.row_count.toLocaleString()}</strong></span><span><small>Columns</small><strong>{review.column_count.toLocaleString()}</strong></span><span><small>Cells</small><strong>{review.cell_count.toLocaleString()}</strong></span><span className={review.missing_cell_count ? "has-warning" : ""}><small>Missing</small><strong>{review.missing_cell_count.toLocaleString()}</strong></span></div>
     <div className="assistant-data-review__table"><table><thead><tr>{review.grid.row_dimensions.map((dimension) => <th key={dimension}>{dimension}</th>)}{review.grid.columns.map((column, index) => <th key={index}>{column.join(" · ") || `Column ${index + 1}`}</th>)}</tr></thead><tbody>{rows.map((row, rowIndex) => <tr key={`${row.headers.join("|")}-${rowIndex}`}>{row.headers.map((header, index) => <th key={`${header}-${index}`}>{header}</th>)}{row.data.map((value, index) => <td className={isAgentMissing(value) ? "is-missing" : ""} key={index}>{formatAgentValue(value)}</td>)}</tr>)}</tbody></table></div>
-    {review.truncated && <p className="assistant-data-review__notice"><Icon name="alert" /> The conversation preview is limited to {review.returned_row_count.toLocaleString()} rows. Excel export and the full Data Review workspace use the complete live slice.</p>}
+    {review.truncated && <p className="assistant-data-review__notice"><Icon name="alert" /> The conversation preview is limited to {review.returned_row_count.toLocaleString()} rows. Exports and the full Data Explorer workspace use the complete live slice.</p>}
     {review.grid.rows.length > pageSize && <div className="assistant-data-review__pagination"><button type="button" className="button button--quiet" disabled={safePage === 1} onClick={() => setPage(safePage - 1)}>Previous</button><span>Page {safePage} of {totalPages}</span><button type="button" className="button button--quiet" disabled={safePage === totalPages} onClick={() => setPage(safePage + 1)}>Next</button></div>}
     {error && <div className="assistant-draft__error"><Icon name="alert" />{error}</div>}
-    <div className="assistant-data-review__quick"><span>Continue with this intersection</span><button type="button" onClick={() => onPrompt("Change the previous data review POV to ")}>Change POV</button><button type="button" onClick={() => onPrompt("Add the following members to the previous data review: ")}>Add members</button><button type="button" onClick={() => onPrompt("Compare the previous data review with ")}>Compare this</button></div>
-    <footer><button type="button" className="button button--quiet" onClick={openWorkspace}>Open Data Review <Icon name="arrow" /></button><button type="button" className="button button--primary" disabled={exporting} onClick={() => void exportExcel()}>{exporting ? <><span className="spinner" /> Creating Excel...</> : <><Icon name="reports" /> Export Excel</>}</button></footer>
+    <div className="assistant-data-review__quick"><span>Continue with this intersection</span><button type="button" onClick={() => onPrompt("Change the previous Data Explorer POV to ")}>Change POV</button><button type="button" onClick={() => onPrompt("Add the following members to the previous Data Explorer grid: ")}>Add members</button><button type="button" onClick={() => onPrompt("Compare the previous Data Explorer grid with ")}>Compare this</button></div>
+    <footer><button type="button" className="button button--quiet" onClick={openWorkspace}>Open Data Explorer <Icon name="arrow" /></button><button type="button" className="button button--secondary" disabled={Boolean(exporting)} onClick={() => void exportCsv()}>{exporting === "csv" ? <><span className="spinner" /> Creating CSV...</> : <>Export CSV</>}</button><button type="button" className="button button--primary" disabled={Boolean(exporting)} onClick={() => void exportExcel()}>{exporting === "excel" ? <><span className="spinner" /> Creating Excel...</> : <><Icon name="reports" /> Export Excel</>}</button></footer>
   </article>;
 }
 

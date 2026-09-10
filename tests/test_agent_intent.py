@@ -12,6 +12,8 @@ ALL_TOOLS = frozenset(
         "list_planning_cubes",
         "list_cube_dimensions",
         "search_dimension_members",
+        "list_data_explorer_views",
+        "review_saved_data_view",
         "review_data_slice",
         "compare_data_slices",
         "list_operation_artifacts",
@@ -91,6 +93,18 @@ def test_data_review_intent_exposes_only_read_only_slice_tools() -> None:
     assert "search_dimension_members" in decision.tool_names
     assert "review_data_slice" in decision.tool_names
     assert "compare_data_slices" in decision.tool_names
+    assert "prepare_operation_action" not in decision.tool_names
+
+
+def test_saved_data_explorer_view_intent_exposes_saved_view_tools() -> None:
+    decision = AgentIntentRouter.route(
+        "Show my saved Data Explorer views.",
+        ALL_TOOLS,
+    )
+
+    assert decision.intent is AgentIntent.DATA_REVIEW
+    assert "list_data_explorer_views" in decision.tool_names
+    assert "review_saved_data_view" in decision.tool_names
     assert "prepare_operation_action" not in decision.tool_names
 
 

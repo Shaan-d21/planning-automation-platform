@@ -27,6 +27,8 @@ class ReportCatalogItem:
     title: str
     cube: str
     default_pov: tuple[tuple[str, str], ...]
+    rows: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    columns: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,15 +83,7 @@ class ReportWorkspaceService:
         definitions = ReportCatalogService().load(
             self._settings.report_catalog_file
         )
-        return tuple(
-            ReportCatalogItem(
-                name=item.name,
-                title=item.title,
-                cube=item.cube,
-                default_pov=item.pov,
-            )
-            for item in definitions
-        )
+        return tuple(self._catalog_item(item) for item in definitions)
 
     def register(
         self,
@@ -105,12 +99,16 @@ class ReportWorkspaceService:
             registered.name,
             registered.cube,
         )
-        return ReportCatalogItem(
-            name=registered.name,
-            title=registered.title,
-            cube=registered.cube,
-            default_pov=registered.pov,
+        return self._catalog_item(registered)
+
+    def delete(self, name: str) -> ReportCatalogItem:
+        """Delete one reusable data view from the shared catalog."""
+        deleted = ReportCatalogService().delete(
+            self._settings.report_catalog_file,
+            name,
         )
+        self._logger.info("Saved data view deleted: name='%s'.", deleted.name)
+        return self._catalog_item(deleted)
 
     def preflight(self, form_name: str) -> ReportPreflight:
         """Retrieve the live or fallback report layout without generating."""
@@ -248,6 +246,31 @@ class ReportWorkspaceService:
             client,
             catalog_file=self._settings.report_catalog_file,
             logger=self._logger.getChild("report_service"),
+        )
+
+    @staticmethod
+    def _catalog_item(definition: DataSliceReportDefinition) -> ReportCatalogItem:
+        """Expose the rectangular layout used by the Data Explorer UI."""
+        if len(definition.rows) != 1 or len(definition.columns) != 1:
+            # Legacy report definitions may contain disjoint segments. They
+            # remain valid for workbook generation, but cannot be represented
+            # as one editable Data Explorer Cartesian slice without changing
+            # their meaning.
+            return ReportCatalogItem(
+                name=definition.name,
+                title=definition.title,
+                cube=definition.cube,
+                default_pov=definition.pov,
+            )
+        row_segment = definition.rows[0]
+        column_segment = definition.columns[0]
+        return ReportCatalogItem(
+            name=definition.name,
+            title=definition.title,
+            cube=definition.cube,
+            default_pov=definition.pov,
+            rows=tuple(zip(row_segment.dimensions, row_segment.members)),
+            columns=tuple(zip(column_segment.dimensions, column_segment.members)),
         )
 
     def _output_path(

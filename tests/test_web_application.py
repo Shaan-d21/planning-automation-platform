@@ -503,6 +503,15 @@ def test_v1_bootstrap_returns_effective_user_and_navigation(
     assert "process-designer" not in {
         item["code"] for item in payload["navigation"]
     }
+    assert "reports" not in {
+        item["code"] for item in payload["navigation"]
+    }
+    data_explorer_navigation = next(
+        item
+        for item in payload["navigation"]
+        if item["code"] == "data-review"
+    )
+    assert data_explorer_navigation["label"] == "Data Explorer"
     operations_navigation = next(
         item for item in payload["navigation"] if item["code"] == "operations"
     )
@@ -1778,6 +1787,8 @@ def test_report_catalog_preflight_and_generation_start(
             title="Revenue Forecast",
             cube="Plan1",
             default_pov=(("Year", "FY25"),),
+            rows=(("Account", ("Revenue",)),),
+            columns=(("Period", ("Jan", "Feb")),),
         ),
     )
     app.state.report_workspace.preflight.return_value = ReportPreflight(
@@ -1796,6 +1807,14 @@ def test_report_catalog_preflight_and_generation_start(
         title="Margin Analysis",
         cube="Plan1",
         default_pov=(("Year", "FY26"),),
+        rows=(("Account", ("Gross Profit",)),),
+        columns=(("Period", ("Jan", "Feb")),),
+    )
+    app.state.report_workspace.delete.return_value = ReportCatalogItem(
+        name="Margin Report",
+        title="Margin Analysis",
+        cube="Plan1",
+        default_pov=(("Year", "FY26"),),
     )
     app.state.operation_manager = Mock()
     app.state.operation_manager.submit.return_value = SimpleNamespace(
@@ -1805,6 +1824,7 @@ def test_report_catalog_preflight_and_generation_start(
     _login(client)
 
     catalog = client.get("/api/reports/catalog")
+    saved_views = client.get("/api/v1/data-explorer/views")
     registered = client.post(
         "/api/reports/catalog",
         json={
@@ -1826,6 +1846,18 @@ def test_report_catalog_preflight_and_generation_start(
             ],
         },
     )
+    saved_view = client.post(
+        "/api/v1/data-explorer/views",
+        json={
+            "name": "Margin Report",
+            "title": "Margin Analysis",
+            "cube": "Plan1",
+            "pov": {"Year": "FY26"},
+            "columns": [{"dimension": "Period", "members": ["Jan", "Feb"]}],
+            "rows": [{"dimension": "Account", "members": ["Gross Profit"]}],
+        },
+    )
+    deleted_view = client.delete("/api/v1/data-explorer/views/Margin%20Report")
     preflight = client.post(
         "/api/reports/preflight",
         json={"form_name": "Revenue Report"},
@@ -1844,8 +1876,16 @@ def test_report_catalog_preflight_and_generation_start(
 
     assert catalog.status_code == 200
     assert catalog.json()["reports"][0]["cube"] == "Plan1"
+    assert saved_views.status_code == 200
+    assert saved_views.json()["views"][0]["rows"][0] == [
+        "Account",
+        ["Revenue"],
+    ]
     assert registered.status_code == 201
     assert registered.json()["report"]["name"] == "Margin Report"
+    assert saved_view.status_code == 201
+    assert saved_view.json()["view"]["name"] == "Margin Report"
+    assert deleted_view.status_code == 200
     definition = app.state.report_workspace.register.call_args.args[0]
     assert definition.columns[0].dimensions == ("Period",)
     assert definition.columns[0].members == (("Jan", "Feb"),)
@@ -3292,6 +3332,15 @@ def test_data_review_page_and_read_only_apis(
             "rows": [{"dimension": "Account", "members": ["Revenue"]}],
         },
     )
+    csv_export = client.post(
+        "/api/v1/data-review/grid/export/csv",
+        json={
+            "cube": "Plan1",
+            "pov": {"Scenario": "Forecast"},
+            "columns": [{"dimension": "Period", "members": ["Jan"]}],
+            "rows": [{"dimension": "Account", "members": ["Revenue"]}],
+        },
+    )
     validation_payload = {
         "slice": {
             "cube": "Plan1",
@@ -3373,6 +3422,12 @@ def test_data_review_page_and_read_only_apis(
     assert reviewed.json()["review"]["cell_count"] == 1
     assert grid_export.status_code == 200
     assert grid_export.content.startswith(b"PK")
+    assert csv_export.status_code == 200
+    assert csv_export.content.decode("utf-8-sig").splitlines() == [
+        "Scenario,Account,Period,Value",
+        "Forecast,Revenue,Jan,100",
+    ]
+    assert csv_export.headers["cache-control"] == "no-store"
     assert validated.json()["validation"]["result"]["status"] == "FAIL"
     assert validation_export.status_code == 200
     assert validation_export.content.startswith(b"PK")

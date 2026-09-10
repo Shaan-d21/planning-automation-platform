@@ -266,7 +266,7 @@ class AgentActionPreflightService:
                 checks.append(
                     self._unavailable(
                         "artifact",
-                        "Registered report",
+                        "Saved Data Explorer view",
                         str(exc),
                     )
                 )
@@ -274,7 +274,7 @@ class AgentActionPreflightService:
                 checks.append(
                     self._check(
                         "artifact",
-                        "Planning report or form",
+                        "Saved Data Explorer view",
                         "PASS",
                         (
                             f"'{report.form_name}' is available for cube "

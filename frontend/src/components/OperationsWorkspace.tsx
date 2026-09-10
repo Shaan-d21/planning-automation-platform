@@ -12,7 +12,6 @@ import { MetadataImportRunner } from "./MetadataImportRunner";
 import { CubeRefreshRunner } from "./CubeRefreshRunner";
 import { SubstitutionVariableRunner } from "./SubstitutionVariableRunner";
 import { UserVariableRunner } from "./UserVariableRunner";
-import { ReportGenerationRunner } from "./ReportGenerationRunner";
 
 interface OperationsWorkspaceProps {
   data: OperationsResponse;
@@ -31,7 +30,7 @@ export function OperationsWorkspace({ data, csrfToken, canManageCatalog, current
   const [catalogError, setCatalogError] = useState<string | null>(null);
   const [catalogNotice, setCatalogNotice] = useState<string | null>(null);
   const [selectedOperation, setSelectedOperation] = useState<OperationSummary | null>(
-    () => operationFromLocation(data.operations)
+    () => operationFromLocation(data.operations.filter((item) => item.code !== "report-generation"))
   );
   const planningTaskId = planningTaskIdFromLocation(selectedOperation?.code);
   const agentDraftId = agentDraftIdFromLocation(selectedOperation?.code);
@@ -40,12 +39,13 @@ export function OperationsWorkspace({ data, csrfToken, canManageCatalog, current
     setSelectedOperation(null);
   };
   const categories = useMemo(
-    () => [...new Set(data.operations.map((operation) => operation.category))].sort(),
+    () => [...new Set(data.operations.filter((item) => item.code !== "report-generation").map((operation) => operation.category))].sort(),
     [data.operations]
   );
   const operations = useMemo(() => {
     const needle = query.trim().toLowerCase();
     return data.operations.filter((operation) => {
+      if (operation.code === "report-generation") return false;
       const matchesQuery = !needle || [
         operation.display_name,
         operation.description,
@@ -113,9 +113,6 @@ export function OperationsWorkspace({ data, csrfToken, canManageCatalog, current
     if (selectedOperation.code === "user-variables") {
       return <UserVariableRunner operation={selectedOperation} csrfToken={csrfToken} currentUsername={currentUsername} canManageUsers={canManageUsers} planningTaskId={planningTaskId} onBack={closeRunner} />;
     }
-    if (selectedOperation.code === "report-generation") {
-      return <ReportGenerationRunner operation={selectedOperation} csrfToken={csrfToken} onBack={closeRunner} />;
-    }
     return <OperationRunner operation={selectedOperation} csrfToken={csrfToken} canManageCatalog={canManageCatalog} planningTaskId={planningTaskId} agentDraftId={agentDraftId} onBack={closeRunner} />;
   }
 
@@ -126,7 +123,7 @@ export function OperationsWorkspace({ data, csrfToken, canManageCatalog, current
         <h1>Operations</h1>
         <p>Run one Oracle EPM service independently when a complete Planning cycle or Pipeline is not required.</p>
       </div>
-      <span className="operations-count"><Icon name="automation" /> {data.operations.length} services available</span>
+      <span className="operations-count"><Icon name="automation" /> {data.operations.filter((item) => item.code !== "report-generation").length} services available</span>
     </header>
 
     <aside className="operations-guidance">
@@ -202,7 +199,7 @@ function CatalogHealth({ catalog, loading, syncing, canManage, error, notice, on
 }
 
 function OperationCard({ operation, onOpen }: { operation: OperationSummary; onOpen: (operation: OperationSummary) => void }) {
-  const hasModernRunner = ["business-rules", "data-maps", "data-integrations", "pipelines", "data-import", "metadata-import", "cube-refresh", "substitution-variables", "user-variables", "report-generation"].includes(operation.code);
+  const hasModernRunner = ["business-rules", "data-maps", "data-integrations", "pipelines", "data-import", "metadata-import", "cube-refresh", "substitution-variables", "user-variables"].includes(operation.code);
   return <article className="service-card">
     <header>
       <span className="service-card__icon"><Icon name={operationIcon(operation.code)} /></span>

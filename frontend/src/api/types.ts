@@ -973,6 +973,8 @@ export interface ReportCatalogItem {
   title: string;
   cube: string;
   default_pov: [string, string][];
+  rows: [string, string[]][];
+  columns: [string, string[]][];
 }
 
 export interface ReportCatalogResponse {
@@ -1015,6 +1017,17 @@ export interface ReportRegistrationResponse {
   status: string;
   message: string;
   report: ReportCatalogItem;
+}
+
+export interface DataExplorerViewsResponse {
+  status: string;
+  views: ReportCatalogItem[];
+}
+
+export interface DataExplorerViewResponse {
+  status: string;
+  message: string;
+  view: ReportCatalogItem;
 }
 
 export interface ReportRunInput {
@@ -1508,7 +1521,7 @@ export interface AgentMessagesResponse {
 }
 
 export interface AgentDataReviewContext {
-  tool: "review_data_slice" | "compare_data_slices" | string;
+  tool: "review_data_slice" | "review_saved_data_view" | "compare_data_slices" | string;
   selection: Record<string, unknown>;
 }
 

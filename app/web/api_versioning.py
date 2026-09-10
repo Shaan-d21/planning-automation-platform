@@ -24,6 +24,7 @@ class ApiVersioningMiddleware:
 
     _MIGRATED_ROOTS = (
         "agent",
+        "data-explorer",
         "data-review",
         "health",
         "reports",

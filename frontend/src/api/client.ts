@@ -69,6 +69,8 @@ import type {
   DataReviewValidationResponse,
   DataReviewComparisonInput,
   DataReviewComparisonResponse,
+  DataExplorerViewsResponse,
+  DataExplorerViewResponse,
   DataReviewTaskContextResponse,
   PlanningValidationEvidence,
   AgentStatusResponse,
@@ -136,10 +138,11 @@ async function request<T>(
 async function requestBlob(
   path: string,
   payload: object,
-  csrfToken: string
+  csrfToken: string,
+  accept = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 ): Promise<Blob> {
   const headers = new Headers({
-    "Accept": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "Accept": accept,
     "Content-Type": "application/json",
     "X-CSRF-Token": csrfToken
   });
@@ -154,7 +157,7 @@ async function requestBlob(
       | { detail?: string; details?: string; message?: string }
       | null;
     throw new ApiError(
-      details?.detail ?? details?.details ?? details?.message ?? "The Excel export could not be created.",
+      details?.detail ?? details?.details ?? details?.message ?? "The export could not be created.",
       response.status,
       response.headers.get("X-Request-ID")
     );
@@ -402,6 +405,22 @@ export const api = {
     ),
   exportDataReviewGrid: (payload: DataReviewSliceInput, csrfToken: string) =>
     requestBlob("/api/data-review/grid/export", payload, csrfToken),
+  exportDataReviewGridCsv: (payload: DataReviewSliceInput, csrfToken: string) =>
+    requestBlob("/api/data-review/grid/export/csv", payload, csrfToken, "text/csv"),
+  dataExplorerViews: () =>
+    request<DataExplorerViewsResponse>("/api/data-explorer/views"),
+  saveDataExplorerView: (payload: ReportRegistrationInput, csrfToken: string) =>
+    request<DataExplorerViewResponse>(
+      "/api/data-explorer/views",
+      { method: "POST", body: JSON.stringify(payload) },
+      csrfToken
+    ),
+  deleteDataExplorerView: (name: string, csrfToken: string) =>
+    request<{ status: string; message: string }>(
+      `/api/data-explorer/views/${encodeURIComponent(name)}`,
+      { method: "DELETE" },
+      csrfToken
+    ),
   validateDataReview: (payload: DataReviewValidationInput, csrfToken: string) =>
     request<DataReviewValidationResponse>(
       "/api/data-review/validate",

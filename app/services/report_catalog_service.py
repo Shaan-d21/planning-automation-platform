@@ -198,6 +198,36 @@ class ReportCatalogService:
             if temporary_path is not None and temporary_path.exists():
                 temporary_path.unlink()
 
+    def delete(
+        self,
+        catalog_file: Path,
+        name: str,
+    ) -> DataSliceReportDefinition:
+        """Remove one definition using the same atomic catalog write."""
+        normalized = str(name).strip().casefold()
+        if not normalized:
+            raise ConfigurationError("Saved view name is required.")
+        document = self._read_document(catalog_file)
+        definitions = self._definitions(document)
+        existing = next(
+            (item for item in definitions if item.name.casefold() == normalized),
+            None,
+        )
+        if existing is None:
+            raise ConfigurationError(f"Saved view '{name}' was not found.")
+        raw_reports = document.get("reports")
+        assert isinstance(raw_reports, list)
+        document["reports"] = [
+            item
+            for item in raw_reports
+            if not (
+                isinstance(item, Mapping)
+                and str(item.get("name", "")).strip().casefold() == normalized
+            )
+        ]
+        self._write_document(catalog_file, document)
+        return existing
+
     def find(
         self,
         catalog_file: Path,

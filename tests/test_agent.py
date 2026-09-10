@@ -38,6 +38,7 @@ from app.application.operations import (
     PipelineStagePreview,
     PipelineVariablePreview,
 )
+from app.application.reports import ReportCatalogItem
 from app.application.substitution_variables import SubstitutionVariableCatalog
 from app.config.settings import Settings
 from app.models.access_control import (
@@ -209,7 +210,6 @@ class _SliceDataReview:
             DimensionInfo("Account", "Account"),
             DimensionInfo("Period", "Period"),
         )
-
     def search_members(self, cube, dimension, *, query, limit):
         assert (cube, dimension, query, limit) == (
             "Plan1",
@@ -277,6 +277,26 @@ class _SliceDataReview:
                     ),
                 ),
                 tolerance=0,
+            ),
+        )
+
+
+class _SavedViewReportWorkspace:
+    def catalog(self):
+        return (
+            ReportCatalogItem(
+                name="revenue-forecast",
+                title="Revenue Forecast",
+                cube="Plan1",
+                default_pov=(("Scenario", "Forecast"),),
+                rows=(("Account", ("Revenue",)),),
+                columns=(("Period", ("Jan",)),),
+            ),
+            ReportCatalogItem(
+                name="legacy-layout",
+                title="Legacy layout",
+                cube="Plan1",
+                default_pov=(),
             ),
         )
 
@@ -1065,6 +1085,63 @@ def test_agent_repository_restores_latest_validated_review_selection(
     assert activity.arguments == selection
 
 
+def test_agent_service_restores_saved_data_explorer_view_as_exact_context(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    AccessControlService(settings.workflow_database_file).bootstrap_administrator(
+        username="admin",
+        display_name="Administrator",
+        email=None,
+        password="Strong password 123!",
+    )
+    repository = SQLiteAgentRepository(settings.workflow_database_file)
+    conversation = repository.create_conversation(
+        user_id=1,
+        provider="gemini",
+        model="test-model",
+    )
+    repository.record_tool_activity(
+        conversation_id=conversation.conversation_id,
+        user_id=1,
+        activities=(
+            AgentToolActivity(
+                name="review_saved_data_view",
+                arguments={"name": "revenue-forecast"},
+                status="SUCCESS",
+                summary="Saved view loaded.",
+            ),
+        ),
+    )
+    gateway = AgentCapabilityGateway(
+        settings,
+        control_center=_ControlCenter(),
+        data_review=_SliceDataReview(),
+        report_workspace=_SavedViewReportWorkspace(),
+    )
+    service = AgentApplicationService(
+        settings,
+        gateway=gateway,
+        repository=repository,
+        provider_factory=_FakeProvider,
+    )
+
+    context = service.get_data_review_context(
+        conversation.conversation_id,
+        _user(Permission.DATA_REVIEW),
+    )
+
+    assert context == {
+        "tool": "review_saved_data_view",
+        "selection": {
+            "cube": "Plan1",
+            "pov": {"Scenario": "Forecast"},
+            "rows": [{"dimension": "Account", "members": ["Revenue"]}],
+            "columns": [{"dimension": "Period", "members": ["Jan"]}],
+        },
+    }
+
+
 def test_agent_service_preserves_null_guided_input_as_cancel(
     tmp_path: Path,
 ) -> None:
@@ -1228,6 +1305,48 @@ def test_agent_data_review_tools_query_live_slice_and_comparison(
     assert reviewed["grid"]["rows"][0]["data"] == (100,)
     assert reviewed["truncated"] is False
     assert compared["result"]["matched_cells"] == 0
+
+
+def test_agent_data_explorer_saved_view_uses_server_side_layout(
+    tmp_path: Path,
+) -> None:
+    gateway = AgentCapabilityGateway(
+        _settings(tmp_path),
+        control_center=_ControlCenter(),
+        data_review=_SliceDataReview(),
+        report_workspace=_SavedViewReportWorkspace(),
+    )
+
+    catalog = gateway.execute(
+        AgentToolCall(name="list_data_explorer_views", arguments={})
+    )
+    reviewed = gateway.execute(
+        AgentToolCall(
+            name="review_saved_data_view",
+            arguments={"name": "Revenue-Forecast"},
+        )
+    )
+
+    assert catalog["total_count"] == 1
+    assert catalog["views"][0]["name"] == "revenue-forecast"
+    assert reviewed["saved_view"] == {
+        "name": "revenue-forecast",
+        "title": "Revenue Forecast",
+    }
+    assert reviewed["request"] == {
+        "cube": "Plan1",
+        "pov": {"Scenario": "Forecast"},
+        "rows": [{"dimension": "Account", "members": ["Revenue"]}],
+        "columns": [{"dimension": "Period", "members": ["Jan"]}],
+    }
+
+    with pytest.raises(AgentCapabilityError, match="was not found"):
+        gateway.execute(
+            AgentToolCall(
+                name="review_saved_data_view",
+                arguments={"name": "missing"},
+            )
+        )
 
 
 def test_agent_service_persists_action_draft_for_conversation(
