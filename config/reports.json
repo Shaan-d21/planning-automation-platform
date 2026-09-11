@@ -89,6 +89,49 @@
           ]
         }
       ]
+    },
+    {
+      "name": "Product_Revenue_Drivers",
+      "title": "Product Revenue Drivers",
+      "cube": "OEP_FS",
+      "pov": {
+        "Currency": "USD",
+        "Entity": "US Operations",
+        "Plan Element": "No Plan Element",
+        "Product": "Beverages",
+        "Scenario": "Plan",
+        "Services": "No Services",
+        "Version": "Working",
+        "Years": "FY26"
+      },
+      "columns": [
+        {
+          "dimensions": [
+            "Period"
+          ],
+          "members": [
+            [
+              "Sep",
+              "Oct",
+              "Nov",
+              "Dec"
+            ]
+          ]
+        }
+      ],
+      "rows": [
+        {
+          "dimensions": [
+            "Account"
+          ],
+          "members": [
+            [
+              "OFS_Avg Selling Price",
+              "OFS_Volume"
+            ]
+          ]
+        }
+      ]
     }
   ]
 }
