@@ -132,6 +132,47 @@
           ]
         }
       ]
+    },
+    {
+      "name": "Product Revenue Plan",
+      "title": "Product Revenue Plan",
+      "cube": "Plan1",
+      "pov": {
+        "HSP_View": "BaseData",
+        "Scenario": "Plan",
+        "Version": "Working",
+        "Product": "Beverages",
+        "Entity": "US Operations",
+        "Year": "FY22"
+      },
+      "columns": [
+        {
+          "dimensions": [
+            "Period"
+          ],
+          "members": [
+            [
+              "Jan",
+              "Feb",
+              "Mar"
+            ]
+          ]
+        }
+      ],
+      "rows": [
+        {
+          "dimensions": [
+            "Account"
+          ],
+          "members": [
+            [
+              "Units",
+              "ASP",
+              "Product Sales"
+            ]
+          ]
+        }
+      ]
     }
   ]
 }
