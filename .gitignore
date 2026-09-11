@@ -1,5 +1,7 @@
 # Credentials and local configuration
 .env
+.env.*
+!.env.example
 *.epw
 
 # Python
@@ -8,12 +10,21 @@ __pycache__/
 *.pyo
 .pytest_cache/
 .pytest*/
+.test-runtime*/
 .test-deps/
 .test-temp*/
 .test-tmp*/
+.codex-test*/
 .codex_test_tmp/
+tests/.tmp-*/
 .coverage
+.coverage.*
+coverage.xml
+junit*.xml
 htmlcov/
+.tox/
+.nox/
+*.egg-info/
 .venv/
 venv/
 
@@ -27,13 +38,17 @@ Thumbs.db
 logs/
 *.log
 var/
+*.sqlite
 *.sqlite3
+*.db
 reports/
 
 # React frontend
 frontend/node_modules/
 frontend/dist/
 frontend/coverage/
+test-results/
+playwright-report/
 .pnpm-store/
 *.tsbuildinfo
 
@@ -42,3 +57,10 @@ qa/
 *.inspect.ndjson
 
 outputs/
+.agents/
+.codex/
+
+# Local project documentation and generated document artifacts
+docs/
+*.docx
+*.pdf
