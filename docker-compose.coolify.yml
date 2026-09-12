@@ -1,0 +1,173 @@
+name: bisp-epm-automation
+
+x-app-image: &app-image
+  image: bisp-epm-automation:${APP_IMAGE_TAG:-stage}
+  build:
+    context: .
+    dockerfile: Dockerfile
+
+x-app-environment: &app-environment
+  EPM_BASE_URL: ${EPM_BASE_URL:?Set EPM_BASE_URL in Coolify}
+  EPM_INTEGRATION_USERNAME: ${EPM_INTEGRATION_USERNAME:?Set EPM_INTEGRATION_USERNAME in Coolify}
+  EPM_INTEGRATION_PASSWORD: ${EPM_INTEGRATION_PASSWORD:?Set EPM_INTEGRATION_PASSWORD in Coolify}
+  APPLICATION_NAME: ${APPLICATION_NAME:?Set the exact Oracle Planning application name in Coolify}
+  EPM_DEPLOYMENT_MODE: ${EPM_DEPLOYMENT_MODE:-auto}
+  EPM_REQUEST_TIMEOUT: ${EPM_REQUEST_TIMEOUT:-30}
+  EPM_VERIFY_SSL: ${EPM_VERIFY_SSL:-true}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  DEFAULT_METADATA_IMPORT_MODE: ${DEFAULT_METADATA_IMPORT_MODE:-job_definition}
+  DEFAULT_POLL_INTERVAL: ${DEFAULT_POLL_INTERVAL:-5}
+  SCHEDULE_POLL_INTERVAL: ${SCHEDULE_POLL_INTERVAL:-15}
+  DEFAULT_JOB_TIMEOUT: ${DEFAULT_JOB_TIMEOUT:-1800}
+  EXECUTION_WORKER_POLL_INTERVAL: ${EXECUTION_WORKER_POLL_INTERVAL:-2}
+  EXECUTION_LEASE_SECONDS: ${EXECUTION_LEASE_SECONDS:-120}
+  DEFAULT_METADATA_ENGINE: rest
+  DEFAULT_DATA_ENGINE: rest
+  DEFAULT_DATA_INTEGRATION_ENGINE: rest
+  DEFAULT_BUSINESS_RULE_ENGINE: rest
+  DEFAULT_PIPELINE_ENGINE: rest
+  DEFAULT_DATA_MAP_ENGINE: rest
+  DEFAULT_DATA_INTEGRATION_NAME: ${DEFAULT_DATA_INTEGRATION_NAME:-}
+  DEFAULT_PIPELINE_CODE: ${DEFAULT_PIPELINE_CODE:-}
+  DEFAULT_DATA_MAP_NAME: ${DEFAULT_DATA_MAP_NAME:-}
+  MONTHLY_FORECAST_RUN_DATA_MAP: ${MONTHLY_FORECAST_RUN_DATA_MAP:-true}
+  MONTHLY_FORECAST_CLEAR_TARGET: ${MONTHLY_FORECAST_CLEAR_TARGET:-false}
+  PLANNING_CYCLE_CATALOG_FILE: config/planning_cycles.json
+  PLANNING_PROCESS_CATALOG_FILE: config/planning_processes.json
+  REPORT_CATALOG_FILE: config/reports.json
+  PIPELINE_CATALOG_FILE: config/pipelines.json
+  DATA_INTEGRATION_CATALOG_FILE: config/data_integrations.json
+  DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in Coolify}
+  RUNTIME_DATA_DIR: /app/var
+  REPORT_OUTPUT_DIR: /app/reports
+  WEB_SESSION_SECRET: ${WEB_SESSION_SECRET:?Set WEB_SESSION_SECRET in Coolify}
+  WEB_SECURE_COOKIES: "true"
+  WEB_FRONTEND_URL: ""
+  IDENTITY_PROVIDER: ${IDENTITY_PROVIDER:-local}
+  ORACLE_PASSWORD_LOGIN_ENABLED: ${ORACLE_PASSWORD_LOGIN_ENABLED:-true}
+  AGENT_PROVIDER: ${AGENT_PROVIDER:-gemini}
+  AGENT_ORCHESTRATOR: langgraph
+  AGENT_MODEL: ${AGENT_MODEL:-gemini-3.5-flash-lite}
+  GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+  GROQ_API_KEY: ${GROQ_API_KEY:-}
+  GROQ_MAX_INPUT_TOKENS: ${GROQ_MAX_INPUT_TOKENS:-2500}
+  GROQ_MAX_COMPLETION_TOKENS: ${GROQ_MAX_COMPLETION_TOKENS:-384}
+  AGENT_MAX_TOOL_ROUNDS: ${AGENT_MAX_TOOL_ROUNDS:-4}
+  AGENT_HISTORY_MESSAGES: ${AGENT_HISTORY_MESSAGES:-20}
+  LANGGRAPH_STRICT_MSGPACK: ${LANGGRAPH_STRICT_MSGPACK:-true}
+  VALIDATION_SOURCE_FORM: ${VALIDATION_SOURCE_FORM:-}
+  VALIDATION_TARGET_FORM: ${VALIDATION_TARGET_FORM:-}
+  VALIDATION_TOLERANCE: ${VALIDATION_TOLERANCE:-0}
+  DEFAULT_DATA_INTEGRATION_IMPORT_MODE: ${DEFAULT_DATA_INTEGRATION_IMPORT_MODE:-Replace}
+  DEFAULT_DATA_INTEGRATION_EXPORT_MODE: ${DEFAULT_DATA_INTEGRATION_EXPORT_MODE:-Merge}
+  EMAIL_NOTIFICATIONS_ENABLED: ${EMAIL_NOTIFICATIONS_ENABLED:-false}
+  EMAIL_PROVIDER: ${EMAIL_PROVIDER:-smtp}
+  EMAIL_SMTP_HOST: ${EMAIL_SMTP_HOST:-}
+  EMAIL_SMTP_PORT: ${EMAIL_SMTP_PORT:-587}
+  EMAIL_SMTP_USERNAME: ${EMAIL_SMTP_USERNAME:-}
+  EMAIL_SMTP_PASSWORD: ${EMAIL_SMTP_PASSWORD:-}
+  EMAIL_FROM: ${EMAIL_FROM:-}
+  EMAIL_TO: ${EMAIL_TO:-}
+  EMAIL_USE_TLS: ${EMAIL_USE_TLS:-true}
+  EMAIL_USE_SSL: ${EMAIL_USE_SSL:-false}
+  EMAIL_SMTP_TIMEOUT: ${EMAIL_SMTP_TIMEOUT:-30}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: epm_automation
+      POSTGRES_USER: epm_automation
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in Coolify}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U epm_automation -d epm_automation"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    stop_grace_period: 60s
+
+  migrate:
+    <<: *app-image
+    restart: "no"
+    healthcheck:
+      disable: true
+    environment:
+      <<: *app-environment
+      EPM_EXECUTION_RUNTIME: web
+    command:
+      - /bin/sh
+      - -ec
+      - >-
+        python -m alembic upgrade head &&
+        python -m alembic current --check-heads &&
+        python -m app.agent.checkpoint_setup
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  web:
+    <<: *app-image
+    restart: unless-stopped
+    init: true
+    environment:
+      <<: *app-environment
+      EPM_EXECUTION_RUNTIME: web
+    command:
+      - python
+      - -m
+      - uvicorn
+      - web_main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --workers
+      - "1"
+    expose:
+      - "8080"
+    volumes:
+      - runtime_data:/app/var
+      - report_data:/app/reports
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8080/health/ready', timeout=4).read()
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    stop_grace_period: 60s
+
+  worker:
+    <<: *app-image
+    restart: unless-stopped
+    init: true
+    healthcheck:
+      disable: true
+    environment:
+      <<: *app-environment
+      EPM_EXECUTION_RUNTIME: worker
+    command: ["python", "worker.py"]
+    volumes:
+      - runtime_data:/app/var
+      - report_data:/app/reports
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    stop_grace_period: 90s
+
+volumes:
+  postgres_data:
+  runtime_data:
+  report_data:
