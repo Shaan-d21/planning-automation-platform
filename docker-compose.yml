@@ -1,16 +1,16 @@
 name: bisp-epm-automation
 
 x-app-image: &app-image
-  image: bisp-epm-automation:${APP_IMAGE_TAG:-stage}
+  image: ${APP_IMAGE_NAME:-bisp-epm-automation}:${APP_IMAGE_TAG:-stage}
   build:
     context: .
     dockerfile: Dockerfile
 
 x-app-environment: &app-environment
-  EPM_BASE_URL: ${EPM_BASE_URL:?Set EPM_BASE_URL in Coolify}
-  EPM_INTEGRATION_USERNAME: ${EPM_INTEGRATION_USERNAME:?Set EPM_INTEGRATION_USERNAME in Coolify}
-  EPM_INTEGRATION_PASSWORD: ${EPM_INTEGRATION_PASSWORD:?Set EPM_INTEGRATION_PASSWORD in Coolify}
-  APPLICATION_NAME: ${APPLICATION_NAME:?Set the exact Oracle Planning application name in Coolify}
+  EPM_BASE_URL: ${EPM_BASE_URL:?Set EPM_BASE_URL in the Docker environment file}
+  EPM_INTEGRATION_USERNAME: ${EPM_INTEGRATION_USERNAME:?Set EPM_INTEGRATION_USERNAME in the Docker environment file}
+  EPM_INTEGRATION_PASSWORD: ${EPM_INTEGRATION_PASSWORD:?Set EPM_INTEGRATION_PASSWORD in the Docker environment file}
+  APPLICATION_NAME: ${APPLICATION_NAME:?Set the exact Oracle Planning application name in the Docker environment file}
   EPM_DEPLOYMENT_MODE: ${EPM_DEPLOYMENT_MODE:-auto}
   EPM_REQUEST_TIMEOUT: ${EPM_REQUEST_TIMEOUT:-30}
   EPM_VERIFY_SSL: ${EPM_VERIFY_SSL:-true}
@@ -37,11 +37,11 @@ x-app-environment: &app-environment
   REPORT_CATALOG_FILE: config/reports.json
   PIPELINE_CATALOG_FILE: config/pipelines.json
   DATA_INTEGRATION_CATALOG_FILE: config/data_integrations.json
-  DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in Coolify}
+  DATABASE_URL: postgresql+psycopg://epm_automation:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the Docker environment file}@postgres:5432/epm_automation
   RUNTIME_DATA_DIR: /app/var
   REPORT_OUTPUT_DIR: /app/reports
-  WEB_SESSION_SECRET: ${WEB_SESSION_SECRET:?Set WEB_SESSION_SECRET in Coolify}
-  WEB_SECURE_COOKIES: "true"
+  WEB_SESSION_SECRET: ${WEB_SESSION_SECRET:?Set WEB_SESSION_SECRET in the Docker environment file}
+  WEB_SECURE_COOKIES: ${WEB_SECURE_COOKIES:-true}
   WEB_FRONTEND_URL: ""
   IDENTITY_PROVIDER: ${IDENTITY_PROVIDER:-local}
   ORACLE_PASSWORD_LOGIN_ENABLED: ${ORACLE_PASSWORD_LOGIN_ENABLED:-true}
@@ -79,7 +79,7 @@ services:
     environment:
       POSTGRES_DB: epm_automation
       POSTGRES_USER: epm_automation
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in Coolify}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the Docker environment file}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -127,8 +127,8 @@ services:
       - "8080"
       - --workers
       - "1"
-    expose:
-      - "8080"
+    ports:
+      - "${APP_BIND_ADDRESS:-127.0.0.1}:${APP_PORT:-8080}:8080"
     volumes:
       - runtime_data:/app/var
       - report_data:/app/reports
@@ -166,6 +166,20 @@ services:
       migrate:
         condition: service_completed_successfully
     stop_grace_period: 90s
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    profiles: ["tunnel"]
+    restart: unless-stopped
+    command:
+      - tunnel
+      - --no-autoupdate
+      - run
+      - --token
+      - ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    depends_on:
+      web:
+        condition: service_healthy
 
 volumes:
   postgres_data:

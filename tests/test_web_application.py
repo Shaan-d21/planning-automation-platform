@@ -344,6 +344,19 @@ def test_react_entry_is_available_before_authentication(tmp_path: Path) -> None:
     assert '<div id="root"></div>' in response.text
 
 
+def test_react_entry_serves_its_compiled_assets(tmp_path: Path) -> None:
+    app = create_app(_settings(tmp_path), session_secret="test-secret")
+    client = TestClient(app)
+
+    entry = client.get("/app", follow_redirects=False)
+    asset_paths = re.findall(r'(?:src|href)="([^"]*/assets/[^"]+)"', entry.text)
+
+    assert asset_paths
+    for asset_path in asset_paths:
+        response = client.get(asset_path)
+        assert response.status_code == 200
+
+
 def test_legacy_agent_page_redirects_to_react_workspace(
     tmp_path: Path,
 ) -> None:

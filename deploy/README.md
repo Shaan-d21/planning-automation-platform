@@ -1,98 +1,114 @@
-# Hetzner and Coolify staging deployment
+# Direct Docker deployment
 
-This deployment is intentionally scoped to the `stage` branch. It builds the
-React application into the Python image and runs PostgreSQL, migrations, the
-FastAPI web service, and the durable execution worker through one Coolify
-Docker Compose resource.
+This deployment runs the `stage` branch directly through Docker Compose,
+without a provider-specific deployment service. It starts four required containers:
 
-Oracle EPM Automate is not installed in this release. Every default execution
-engine in `docker-compose.coolify.yml` is therefore set to `rest`.
+- `postgres`: the durable application database;
+- `migrate`: a one-time database and LangGraph checkpoint initializer;
+- `web`: the React build served by FastAPI;
+- `worker`: queued operation and schedule execution.
 
-## One-time Coolify setup
+An optional `cloudflared` profile publishes the web service through a remotely
+managed Cloudflare Tunnel. Oracle EPM Automate is not installed; the Compose
+configuration selects REST for every default Oracle operation engine.
 
-1. Create an x86-64 Hetzner server with the Coolify image and complete the
-   Coolify administrator setup.
-2. Point `automation.bispsolutions.com` to the server's public IP address.
-3. In Coolify, create an `EPM Automation` project and a `Stage` environment.
-4. Add a private GitHub repository through a GitHub App or deploy key.
-5. Select the `stage` branch and the Docker Compose build pack.
-6. Set the Compose file to `/docker-compose.coolify.yml`.
-7. Add the values from `deploy/coolify.env.example` in Coolify's environment
-   variable screen. Do not upload or commit a production `.env` file.
-   `APPLICATION_NAME` must contain the exact Planning application name for
-   this stage release so Oracle credential sign-in is enabled immediately.
-8. Assign `https://automation.bispsolutions.com:8080` to the `web` service.
-   The public browser URL remains the normal HTTPS URL without `:8080`.
-9. Keep Coolify's repository auto-deploy disabled. GitHub Actions triggers the
-   deployment only after every release check succeeds.
+## Host choices
 
-## GitHub staging deployment secret
+For Windows 10 or 11, install Docker Desktop with Linux containers and WSL 2.
+For Windows Server, run Ubuntu Server 24.04 in Hyper-V or another supported
+hypervisor, then install Docker Engine in that VM. Docker Desktop is not
+supported on Windows Server.
 
-Copy the authenticated Deploy Webhook URL from the Coolify application and
-create this GitHub Actions repository secret:
-
-```text
-COOLIFY_STAGING_DEPLOY_WEBHOOK
-```
-
-When the secret is absent, stage CI still verifies the complete application
-and container image but deliberately skips deployment.
-
-After adding the secret, either push another reviewed stage change or manually
-run the `Release checks` workflow against the `stage` branch.
+Recommended capacity is 4 CPU cores, 8 GB RAM, and 80 GB of SSD storage.
 
 ## First deployment
 
-1. Confirm the GitHub `Release checks` workflow passes on `stage`.
-2. Open the Coolify deployment and verify that `postgres` becomes healthy and
-   `migrate` exits successfully.
-3. Verify that `web` and `worker` remain running.
-4. Open `/health/live`, followed by `/health/ready`.
-5. On a new database, create the initial local Platform Administrator when
-   the guarded bootstrap screen appears.
-6. Sign in, configure the required Oracle role mappings, synchronize the
-   Oracle catalog, and run one low-risk REST operation.
-7. Create a short test schedule and confirm that the worker claims it once.
+1. Clone the repository and check out `stage`.
+2. Copy `deploy/server.env.example` to `.env.docker` in the repository root.
+3. Replace every placeholder in `.env.docker`. Use a long URL-safe value for
+   `POSTGRES_PASSWORD`; Compose constructs the internal database URL from it.
+4. Keep `APP_BIND_ADDRESS=127.0.0.1` when Cloudflare Tunnel is used. This stops
+   users from bypassing the tunnel by connecting to port 8080 directly.
+5. Validate and start the required services:
 
-## Persistent data and backups
+   ```text
+   docker compose --env-file .env.docker config
+   docker compose --env-file .env.docker up -d --build
+   docker compose --env-file .env.docker ps
+   ```
 
-The Compose resource owns three named volumes: `postgres_data`,
-`runtime_data`, and `report_data`. Configure daily PostgreSQL backups in
-Coolify and copy them to storage outside the Hetzner server. A local backup on
-the same VPS is not sufficient disaster recovery.
+6. Open `http://127.0.0.1:8080/health/ready` on the server. The `migrate`
+   container should finish with exit code 0; `postgres`, `web`, and `worker`
+   should remain running.
+7. On a fresh database, complete the guarded Platform Administrator bootstrap,
+   configure Oracle role mappings, sync the Oracle catalog, and run one
+   low-risk operation.
 
-The API and worker intentionally share the runtime and report volumes. Do not
-scale the web service beyond one replica without first moving those files to
-shared object storage.
-
-## Local Docker test
-
-The local launcher reuses the existing project-root `.env` without copying or
-printing its secrets. It replaces only the database connection with an
-isolated PostgreSQL container and publishes the application on localhost.
-
-Start Docker Desktop, then run from the repository root:
+The Windows development helper remains available:
 
 ```powershell
 .\scripts\docker-local.ps1 start
-```
-
-Open `http://127.0.0.1:8080` after the `web` service reports healthy. Useful
-follow-up commands are:
-
-```powershell
 .\scripts\docker-local.ps1 status
 .\scripts\docker-local.ps1 logs
 .\scripts\docker-local.ps1 stop
 ```
 
-`stop` preserves the PostgreSQL, runtime, and report volumes. Do not add
-Docker's `--volumes` option unless the local test data is intentionally being
-discarded.
+The local helper uses `docker-compose.local.yml` to permit HTTP login during
+localhost-only testing. The normal server configuration retains secure cookies
+for the public HTTPS address.
 
-## Updating stage
+## Cloudflare Tunnel
 
-Push reviewed changes to `stage`. GitHub Actions runs backend tests, database
-migration checks, agent evaluation, frontend tests, the production frontend
-build, Compose validation, and a complete Docker image build. A successful run
-then calls the Coolify deploy webhook.
+Create a remotely managed tunnel in the Cloudflare dashboard and copy its
+connector token into `.env.docker` as `CLOUDFLARE_TUNNEL_TOKEN`. Add a published
+application route for the required hostname and use this service URL:
+
+```text
+http://web:8080
+```
+
+Because `cloudflared` runs inside the Compose network, `localhost` must not be
+used as the route's service URL. Start the complete stack with the tunnel:
+
+```text
+docker compose --env-file .env.docker --profile tunnel up -d --build
+docker compose --env-file .env.docker --profile tunnel ps
+docker compose --env-file .env.docker --profile tunnel logs -f cloudflared web worker
+```
+
+No inbound router port forwarding is required. The host must permit outbound
+HTTPS and Cloudflare Tunnel traffic, and it must be able to reach the configured
+Oracle EPM environment.
+
+## Updates
+
+Deploy a tested `stage` update from the server checkout:
+
+```text
+git fetch origin
+git switch stage
+git pull --ff-only origin stage
+docker compose --env-file .env.docker --profile tunnel up -d --build
+```
+
+GitHub Actions validates tests, migrations, the frontend build, Compose syntax,
+and the Docker image. Direct server deployment is intentionally manual; there
+is no provider webhook.
+
+## Persistence and backup
+
+The Compose project owns three named volumes: `postgres_data`, `runtime_data`,
+and `report_data`. A normal `docker compose --env-file .env.docker down`
+preserves them. Never use the `--volumes` option unless all application data is
+intentionally being deleted.
+
+`POSTGRES_PASSWORD` initializes the database user only when `postgres_data` is
+created. Changing that value later does not rotate the password already stored
+inside PostgreSQL. Rotate the database role password first, or keep the original
+value; otherwise the `migrate` container will report password authentication
+failure while the existing volume is retained.
+
+Back up PostgreSQL and any required reports to storage outside the physical
+server every day. A Docker volume on the same disk is persistence, not disaster
+recovery. Also configure the VM, Docker service, and Cloudflare connector to
+start automatically after a host reboot.

@@ -9,7 +9,7 @@ $ErrorActionPreference = "Stop"
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $environmentFile = Join-Path $projectRoot ".env"
-$productionCompose = Join-Path $projectRoot "docker-compose.coolify.yml"
+$productionCompose = Join-Path $projectRoot "docker-compose.yml"
 $localCompose = Join-Path $projectRoot "docker-compose.local.yml"
 
 if (-not (Test-Path -LiteralPath $environmentFile)) {
@@ -90,7 +90,7 @@ if (-not [Environment]::GetEnvironmentVariable("WEB_SESSION_SECRET", "Process"))
 $null = Get-Command docker -ErrorAction Stop
 & docker info --format "{{.ServerVersion}}" *> $null
 if ($LASTEXITCODE -ne 0) {
-    throw "Docker Desktop is not running. Start Docker Desktop and run this command again."
+    throw "Docker Engine is not running. Start Docker Desktop and run this command again."
 }
 
 $composeArguments = @(
