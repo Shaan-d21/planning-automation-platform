@@ -572,6 +572,10 @@ describe("App", () => {
       if (url === "/api/v1/notifications") return response(notificationInbox);
       if (url === "/api/v1/operations") return response({ status: "success", operations: [operation] });
       if (url === "/api/v1/operations/data-integrations/catalog") return response({ status: "success", integrations: [{ name: "Forecast Load", description: "Monthly forecast" }] });
+      if (url === "/api/v1/data-review/cubes") return response({ status: "success", cubes: [{ name: "Plan1", cube_name: "Plan1", cube_type: 1, dimension_count: 8 }] });
+      if (url === "/api/v1/data-review/cubes/Plan1/dimensions") return response({ status: "success", cube: "Plan1", dimensions: [{ name: "Years", dimension_type: "Year" }, { name: "Period", dimension_type: "Period" }] });
+      if (url.startsWith("/api/v1/data-review/cubes/Plan1/dimensions/Years/members")) return response({ status: "success", cube: "Plan1", dimension: "Years", query: "", members: [{ name: "FY27", alias: null, path: null, parent_name: null, has_children: false }], total_matches: 1, has_more: false, offset: 0, limit: 100 });
+      if (url.startsWith("/api/v1/data-review/cubes/Plan1/dimensions/Period/members")) return response({ status: "success", cube: "Plan1", dimension: "Period", query: "", members: ["Jan", "Mar"].map((name) => ({ name, alias: null, path: null, parent_name: null, has_children: false })), total_matches: 2, has_more: false, offset: 0, limit: 100 });
       if (url.startsWith("/api/v1/uploads?filename=")) return response({ status: "success", upload: { token: "upload-token-123", filename: "Forecast.csv", size: 24 } });
       if (url === "/api/v1/operations/data-integrations/runs" && init?.method === "POST") return response({ status: "accepted", execution_id: execution.execution_id, redirect: `/app/operations/runs/${execution.execution_id}` }, 202);
       if (url === `/api/v1/operations/runs/${execution.execution_id}`) return response(execution);
@@ -583,14 +587,16 @@ describe("App", () => {
     const integrationSelects = await screen.findAllByRole("combobox");
     expect(screen.getByRole("radio", { name: /Use configured file/ })).toBeTruthy();
     fireEvent.change(integrationSelects[0], { target: { value: "Forecast Load" } });
+    await screen.findByRole("option", { name: "FY27" });
     fireEvent.change(screen.getByLabelText("Planning year"), { target: { value: "FY27" } });
-    fireEvent.change(screen.getByLabelText("Start month"), { target: { value: "Jan" } });
-    fireEvent.change(screen.getByLabelText("End month"), { target: { value: "Mar" } });
+    fireEvent.change(screen.getByLabelText("Start period"), { target: { value: "Jan" } });
+    fireEvent.change(screen.getByLabelText("End period"), { target: { value: "Mar" } });
     const file = new File(["Account,Jan\nRevenue,100"], "Forecast.csv", { type: "text/csv" });
     fireEvent.change(screen.getByLabelText("Local data file"), { target: { files: [file] } });
+    fireEvent.change(screen.getByLabelText("Oracle upload target"), { target: { value: "inbox/monthly/Forecast.csv" } });
     fireEvent.click(screen.getByRole("button", { name: /Review execution/ }));
 
-    expect(await screen.findByText("Existing filenames are replaced safely")).toBeTruthy();
+    expect(await screen.findByText("Exact Oracle target will be replaced")).toBeTruthy();
     fireEvent.click(screen.getByRole("checkbox"));
     fireEvent.click(screen.getByRole("button", { name: /Start Data Integration/ }));
     expect(await screen.findByRole("heading", { name: "Operation completed successfully" })).toBeTruthy();
@@ -598,7 +604,7 @@ describe("App", () => {
     const upload = fetchMock.mock.calls.find(([url]) => String(url).startsWith("/api/v1/uploads?filename="));
     expect(new Headers(upload?.[1]?.headers).get("Content-Type")).toBe("application/octet-stream");
     const submitted = fetchMock.mock.calls.find(([url]) => String(url) === "/api/v1/operations/data-integrations/runs");
-    expect(JSON.parse(String(submitted?.[1]?.body))).toEqual({ integration_name: "Forecast Load", start_period: "Jan-27", end_period: "Mar-27", import_mode: "Replace", export_mode: "Merge", upload_token: "upload-token-123", inbox_file: null });
+    expect(JSON.parse(String(submitted?.[1]?.body))).toEqual({ integration_name: "Forecast Load", start_period: "Jan#FY27", end_period: "Mar#FY27", import_mode: "Replace", export_mode: "Merge", upload_target: "inbox/monthly/Forecast.csv", upload_token: "upload-token-123", inbox_file: null });
   });
 
   it("runs Data Integration with a selected live Oracle Inbox file", async () => {
@@ -618,6 +624,10 @@ describe("App", () => {
       if (url === "/api/v1/notifications") return response(notificationInbox);
       if (url === "/api/v1/operations") return response({ status: "success", operations: [operation] });
       if (url === "/api/v1/operations/data-integrations/catalog") return response({ status: "success", integrations: [{ name: "Forecast Load", description: "Monthly forecast" }] });
+      if (url === "/api/v1/data-review/cubes") return response({ status: "success", cubes: [{ name: "Plan1", cube_name: "Plan1", cube_type: 1, dimension_count: 8 }] });
+      if (url === "/api/v1/data-review/cubes/Plan1/dimensions") return response({ status: "success", cube: "Plan1", dimensions: [{ name: "Years", dimension_type: "Year" }, { name: "Period", dimension_type: "Period" }] });
+      if (url.startsWith("/api/v1/data-review/cubes/Plan1/dimensions/Years/members")) return response({ status: "success", cube: "Plan1", dimension: "Years", query: "", members: [{ name: "FY27", alias: null, path: null, parent_name: null, has_children: false }], total_matches: 1, has_more: false, offset: 0, limit: 100 });
+      if (url.startsWith("/api/v1/data-review/cubes/Plan1/dimensions/Period/members")) return response({ status: "success", cube: "Plan1", dimension: "Period", query: "", members: [{ name: "Aug", alias: null, path: null, parent_name: null, has_children: false }], total_matches: 1, has_more: false, offset: 0, limit: 100 });
       if (url === "/api/v1/operations/files/catalog?purpose=data-integration") return response({
         status: "success",
         purpose: "data-integration",
@@ -632,9 +642,10 @@ describe("App", () => {
     fireEvent.click(await screen.findByRole("button", { name: /Open service/ }));
     const integrationSelects = await screen.findAllByRole("combobox");
     fireEvent.change(integrationSelects[0], { target: { value: "Forecast Load" } });
+    await screen.findByRole("option", { name: "FY27" });
     fireEvent.change(screen.getByLabelText("Planning year"), { target: { value: "FY27" } });
-    fireEvent.change(screen.getByLabelText("Start month"), { target: { value: "Aug" } });
-    fireEvent.change(screen.getByLabelText("End month"), { target: { value: "Aug" } });
+    fireEvent.change(screen.getByLabelText("Start period"), { target: { value: "Aug" } });
+    fireEvent.change(screen.getByLabelText("End period"), { target: { value: "Aug" } });
     fireEvent.click(screen.getByRole("radio", { name: /Choose from Oracle Inbox/ }));
     const filePicker = await screen.findByLabelText("Existing Oracle integration file");
     await waitFor(() => expect((filePicker as HTMLSelectElement).value).toBe("#epminbox/Sales_Aug.csv"));
@@ -646,7 +657,7 @@ describe("App", () => {
     expect(await screen.findByRole("heading", { name: "Operation completed successfully" })).toBeTruthy();
 
     const submitted = fetchMock.mock.calls.find(([url]) => String(url) === "/api/v1/operations/data-integrations/runs");
-    expect(JSON.parse(String(submitted?.[1]?.body))).toEqual({ integration_name: "Forecast Load", start_period: "Aug-27", end_period: "Aug-27", import_mode: "Replace", export_mode: "Merge", upload_token: null, inbox_file: "#epminbox/Sales_Aug.csv" });
+    expect(JSON.parse(String(submitted?.[1]?.body))).toEqual({ integration_name: "Forecast Load", start_period: "Aug#FY27", end_period: "Aug#FY27", import_mode: "Replace", export_mode: "Merge", upload_token: null, inbox_file: "#epminbox/Sales_Aug.csv" });
     expect(fetchMock.mock.calls.some(([url]) => String(url).startsWith("/api/v1/uploads?filename="))).toBe(false);
   });
 

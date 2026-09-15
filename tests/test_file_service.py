@@ -172,6 +172,46 @@ def test_upload_to_inbox_can_use_a_different_safe_target_name(
     )
 
 
+def test_upload_to_data_integration_subfolder_replaces_exact_target(
+    tmp_path,
+) -> None:
+    source_file = tmp_path / "latest.csv"
+    source_file.write_bytes(b"data")
+    client = Mock(spec=EPMClient)
+    client.post_binary.side_effect = [
+        {"status": 1, "details": "A file with this name already exists"},
+        {"status": 0},
+    ]
+    client.delete.return_value = {"status": 0}
+
+    result = FileService(client).upload_to_inbox(
+        source_file,
+        target_file_name="Configured.csv",
+        upload_directory="inbox/monthly",
+    )
+
+    assert result.replaced_existing is True
+    assert client.post_binary.call_args.kwargs == {
+        "params": {"extDirPath": "inbox/monthly"}
+    }
+    client.delete.assert_called_once_with(
+        "interop/rest/11.1.2.3.600/applicationsnapshots/"
+        "inbox%2Fmonthly%2FConfigured.csv"
+    )
+
+
+def test_upload_rejects_non_inbox_destination(tmp_path) -> None:
+    source_file = tmp_path / "latest.csv"
+    source_file.write_bytes(b"data")
+    client = Mock(spec=EPMClient)
+
+    with pytest.raises(FileUploadError, match="must be 'inbox'"):
+        FileService(client).upload_to_inbox(
+            source_file,
+            upload_directory="outbox/monthly",
+        )
+
+
 def test_upload_to_inbox_rejects_target_directories(tmp_path) -> None:
     source_file = tmp_path / "latest.csv"
     source_file.write_bytes(b"data")

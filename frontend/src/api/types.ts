@@ -883,6 +883,7 @@ export interface DataIntegrationRunInput {
   import_mode: string;
   export_mode: string;
   upload_token: string | null;
+  upload_target?: string | null;
   inbox_file: string | null;
   use_configured_file?: boolean;
   planning_task_id?: number | null;
@@ -1260,7 +1261,7 @@ export interface OracleRecordStatisticsDetail {
 }
 
 export interface OracleRecordStatistics {
-  source: "ORACLE_JOB_DETAILS";
+  source: "ORACLE_JOB_DETAILS" | "ORACLE_DATA_INTEGRATION_STATUS" | "ORACLE_DATA_INTEGRATION_LOG" | "ORACLE_COMBINED_EVIDENCE";
   records_read: number;
   records_processed: number;
   records_rejected: number;

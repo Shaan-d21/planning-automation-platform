@@ -34,6 +34,7 @@ from app.application.data_review import (
     DataReviewSliceSelection,
 )
 from app.models.planning_process import ProcessContextMode
+from app.models.data_integration import DataIntegrationFileReference
 from app.models.data_validation import DataQualityRules
 from app.models.substitution_variable import (
     RequestedSubstitutionVariableUpdate,
@@ -51,6 +52,7 @@ from app.models.automation_schedule import (
     AutomationTargetType,
 )
 from app.models.access_control import RoleCode
+from app.utils.exceptions import DataIntegrationError
 
 
 class BootstrapAdministratorRequest(BaseModel):
@@ -723,6 +725,7 @@ class DataIntegrationRunRequest(BaseModel):
     import_mode: str = Field(default="Replace", max_length=40)
     export_mode: str = Field(default="Merge", max_length=40)
     upload_token: str | None = Field(default=None, max_length=64)
+    upload_target: str | None = Field(default=None, max_length=500)
     inbox_file: str | None = Field(default=None, max_length=500)
     use_configured_file: bool = False
     planning_task_id: int | None = Field(default=None, gt=0)
@@ -734,6 +737,7 @@ class DataIntegrationRunRequest(BaseModel):
         "import_mode",
         "export_mode",
         "upload_token",
+        "upload_target",
         "inbox_file",
         mode="before",
     )
@@ -745,6 +749,36 @@ class DataIntegrationRunRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_file_source(self):
+        if self.upload_target and not self.upload_token:
+            raise ValueError(
+                "An Oracle upload target can only be used with a local upload."
+            )
+        if self.upload_target:
+            try:
+                target = str(
+                    DataIntegrationFileReference.from_existing(
+                        self.upload_target
+                    )
+                )
+            except DataIntegrationError as exc:
+                raise ValueError(str(exc)) from exc
+            lowered = target.casefold()
+            if lowered.startswith("#epminbox/"):
+                if "/" in target[len("#epminbox/") :]:
+                    raise ValueError(
+                        "Use inbox/folder/filename for a Data Integration "
+                        "subfolder."
+                    )
+            elif "/" in target and not lowered.startswith("inbox/"):
+                raise ValueError(
+                    "Oracle upload target must use #epminbox/filename or "
+                    "inbox/folder/filename."
+                )
+            elif "/" not in target:
+                target = str(
+                    DataIntegrationFileReference.from_default_upload(target)
+                )
+            self.upload_target = target
         selected_sources = sum(
             (
                 bool(self.upload_token),
@@ -771,6 +805,7 @@ class DataIntegrationRunRequest(BaseModel):
             import_mode=self.import_mode,
             export_mode=self.export_mode,
             upload_path=upload_path,
+            upload_target=self.upload_target,
             inbox_file=self.inbox_file,
             use_configured_file=self.use_configured_file,
         )
