@@ -58,6 +58,21 @@ def test_record_statistics_are_absent_for_unsupported_operations() -> None:
     assert aggregate_record_statistics(({"job_id": 42},)) is None
 
 
+def test_record_statistics_preserve_data_integration_log_source() -> None:
+    statistics = aggregate_record_statistics(({
+        "record_statistics": {
+            "source": "ORACLE_DATA_INTEGRATION_LOG",
+            "records_read": 20,
+            "records_processed": 19,
+            "records_rejected": 1,
+            "details": [],
+        }
+    },))
+
+    assert statistics is not None
+    assert statistics["source"] == "ORACLE_DATA_INTEGRATION_LOG"
+
+
 def test_import_evidence_projects_lineage_messages_and_artifacts() -> None:
     evidence = aggregate_import_evidence(({
         "load_lineage": {

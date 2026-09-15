@@ -375,6 +375,44 @@ def test_cube_discovery_falls_back_to_registered_data_reviews() -> None:
     assert [cube.name for cube in cubes] == ["VisASO"]
 
 
+def test_on_prem_cube_discovery_accepts_legacy_method_status() -> None:
+    client, application, forms = _oracle_mocks()
+    client.is_cloud_environment = False
+    application.get_plan_types.side_effect = APIRequestError(
+        "Method Not Allowed",
+        status_code=405,
+    )
+    service = _service((_definition(),), cloud=False)
+
+    with (
+        patch.object(service, "_client", return_value=client),
+        patch(
+            "app.application.data_review.ApplicationService",
+            return_value=application,
+        ),
+    ):
+        cubes = service.list_cubes()
+
+    assert [cube.name for cube in cubes] == ["VisASO"]
+
+
+def test_on_prem_live_cubes_exclude_stale_registered_cube_names() -> None:
+    client, application, forms = _oracle_mocks()
+    client.is_cloud_environment = False
+    service = _service((_definition(),), cloud=False)
+
+    with (
+        patch.object(service, "_client", return_value=client),
+        patch(
+            "app.application.data_review.ApplicationService",
+            return_value=application,
+        ),
+    ):
+        cubes = service.list_cubes()
+
+    assert [cube.name for cube in cubes] == ["Plan1", "Rpt"]
+
+
 def test_registered_data_review_uses_compatible_data_slice_export() -> None:
     client, application, forms = _oracle_mocks()
     data_slice = MagicMock()

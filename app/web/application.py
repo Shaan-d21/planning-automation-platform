@@ -175,6 +175,7 @@ from app.web.security import (
 )
 
 WEB_ROOT = Path(__file__).resolve().parent
+FRONTEND_DIST_ROOT = PROJECT_ROOT / "frontend" / "dist"
 LOGGER = logging.getLogger("oracle_planning_automation.web")
 
 
@@ -406,6 +407,13 @@ def create_app(
         StaticFiles(directory=WEB_ROOT / "static"),
         name="static",
     )
+    frontend_assets = FRONTEND_DIST_ROOT / "assets"
+    if frontend_assets.is_dir():
+        app.mount(
+            "/assets",
+            StaticFiles(directory=frontend_assets),
+            name="frontend-assets",
+        )
     app.include_router(v1_router)
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
@@ -481,7 +489,7 @@ def create_app(
         )
         query_string = f"?{urlencode(query)}" if query else ""
         if frontend_url is None:
-            frontend_index = PROJECT_ROOT / "frontend" / "dist" / "index.html"
+            frontend_index = FRONTEND_DIST_ROOT / "index.html"
             if view == "home" and frontend_index.is_file():
                 return FileResponse(frontend_index)
             if not frontend_index.is_file():

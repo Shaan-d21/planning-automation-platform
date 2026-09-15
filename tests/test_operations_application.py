@@ -682,6 +682,11 @@ def test_data_integration_execution_preserves_inbox_and_period_range(
     client_class.return_value.planning_api_root = (
         "https://example.oraclecloud.com/rest/v3"
     )
+    client_class.return_value.get_binary.return_value = (
+        b"Total records read: 100\n"
+        b"Total records processed: 98\n"
+        b"Total records rejected: 2\n"
+    )
     start_integration.return_value = DataIntegrationSubmission(
         job_id=101,
         integration_name="Forecast Load",
@@ -694,6 +699,12 @@ def test_data_integration_execution_preserves_inbox_and_period_range(
         job_id=101,
         status=0,
         descriptive_status="Completed",
+        raw_response={
+            "jobId": 101,
+            "status": 0,
+            "jobStatus": "SUCCESS",
+            "logFileName": "outbox/logs/Forecast_Load_101.log",
+        },
     )
 
     run = OperationCommandExecutor(_settings(tmp_path)).execute(
@@ -716,6 +727,24 @@ def test_data_integration_execution_preserves_inbox_and_period_range(
     assert call.kwargs == {
         "import_mode": "Replace",
         "export_mode": "Merge",
+    }
+    execution_step = next(
+        step for step in run.steps if step.details.get("job_id") == 101
+    )
+    assert execution_step.details["record_statistics"] == {
+        "source": "ORACLE_DATA_INTEGRATION_LOG",
+        "records_read": 100,
+        "records_processed": 98,
+        "records_rejected": 2,
+        "details": [
+            {
+                "dimension_name": None,
+                "load_type": "Data Integration",
+                "records_read": 100,
+                "records_processed": 98,
+                "records_rejected": 2,
+            }
+        ],
     }
     notification_factory.return_value.publish.assert_called_once()
 
