@@ -25,8 +25,10 @@ Recommended capacity is 4 CPU cores, 8 GB RAM, and 80 GB of SSD storage.
 
 1. Clone the repository and check out `stage`.
 2. Copy `deploy/server.env.example` to `.env.docker` in the repository root.
-3. Replace every placeholder in `.env.docker`. Use a long URL-safe value for
-   `POSTGRES_PASSWORD`; Compose constructs the internal database URL from it.
+3. Replace every required placeholder in `.env.docker`. Leave
+   `APPLICATION_NAME` blank to discover the Planning application from Oracle.
+   Use a long URL-safe value for `POSTGRES_PASSWORD`; Compose constructs the
+   internal database URL from it.
 4. Keep `APP_BIND_ADDRESS=127.0.0.1` when Cloudflare Tunnel is used. This stops
    users from bypassing the tunnel by connecting to port 8080 directly.
 5. Validate and start the required services:
@@ -43,6 +45,15 @@ Recommended capacity is 4 CPU cores, 8 GB RAM, and 80 GB of SSD storage.
 7. On a fresh database, complete the guarded Platform Administrator bootstrap,
    configure Oracle role mappings, sync the Oracle catalog, and run one
    low-risk operation.
+
+At first startup, the platform uses the application selection already saved
+for `EPM_BASE_URL`. If none exists, it discovers the applications visible to
+the integration account. One result is selected automatically. If Oracle
+returns multiple applications, a Service Administrator selects the required
+one under **Dashboard > Environment health > Manage**, then restarts the web
+and worker containers so all execution services use the same application.
+`APPLICATION_NAME` remains available only as an optional compatibility
+fallback when discovery is unavailable.
 
 The Windows development helper remains available:
 

@@ -41,8 +41,7 @@ foreach ($rawLine in Get-Content -LiteralPath $environmentFile) {
 $requiredNames = @(
     "EPM_BASE_URL",
     "EPM_INTEGRATION_USERNAME",
-    "EPM_INTEGRATION_PASSWORD",
-    "APPLICATION_NAME"
+    "EPM_INTEGRATION_PASSWORD"
 )
 $missingNames = @(
     $requiredNames | Where-Object {

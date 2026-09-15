@@ -10,7 +10,9 @@ x-app-environment: &app-environment
   EPM_BASE_URL: ${EPM_BASE_URL:?Set EPM_BASE_URL in the Docker environment file}
   EPM_INTEGRATION_USERNAME: ${EPM_INTEGRATION_USERNAME:?Set EPM_INTEGRATION_USERNAME in the Docker environment file}
   EPM_INTEGRATION_PASSWORD: ${EPM_INTEGRATION_PASSWORD:?Set EPM_INTEGRATION_PASSWORD in the Docker environment file}
-  APPLICATION_NAME: ${APPLICATION_NAME:?Set the exact Oracle Planning application name in the Docker environment file}
+  # Optional compatibility fallback. When blank, the platform discovers the
+  # applications visible to the Oracle integration account at startup.
+  APPLICATION_NAME: ${APPLICATION_NAME:-}
   EPM_DEPLOYMENT_MODE: ${EPM_DEPLOYMENT_MODE:-auto}
   EPM_REQUEST_TIMEOUT: ${EPM_REQUEST_TIMEOUT:-30}
   EPM_VERIFY_SSL: ${EPM_VERIFY_SSL:-true}
