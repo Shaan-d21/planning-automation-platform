@@ -59,7 +59,7 @@
       "kind": "intent_route",
       "prompt": "Show Planning data from Plan1 for Actual versus Forecast.",
       "expected_intent": "DATA_REVIEW",
-      "expected_tools": ["get_environment_summary", "list_platform_operations", "list_planning_cubes", "list_cube_dimensions", "search_dimension_members", "review_data_slice", "compare_data_slices"]
+      "expected_tools": ["get_environment_summary", "list_platform_operations", "list_planning_cubes", "list_cube_dimensions", "search_dimension_members", "list_data_explorer_views", "review_saved_data_view", "review_data_slice", "compare_data_slices"]
     },
     {
       "id": "route-contextual-data-refinement",
@@ -69,7 +69,7 @@
       "prompt": "Change the year to FY27 and show the same rows.",
       "has_data_review_context": true,
       "expected_intent": "DATA_REVIEW",
-      "expected_tools": ["get_environment_summary", "list_platform_operations", "list_planning_cubes", "list_cube_dimensions", "search_dimension_members", "review_data_slice", "compare_data_slices"]
+      "expected_tools": ["get_environment_summary", "list_platform_operations", "list_planning_cubes", "list_cube_dimensions", "search_dimension_members", "list_data_explorer_views", "review_saved_data_view", "review_data_slice", "compare_data_slices"]
     },
     {
       "id": "route-explicit-operation-over-review-context",

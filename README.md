@@ -1797,7 +1797,7 @@ process, or error-handling logic.
 ## Excel Pipeline Runner
 
 The first governed Excel interface is available under
-`outputs/excel_pipeline_runner`. It invokes an existing Oracle Pipeline through
+`integrations/excel_pipeline_runner`. It invokes an existing Oracle Pipeline through
 the FastAPI backend; it does not connect to Oracle or store Oracle credentials
 inside the workbook.
 
@@ -1812,6 +1812,6 @@ The integration provides:
 
 Apply migration `0003_external_api_tokens`, create the token with
 `python -m app.cli.api_tokens`, and follow the complete beginner instructions
-in `outputs/excel_pipeline_runner/README.md`. The workbook contains no
+in `integrations/excel_pipeline_runner/README.md`. The workbook contains no
 automatic `Workbook_Open` execution and this version does not upload local
 files from Excel.
