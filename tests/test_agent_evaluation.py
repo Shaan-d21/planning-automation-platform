@@ -52,6 +52,18 @@ def test_agent_evaluation_detects_a_critical_routing_regression() -> None:
     assert "Expected intent GENERAL_GUIDANCE" in result.failures[0]
 
 
+def test_release_evaluation_covers_business_task_understanding() -> None:
+    suite = load_agent_evaluation_suite(SUITE_PATH)
+
+    report = run_agent_evaluation_suite(suite)
+
+    task_cases = [
+        item for item in report.cases if item.kind == "task_understanding"
+    ]
+    assert len(task_cases) >= 6
+    assert all(item.passed for item in task_cases)
+
+
 def test_agent_evaluation_rejects_duplicate_case_ids(tmp_path: Path) -> None:
     suite = deepcopy(load_agent_evaluation_suite(SUITE_PATH))
     suite["cases"][1]["id"] = suite["cases"][0]["id"]

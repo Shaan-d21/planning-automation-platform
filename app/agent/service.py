@@ -23,6 +23,7 @@ from app.agent.groq_provider import GroqAgentProvider
 from app.agent.checkpoints import AgentCheckpointStore
 from app.agent.graph import AgentGraphOrchestrator
 from app.agent.intent import AgentIntentRouter
+from app.agent.task_state import AgentTaskInterpreter
 from app.agent.models import (
     AgentActionDecision,
     AgentApprovalRequest,
@@ -96,11 +97,13 @@ from app.utils.exceptions import (
 ProviderFactory = Callable[[], AgentProvider]
 
 SYSTEM_INSTRUCTION = """
-You are the read-only assistant inside BISP Solutions Oracle EPM Automation.
-Help Oracle EPM consultants, planners, finance users, and administrators
-understand the platform and inspect its current state. Use the provided tools
-when the answer depends on configured or live platform information. Clearly
-distinguish tool-confirmed facts from general Oracle EPM guidance.
+You are the governed operational assistant inside BISP Solutions Oracle EPM
+Automation. Help Oracle EPM consultants, planners, finance users, and
+administrators accomplish business tasks conversationally, while the platform's
+deterministic services remain responsible for validation and execution. Use the
+provided tools when the answer depends on configured or live platform
+information. Clearly distinguish tool-confirmed facts from general Oracle EPM
+guidance.
 
 Safety rules:
 - You cannot execute, schedule, modify, upload, delete, approve, or retry work
@@ -110,6 +113,12 @@ Safety rules:
 - When a user clearly wants to perform an operation, use the preparation tool
   to create an exact reviewable proposal. Supported direct operations run only
   after explicit platform approval; all others become governed action drafts.
+- Preserve the current structured business-task context across short answers
+  and corrections. If required information is missing, ask only one focused
+  question at a time instead of presenting a long technical form.
+- Understand business phrases such as Month Close, metadata load, actual data
+  load, forecast seeding, and variance reporting. Do not invent the Oracle
+  artifact that implements a business task; discover and validate it first.
 - Use the artifact-listing tool when an exact Oracle artifact was not supplied.
   Never guess an artifact name; let the user choose from platform results.
 - Treat "Data Push", "push data", and "publish Planning data" as Data Maps:
@@ -673,6 +682,8 @@ class AgentApplicationService:
             conversation_id,
             user,
         )
+        task_understanding = AgentTaskInterpreter.interpret(messages)
+        task_context = task_understanding.to_payload()
         if self._settings.agent_orchestrator == "langgraph":
             if self._graph is None:
                 raise AgentConfigurationError(
@@ -682,11 +693,15 @@ class AgentApplicationService:
                 prompt,
                 self._allowed_tool_names(user),
                 has_data_review_context=data_review_context is not None,
+                task_intent=task_understanding.intent.value,
             )
             self._logger.info(
-                "Agent intent classified: user='%s', intent='%s'.",
+                "Agent intent classified: user='%s', intent='%s', "
+                "task_intent='%s', task_phase='%s'.",
                 user.username,
                 intent.intent.value,
+                task_understanding.intent.value,
+                task_understanding.phase.value,
             )
             result = self._graph.invoke(
                 conversation_id=conversation_id,
@@ -694,6 +709,7 @@ class AgentApplicationService:
                 messages=messages,
                 allowed_tool_names=intent.tool_names,
                 data_review_context=data_review_context,
+                task_context=task_context,
             )
         else:
             provider = self._provider_factory()
