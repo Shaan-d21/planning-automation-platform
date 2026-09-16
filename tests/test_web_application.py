@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, Mock, call
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.exc import OperationalError
 
@@ -95,6 +96,7 @@ from app.models.automation_schedule import (
 )
 from app.models.substitution_variable import SubstitutionVariable
 from app.utils.exceptions import AuthenticationError
+from app.web import application as web_application
 from app.web.application import create_app
 
 
@@ -225,6 +227,29 @@ def _settings(tmp_path: Path) -> Settings:
         pipeline_catalog_file=pipeline_catalog,
         report_output_dir=tmp_path / "reports",
     )
+
+
+@pytest.fixture(autouse=True)
+def _install_frontend_test_build(tmp_path: Path, monkeypatch) -> None:
+    """Provide the browser-entry assets without relying on ignored build output."""
+    frontend_root = tmp_path / "frontend-dist"
+    assets_root = frontend_root / "assets"
+    assets_root.mkdir(parents=True)
+    (frontend_root / "index.html").write_text(
+        """<!doctype html>
+<html>
+  <head><link rel="stylesheet" href="/assets/index.css"></head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/assets/index.js"></script>
+  </body>
+</html>
+""",
+        encoding="utf-8",
+    )
+    (assets_root / "index.css").write_text("body {}\n", encoding="utf-8")
+    (assets_root / "index.js").write_text("export {};\n", encoding="utf-8")
+    monkeypatch.setattr(web_application, "FRONTEND_DIST_ROOT", frontend_root)
 
 
 def _csrf(response) -> str:
