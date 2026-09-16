@@ -70,9 +70,18 @@ Conversations, messages, tool activity, action drafts, input snapshots, and
 human approval decisions use the existing PostgreSQL application tables;
 LangGraph checkpoints use separate PostgreSQL-managed checkpoint tables.
 
+Before tool selection, the assistant builds a provider-independent business-task
+context for Month Close, Metadata Load, Data Load, Forecast Seeding, Variance
+Reporting, Business Rules, Data Integrations, Pipelines, job status, and
+cancellation. It retains collected values across short follow-up answers and
+corrections, resolves common month expressions, and asks only the first missing
+question. This context is checkpoint-safe and contains no Oracle credentials.
+Live Oracle discovery and the existing governed input and approval flows still
+validate every artifact and executable value before submission.
+
 Agent releases also have a versioned deterministic evaluation gate covering
-least-privilege routing, governed preparation, safety boundaries, and
-conservative Oracle artifact matching. Run it with
+least-privilege routing, conversational task continuity, governed preparation,
+safety boundaries, and conservative Oracle artifact matching. Run it with
 `python -m app.agent.evaluation --fail-on-threshold`; see
 [Agent Evaluation and Release Gate](docs/AGENT_EVALUATION.md) for the suite,
 threshold policy, CI evidence, and separate live-provider UAT requirements.

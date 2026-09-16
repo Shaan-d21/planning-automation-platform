@@ -108,12 +108,13 @@ class AgentGraphState(TypedDict, total=False):
     artifact_catalog_snapshot: dict[str, Any] | None
     deterministic_operation: str | None
     data_review_context: dict[str, Any] | None
+    task_context: dict[str, Any] | None
 
 
 class AgentGraphOrchestrator:
     """Compile and run the deterministic model -> tools -> model graph."""
 
-    STATE_SCHEMA_VERSION = 4
+    STATE_SCHEMA_VERSION = 5
 
     def __init__(
         self,
@@ -148,6 +149,7 @@ class AgentGraphOrchestrator:
         messages: Sequence[AgentMessage],
         allowed_tool_names: Sequence[str] | None = None,
         data_review_context: dict[str, Any] | None = None,
+        task_context: dict[str, Any] | None = None,
     ) -> AgentProviderResult:
         """Run one auditable assistant turn under an isolated thread ID."""
         initial: AgentGraphState = {
@@ -169,6 +171,7 @@ class AgentGraphOrchestrator:
             ),
             "approval_decision": None,
             "data_review_context": data_review_context,
+            "task_context": task_context,
         }
         try:
             state = self._compiled_graph().invoke(
@@ -449,8 +452,16 @@ class AgentGraphOrchestrator:
                 ),
                 "pending_tool_calls": [],
             }
+        task_response = self._deterministic_task_response(state)
+        if task_response is not None:
+            return {
+                **state,
+                "assistant_text": task_response,
+                "pending_tool_calls": [],
+            }
         deterministic_call = (
-            self._deterministic_execution_evidence_call(state)
+            self._deterministic_task_operation_call(state)
+            or self._deterministic_execution_evidence_call(state)
             or self._deterministic_saved_data_view_call(state)
             or self._deterministic_data_explorer_views_call(state)
             or self._deterministic_data_review_slice_call(state)
@@ -638,25 +649,101 @@ class AgentGraphOrchestrator:
         }
 
     def _instruction_for_state(self, state: AgentGraphState) -> str:
-        """Add only prior tool-validated slice selections to model context."""
+        """Add validated task and Data Explorer context to model instructions."""
+        sections = [self._system_instruction]
+        task_context = state.get("task_context")
+        if isinstance(task_context, dict) and task_context:
+            serialized_task = json.dumps(
+                task_context,
+                ensure_ascii=True,
+                separators=(",", ":"),
+            )[:6_000]
+            sections.append(
+                "Current deterministic business-task context:\n"
+                f"{serialized_task}\n"
+                "Preserve these collected parameters across short follow-up "
+                "answers and corrections. Ask only for the first missing "
+                "parameter. Never treat a value as Oracle-verified until a "
+                "platform discovery or preparation tool validates it."
+            )
         context = state.get("data_review_context")
-        if not isinstance(context, dict) or not context:
-            return self._system_instruction
-        serialized = json.dumps(
-            context,
-            ensure_ascii=True,
-            separators=(",", ":"),
-        )[:6_000]
-        return (
-            f"{self._system_instruction}\n\n"
-            "Current tool-validated Data Explorer context:\n"
-            f"{serialized}\n"
-            "For a follow-up Data Explorer request, preserve every prior cube, "
-            "POV, row, column, and member selection except fields the user "
-            "explicitly changes. Use review_data_slice or compare_data_slices "
-            "with the complete updated selection. If a requested change is "
-            "ambiguous, ask one concise clarification question. This context "
-            "contains selections only, never financial values."
+        if isinstance(context, dict) and context:
+            serialized = json.dumps(
+                context,
+                ensure_ascii=True,
+                separators=(",", ":"),
+            )[:6_000]
+            sections.append(
+                "Current tool-validated Data Explorer context:\n"
+                f"{serialized}\n"
+                "For a follow-up Data Explorer request, preserve every prior "
+                "cube, POV, row, column, and member selection except fields "
+                "the user explicitly changes. Use review_data_slice or "
+                "compare_data_slices with the complete updated selection. If "
+                "a requested change is ambiguous, ask one concise clarification "
+                "question. This context contains selections only, never "
+                "financial values."
+            )
+        return "\n\n".join(sections)
+
+    @staticmethod
+    def _deterministic_task_response(
+        state: AgentGraphState,
+    ) -> str | None:
+        """Return safety-critical task clarification without provider variance."""
+        context = state.get("task_context")
+        if not isinstance(context, dict):
+            return None
+        intent = str(context.get("intent") or "").strip().upper()
+        phase = str(context.get("phase") or "").strip().upper()
+        if intent == "CANCEL_OPERATION":
+            return (
+                "I stopped planning the current conversational task. No new "
+                "Oracle operation was submitted. If an Oracle job was already "
+                "submitted, it may continue unless its operation supports "
+                "cancellation."
+            )
+        if phase != "COLLECTING_INFORMATION":
+            return None
+        if intent not in {
+            "MONTH_CLOSE",
+            "METADATA_LOAD",
+            "DATA_LOAD",
+            "FORECAST_SEEDING",
+            "VARIANCE_REPORTING",
+        }:
+            return None
+        prompt = str(context.get("clarification_prompt") or "").strip()
+        return prompt or None
+
+    @staticmethod
+    def _deterministic_task_operation_call(
+        state: AgentGraphState,
+    ) -> AgentToolCall | None:
+        """Continue a clarified task into the existing governed operation flow."""
+        context = state.get("task_context")
+        if not isinstance(context, dict):
+            return None
+        if str(context.get("phase") or "").upper() != "READY_FOR_PLAN":
+            return None
+        allowed = {
+            str(item).strip() for item in state.get("allowed_tool_names", [])
+        }
+        if "prepare_operation_action" not in allowed:
+            return None
+        operation_code = {
+            "METADATA_LOAD": "metadata-import",
+        }.get(str(context.get("intent") or "").strip().upper())
+        if operation_code is None:
+            return None
+        return AgentToolCall(
+            name="prepare_operation_action",
+            arguments={
+                "operation_code": operation_code,
+                "objective": str(context.get("objective") or "").strip()
+                or "Prepare the clarified Oracle EPM task.",
+            },
+            call_id=f"deterministic-task-{operation_code}",
         )
 
     @staticmethod

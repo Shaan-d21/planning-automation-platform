@@ -10,6 +10,8 @@ The deterministic suite is versioned at
 the agent contract:
 
 - least-privilege intent routing;
+- business-task intent, parameter extraction, and progressive clarification;
+- relative-period resolution and conversational corrections;
 - governed operation preparation;
 - multi-step request routing;
 - read-only data-review and execution-evidence routing;
@@ -56,7 +58,9 @@ hide a regression.
 Each case has a stable `id`, category, severity, kind, prompt, and explicit
 expected result. Supported kinds are:
 
-- `intent_route` for intent and exact least-privilege tool exposure; and
+- `intent_route` for intent and exact least-privilege tool exposure;
+- `task_understanding` for business intent, phase, collected parameters, and
+  missing-parameter behavior across one or more conversation turns; and
 - `artifact_ranking` for conservative Oracle artifact recommendation.
 
 Do not add customer credentials, exported metadata, real member data, or other

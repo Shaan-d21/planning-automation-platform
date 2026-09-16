@@ -140,3 +140,14 @@ def test_schedule_intent_exposes_only_governed_schedule_preparation() -> None:
     assert decision.intent is AgentIntent.SCHEDULING
     assert "prepare_schedule_action" in decision.tool_names
     assert "prepare_operation_action" not in decision.tool_names
+
+
+def test_short_follow_up_retains_tools_for_active_business_task() -> None:
+    decision = AgentIntentRouter.route(
+        "Account",
+        ALL_TOOLS,
+        task_intent="METADATA_LOAD",
+    )
+
+    assert decision.intent is AgentIntent.OPERATION_PREPARATION
+    assert "prepare_operation_action" in decision.tool_names

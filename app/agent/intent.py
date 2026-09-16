@@ -140,6 +140,7 @@ class AgentIntentRouter:
         permitted_tool_names: frozenset[str],
         *,
         has_data_review_context: bool = False,
+        task_intent: str | None = None,
     ) -> AgentIntentDecision:
         """Return the smallest useful permitted tool set for this prompt."""
         normalized = " ".join(str(prompt).casefold().split())
@@ -161,6 +162,16 @@ class AgentIntentRouter:
         schedule_match = any(
             term in normalized for term in cls._SCHEDULE_TERMS
         )
+        active_execution_task = str(task_intent or "").strip().upper() in {
+            "MONTH_CLOSE",
+            "METADATA_LOAD",
+            "DATA_LOAD",
+            "FORECAST_SEEDING",
+            "VARIANCE_REPORTING",
+            "RUN_BUSINESS_RULE",
+            "RUN_DATA_INTEGRATION",
+            "RUN_PIPELINE",
+        }
         if schedule_match:
             selected.add("prepare_schedule_action")
             matches.append(AgentIntent.SCHEDULING)
@@ -187,7 +198,10 @@ class AgentIntentRouter:
             not contextual_refinement
             and not history_match
             and not schedule_match
-            and any(term in normalized for term in cls._PREPARATION_TERMS)
+            and (
+                any(term in normalized for term in cls._PREPARATION_TERMS)
+                or active_execution_task
+            )
         ):
             selected.update(
                 {

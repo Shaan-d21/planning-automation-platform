@@ -7,13 +7,15 @@ import json
 import sys
 from collections import Counter
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
 from app.agent.graph import GRAPH_TOOL_NAMES
 from app.agent.intent import AgentIntentRouter
+from app.agent.models import AgentMessage, AgentMessageRole
 from app.agent.rule_matching import recommend_artifacts
+from app.agent.task_state import AgentTaskInterpreter
 
 
 DEFAULT_SUITE_PATH = Path("evaluations/agent/release_v1.json")
@@ -176,6 +178,8 @@ def _evaluate_case(case: dict[str, Any]) -> AgentEvaluationCaseResult:
         )
     if kind == "intent_route":
         checks, failures, actual = _evaluate_intent_route(case_id, case)
+    elif kind == "task_understanding":
+        checks, failures, actual = _evaluate_task_understanding(case_id, case)
     elif kind == "artifact_ranking":
         checks, failures, actual = _evaluate_artifact_ranking(case_id, case)
     else:
@@ -239,6 +243,96 @@ def _evaluate_intent_route(
     return checks, failures, {
         "intent": decision.intent.value,
         "tools": sorted(actual_tools),
+    }
+
+
+def _evaluate_task_understanding(
+    case_id: str,
+    case: dict[str, Any],
+) -> tuple[list[str], list[str], dict[str, Any]]:
+    """Evaluate deterministic task continuity without an LLM or Oracle."""
+    raw_turns = case.get("turns")
+    if raw_turns is None:
+        raw_turns = [case.get("prompt")]
+    if not isinstance(raw_turns, list) or not raw_turns or any(
+        not isinstance(item, str) or not item.strip() for item in raw_turns
+    ):
+        raise AgentEvaluationConfigurationError(
+            f"Case {case_id} requires a non-empty prompt or turns list."
+        )
+    raw_today = str(case.get("today") or "").strip()
+    try:
+        evaluation_date = date.fromisoformat(raw_today) if raw_today else None
+    except ValueError as exc:
+        raise AgentEvaluationConfigurationError(
+            f"Case {case_id} today must use YYYY-MM-DD."
+        ) from exc
+    messages = tuple(
+        AgentMessage(
+            message_id=index,
+            conversation_id=f"evaluation-{case_id}",
+            role=AgentMessageRole.USER,
+            content=turn,
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        for index, turn in enumerate(raw_turns, start=1)
+    )
+    result = AgentTaskInterpreter.interpret(messages, today=evaluation_date)
+    checks: list[str] = []
+    failures: list[str] = []
+
+    expected_intent = str(case.get("expected_task_intent") or "")
+    if result.intent.value == expected_intent:
+        checks.append(f"task_intent={expected_intent}")
+    else:
+        failures.append(
+            f"Expected task intent {expected_intent}, received {result.intent.value}."
+        )
+
+    expected_phase = str(case.get("expected_phase") or "")
+    if result.phase.value == expected_phase:
+        checks.append(f"task_phase={expected_phase}")
+    else:
+        failures.append(
+            f"Expected task phase {expected_phase}, received {result.phase.value}."
+        )
+
+    expected_parameters = case.get("expected_parameters", {})
+    if not isinstance(expected_parameters, dict):
+        raise AgentEvaluationConfigurationError(
+            f"Case {case_id} expected_parameters must be an object."
+        )
+    mismatched_parameters = {
+        name: {"expected": value, "actual": result.parameters.get(name)}
+        for name, value in expected_parameters.items()
+        if result.parameters.get(name) != value
+    }
+    if mismatched_parameters:
+        failures.append(
+            "Task parameters did not match: "
+            + json.dumps(mismatched_parameters, sort_keys=True)
+            + "."
+        )
+    elif expected_parameters:
+        checks.append("task parameters matched")
+
+    expected_missing = tuple(
+        str(item) for item in case.get("expected_missing_parameters", [])
+    )
+    if result.missing_parameters == expected_missing:
+        checks.append("missing parameters matched")
+    else:
+        failures.append(
+            "Expected missing parameters "
+            f"{list(expected_missing)}, received {list(result.missing_parameters)}."
+        )
+    return checks, failures, {
+        "task_intent": result.intent.value,
+        "phase": result.phase.value,
+        "confidence": result.confidence.value,
+        "parameters": result.parameters,
+        "missing_parameters": list(result.missing_parameters),
+        "clarification_prompt": result.clarification_prompt,
     }
 
 
