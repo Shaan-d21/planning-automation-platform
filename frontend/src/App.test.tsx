@@ -2051,6 +2051,44 @@ describe("App", () => {
     );
   });
 
+  it("refreshes the conversation when an approved execution becomes terminal", async () => {
+    const onTerminal = vi.fn();
+    vi.mocked(fetch).mockImplementation((input: RequestInfo | URL) => {
+      if (String(input) === "/api/v1/operations/runs/rule-execution-2") return response({
+        execution_id: "rule-execution-2",
+        operation_name: "Business Rule - Calculate Forecast",
+        status: "SUCCESS",
+        started_at: "2026-09-17T10:00:00Z",
+        completed_at: "2026-09-17T10:01:00Z",
+        error_message: null,
+        cancellation_requested_at: null,
+        cancellation_requested_by: null,
+        initiated_by: "Finance Planner",
+        trigger_source: "AI_AGENT",
+        steps: [],
+        completed_steps: 1,
+        total_steps: 1,
+        artifacts: [],
+        record_statistics: null,
+        flow_progress: null,
+        log_url: null,
+        terminal: true
+      });
+      return response({ detail: "Unexpected request" }, 404);
+    });
+
+    render(<AgentExecutionCard
+      approved={{ execution_id: "rule-execution-2", operation_code: "business-rules", target_name: "Calculate Forecast", status: "RUNNING" }}
+      csrfToken="test-csrf"
+      onRecoveryStarted={vi.fn()}
+      onTerminal={onTerminal}
+      onDismiss={vi.fn()}
+    />);
+
+    expect(await screen.findByText("Business Rule completed successfully.")).toBeTruthy();
+    await waitFor(() => expect(onTerminal).toHaveBeenCalledTimes(1));
+  });
+
   it("shows the sign-in experience when there is no session", async () => {
     vi.mocked(fetch).mockImplementation(() => response({ ...bootstrap, authenticated: false, user: null }));
     render(<App />);

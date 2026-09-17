@@ -225,10 +225,12 @@ def test_web_runtime_queues_without_executing_and_worker_completes(
                 completed_at=datetime.now(UTC),
             )
 
+    notified: list[str] = []
     worker = DurableExecutionWorker(
         settings,
         worker_id="worker-1",
         process_executor_factory=lambda *_args, **_kwargs: Executor(),
+        completion_notifier=notified.append,
     )
     assert worker.run_once()
     assert manager.get(submitted.execution_id).status.value == "SUCCESS"
@@ -238,3 +240,4 @@ def test_web_runtime_queues_without_executing_and_worker_completes(
         .status
         is WorkflowStatus.SUCCESS
     )
+    assert notified == [submitted.execution_id]

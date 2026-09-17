@@ -76,6 +76,9 @@ from app.models.automation_schedule import (
 from app.models.oracle_artifact import OracleEnvironment
 from app.services.data_integration_service import DataIntegrationService
 from app.services.data_service import DataService
+from app.services.agent_execution_followup_service import (
+    AgentExecutionFollowUpService,
+)
 from app.services.metadata_service import MetadataService
 from app.config.settings import Settings
 from app.models.access_control import (
@@ -196,6 +199,11 @@ class AgentApplicationService:
         self._logger = logger or logging.getLogger(__name__)
         self._graph = graph_orchestrator
         self._operation_manager = operation_manager
+        self._execution_followups = AgentExecutionFollowUpService(
+            settings.database_target,
+            repository=self._repository,
+            logger=self._logger.getChild("execution_followups"),
+        )
         self._schedule_service = schedule_service
         self._schedule_coordinator = schedule_coordinator
         self._schedule_environment_key = OracleEnvironment.from_settings(
@@ -260,6 +268,17 @@ class AgentApplicationService:
 
     def get_messages(self, conversation_id: str, user: UserAccount):
         self._require_agent_use(user)
+        try:
+            self._execution_followups.publish_for_conversation(
+                conversation_id,
+                user.user_id,
+            )
+        except Exception:
+            self._logger.exception(
+                "Unable to reconcile agent execution follow-ups for "
+                "conversation '%s'.",
+                conversation_id,
+            )
         return self._repository.list_messages(conversation_id, user.user_id)
 
     def get_action_drafts(self, conversation_id: str, user: UserAccount):

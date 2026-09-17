@@ -1323,6 +1323,9 @@ agent_action_decisions = Table(
     Column("failure_summary", Text),
     Column("decided_at", UTC_TIMESTAMP, nullable=False),
     Column("finalized_at", UTC_TIMESTAMP),
+    Column("completion_status", String(30)),
+    Column("completion_message_id", IDENTITY_BIGINT),
+    Column("completion_notified_at", UTC_TIMESTAMP),
     CheckConstraint(
         "decision IN ('APPROVE', 'REJECT')",
         name="decision",
@@ -1331,6 +1334,11 @@ agent_action_decisions = Table(
         "outcome_status IN ('PROCESSING', 'SUBMITTED', 'APPROVED', "
         "'REJECTED', 'FAILED')",
         name="outcome",
+    ),
+    CheckConstraint(
+        "completion_status IS NULL OR completion_status IN "
+        "('SUCCESS', 'FAILED', 'RECOVERY_REQUIRED', 'CANCELLED')",
+        name="completion_status",
     ),
 )
 Index(
