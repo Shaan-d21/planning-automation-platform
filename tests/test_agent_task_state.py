@@ -7,6 +7,7 @@ from datetime import UTC, date, datetime
 import pytest
 
 from app.agent.graph import AgentGraphOrchestrator
+from app.agent.execution_plan import AgentExecutionPlanBuilder
 from app.agent.models import AgentMessage, AgentMessageRole
 from app.agent.task_state import (
     AgentTaskConfidence,
@@ -108,7 +109,50 @@ def test_relative_data_load_period_is_explicitly_retained() -> None:
     assert result.parameters["period"] == "Aug"
     assert result.parameters["period_reference"] == "previous_month"
     assert result.parameters["file_preference"] == "latest"
+    assert result.phase is AgentTaskPhase.COLLECTING_INFORMATION
+    assert result.missing_parameters == ("load_method",)
+    assert "Data Integration" in str(result.clarification_prompt)
+
+
+@pytest.mark.parametrize(
+    ("reply", "method", "operation_code"),
+    (
+        ("Use Data Integration.", "DATA_INTEGRATION", "data-integrations"),
+        (
+            "Run a saved Planning Import Data job.",
+            "PLANNING_IMPORT",
+            "data-import",
+        ),
+    ),
+)
+def test_data_load_method_selects_the_governed_oracle_route(
+    reply: str,
+    method: str,
+    operation_code: str,
+) -> None:
+    result = AgentTaskInterpreter.interpret(
+        _messages(
+            "Load last month's actuals using the latest file.",
+            reply,
+        ),
+        today=date(2026, 9, 16),
+    )
+
+    assert result.intent is AgentTaskIntent.DATA_LOAD
+    assert result.parameters["scenario"] == "Actual"
+    assert result.parameters["period"] == "Aug"
+    assert result.parameters["file_preference"] == "latest"
+    assert result.parameters["load_method"] == method
     assert result.phase is AgentTaskPhase.READY_FOR_PLAN
+
+    call = AgentGraphOrchestrator._deterministic_task_operation_call(
+        {
+            "task_context": result.to_payload(),
+            "allowed_tool_names": ["prepare_operation_action"],
+        }
+    )
+    assert call is not None
+    assert call.arguments["operation_code"] == operation_code
 
 
 def test_user_period_correction_updates_the_existing_task() -> None:
@@ -123,6 +167,7 @@ def test_user_period_correction_updates_the_existing_task() -> None:
     assert result.intent is AgentTaskIntent.DATA_LOAD
     assert result.parameters["period"] == "Sep"
     assert result.parameters["file"] == "Actual_Aug.csv"
+    assert result.missing_parameters == ("load_method",)
 
 
 def test_forecast_seeding_progressively_collects_cutoff_period() -> None:
@@ -137,6 +182,21 @@ def test_forecast_seeding_progressively_collects_cutoff_period() -> None:
     assert "Through which month" in str(initial.clarification_prompt)
     assert ready.parameters["cutoff_period"] == "Aug"
     assert ready.phase is AgentTaskPhase.READY_FOR_PLAN
+
+
+def test_forecast_seeding_retains_cutoff_when_method_is_selected() -> None:
+    result = AgentTaskInterpreter.interpret(
+        _messages(
+            "Prepare the new forecast.",
+            "Use actuals through August.",
+            "Use the Business Rule.",
+        )
+    )
+
+    assert result.intent is AgentTaskIntent.FORECAST_SEEDING
+    assert result.parameters["cutoff_period"] == "Aug"
+    assert result.parameters["execution_method"] == "BUSINESS_RULE"
+    assert result.phase is AgentTaskPhase.READY_FOR_PLAN
 
 
 def test_variance_reporting_collects_comparison_then_period() -> None:
@@ -158,6 +218,47 @@ def test_variance_reporting_collects_comparison_then_period() -> None:
     assert comparison.missing_parameters == ("period",)
     assert ready.parameters["period"] == "Sep"
     assert ready.phase is AgentTaskPhase.READY_FOR_PLAN
+
+
+def test_variance_reporting_retains_context_when_saved_layout_is_selected() -> None:
+    result = AgentTaskInterpreter.interpret(
+        _messages(
+            "Show September Actual vs Budget variance above 1,000 for FY26.",
+            "Use saved Data Explorer view `monthly-variance` for the variance review.",
+        )
+    )
+
+    assert result.intent is AgentTaskIntent.VARIANCE_REPORTING
+    assert result.parameters == {
+        "period": "Sep",
+        "period_reference": "explicit",
+        "year": "FY26",
+        "comparison": "Actual vs Budget",
+        "threshold": 1000.0,
+        "scenario": "Budget",
+        "saved_view": "monthly-variance",
+    }
+    assert result.phase is AgentTaskPhase.READY_FOR_PLAN
+
+
+def test_variance_reporting_retains_saved_view_and_structured_pov_refinement() -> None:
+    result = AgentTaskInterpreter.interpret(
+        _messages(
+            "Show September Actual vs Budget variance above 500 for FY22.",
+            "Use saved Data Explorer view `monthly-variance` for the variance review.",
+            "Refine variance comparison using saved Data Explorer view "
+            "`monthly-variance`. Keep Actual vs Budget for Sep FY22 with "
+            "threshold 500. POV overrides: Product=`Snacks`; Entity=`US Sales`.",
+        )
+    )
+
+    assert result.intent is AgentTaskIntent.VARIANCE_REPORTING
+    assert result.parameters["saved_view"] == "monthly-variance"
+    assert result.parameters["pov_overrides"] == {
+        "Product": "Snacks",
+        "Entity": "US Sales",
+    }
+    assert result.phase is AgentTaskPhase.READY_FOR_PLAN
 
 
 def test_conversational_cancellation_never_implies_oracle_cancellation() -> None:
@@ -254,6 +355,97 @@ def test_ready_metadata_task_enters_existing_governed_preparation() -> None:
     assert call is not None
     assert call.name == "prepare_operation_action"
     assert call.arguments["operation_code"] == "metadata-import"
+
+
+def test_execution_plan_uses_registered_risk_and_requires_approval() -> None:
+    task = AgentTaskInterpreter.interpret(
+        _messages("Update Account metadata using the latest file.")
+    )
+
+    plan = AgentExecutionPlanBuilder.build(
+        task.to_payload(),
+        ["metadata-import"],
+    )
+
+    assert plan.status == "READY"
+    assert plan.approval_required is True
+    assert plan.steps[0].display_name == "Metadata Import"
+    assert plan.steps[0].risk_level == "Elevated"
+
+
+def test_execution_plan_rejects_unregistered_operation_codes() -> None:
+    task = AgentTaskInterpreter.interpret(
+        _messages("Update Account metadata using the latest file.")
+    )
+
+    plan = AgentExecutionPlanBuilder.build(
+        task.to_payload(),
+        ["invented-operation"],
+    )
+
+    assert plan.status == "UNSUPPORTED_OPERATION"
+    assert plan.steps == ()
+    assert plan.approval_required is False
+
+
+def test_data_integration_guided_inputs_reuse_safe_task_period_context() -> None:
+    task = AgentTaskInterpreter.interpret(
+        _messages(
+            "Load January FY27 actuals using Actual_Jan.csv.",
+            "Use Data Integration.",
+        )
+    )
+
+    context = AgentGraphOrchestrator._task_guided_input_context(
+        {"task_context": task.to_payload()},
+        "data-integrations",
+    )
+
+    assert context["task_context"] == {
+        "scenario": "Actual",
+        "period": "Jan",
+        "year": "FY27",
+        "file": "Actual_Jan.csv",
+    }
+    assert context["prefill"] == {
+        "year": "FY27",
+        "start_month": "Jan",
+        "end_month": "Jan",
+    }
+
+
+def test_month_close_enters_the_existing_multi_step_planner() -> None:
+    class EmptyCatalogGateway:
+        @staticmethod
+        def artifact_catalog(
+            _operation_code: str,
+        ) -> tuple[tuple[str, str], ...]:
+            return ()
+
+    task = AgentTaskInterpreter.interpret(
+        _messages(
+            "Start September month close.",
+            "Run Data Integration, then Business Rule, then Data Map.",
+        )
+    )
+    graph = object.__new__(AgentGraphOrchestrator)
+    graph._gateway = EmptyCatalogGateway()
+    graph._logger = __import__("logging").getLogger(__name__)
+
+    call = graph._deterministic_task_plan_call(
+        {
+            "task_context": task.to_payload(),
+            "allowed_tool_names": ["plan_multi_step_request"],
+        }
+    )
+
+    assert call is not None
+    assert call.name == "plan_multi_step_request"
+    assert call.arguments["requested_steps"] == [
+        "data-integrations",
+        "business-rules",
+        "data-maps",
+    ]
 
 
 def test_task_context_is_added_to_provider_instruction_without_credentials() -> None:

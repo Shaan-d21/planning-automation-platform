@@ -288,7 +288,10 @@ class _SavedViewReportWorkspace:
                 name="revenue-forecast",
                 title="Revenue Forecast",
                 cube="Plan1",
-                default_pov=(("Scenario", "Forecast"),),
+                default_pov=(
+                    ("Scenario", "Forecast"),
+                    ("Product", "BaseData"),
+                ),
                 rows=(("Account", ("Revenue",)),),
                 columns=(("Period", ("Jan",)),),
             ),
@@ -297,6 +300,52 @@ class _SavedViewReportWorkspace:
                 title="Legacy layout",
                 cube="Plan1",
                 default_pov=(),
+            ),
+        )
+
+
+class _VarianceDataReview:
+    def __init__(self, expected_product: str = "BaseData") -> None:
+        self.expected_product = expected_product
+
+    def compare_slices(
+        self,
+        source,
+        target,
+        *,
+        tolerance,
+        max_mismatches,
+        include_cells,
+    ):
+        assert source.cube == target.cube == "Plan1"
+        assert source.pov["Scenario"] == "Actual"
+        assert target.pov["Scenario"] == "Budget"
+        assert source.pov["Product"] == self.expected_product
+        assert target.pov["Product"] == self.expected_product
+        assert source.columns[0].dimension == "Period"
+        assert source.columns[0].members == ("Sep",)
+        assert target.columns[0].members == ("Sep",)
+        assert tolerance == 1000
+        assert max_mismatches == 100
+        assert include_cells is False
+        return DataReviewComparison(
+            source_cube="Plan1",
+            target_cube="Plan1",
+            result=DataValidationResult(
+                source_form="Actual Sep",
+                target_form="Budget Sep",
+                compared_cells=2,
+                matched_cells=1,
+                mismatches=(
+                    DataMismatch(
+                        row_headers=("Revenue",),
+                        column_headers=("Sep",),
+                        source_value=5000,
+                        target_value=3500,
+                        difference=1500,
+                    ),
+                ),
+                tolerance=1000,
             ),
         )
 
@@ -1135,10 +1184,39 @@ def test_agent_service_restores_saved_data_explorer_view_as_exact_context(
         "tool": "review_saved_data_view",
         "selection": {
             "cube": "Plan1",
-            "pov": {"Scenario": "Forecast"},
+            "pov": {"Scenario": "Forecast", "Product": "BaseData"},
             "rows": [{"dimension": "Account", "members": ["Revenue"]}],
             "columns": [{"dimension": "Period", "members": ["Jan"]}],
         },
+    }
+
+    variance_arguments = {
+        "name": "revenue-forecast",
+        "comparison": "Actual vs Budget",
+        "period": "Sep",
+        "year": "FY26",
+        "threshold": 500,
+        "pov_overrides": {"Product": "Snacks"},
+    }
+    repository.record_tool_activity(
+        conversation_id=conversation.conversation_id,
+        user_id=1,
+        activities=(
+            AgentToolActivity(
+                name="review_saved_variance",
+                arguments=variance_arguments,
+                status="SUCCESS",
+                summary="Variance compared.",
+            ),
+        ),
+    )
+
+    assert service.get_data_review_context(
+        conversation.conversation_id,
+        _user(Permission.DATA_REVIEW),
+    ) == {
+        "tool": "review_saved_variance",
+        "selection": variance_arguments,
     }
 
 
@@ -1335,7 +1413,7 @@ def test_agent_data_explorer_saved_view_uses_server_side_layout(
     }
     assert reviewed["request"] == {
         "cube": "Plan1",
-        "pov": {"Scenario": "Forecast"},
+        "pov": {"Scenario": "Forecast", "Product": "BaseData"},
         "rows": [{"dimension": "Account", "members": ["Revenue"]}],
         "columns": [{"dimension": "Period", "members": ["Jan"]}],
     }
@@ -1347,6 +1425,54 @@ def test_agent_data_explorer_saved_view_uses_server_side_layout(
                 arguments={"name": "missing"},
             )
         )
+
+
+def test_agent_variance_review_reuses_saved_layout_and_live_values(
+    tmp_path: Path,
+) -> None:
+    gateway = AgentCapabilityGateway(
+        _settings(tmp_path),
+        control_center=_ControlCenter(),
+        data_review=_VarianceDataReview(expected_product="Snacks"),
+        report_workspace=_SavedViewReportWorkspace(),
+    )
+
+    catalog = gateway.execute(
+        AgentToolCall(
+            name="list_variance_views",
+            arguments={
+                "comparison": "Actual vs Budget",
+                "period": "Sep",
+                "threshold": 1000,
+            },
+        )
+    )
+    compared = gateway.execute(
+        AgentToolCall(
+            name="review_saved_variance",
+            arguments={
+                "name": "revenue-forecast",
+                "comparison": "Actual vs Budget",
+                "period": "Sep",
+                "threshold": 1000,
+                "pov_overrides": {"Product": "Snacks"},
+            },
+        )
+    )
+
+    assert catalog["purpose"] == "variance"
+    assert catalog["comparison"] == "Actual vs Budget"
+    assert catalog["views"][0]["name"] == "revenue-forecast"
+    assert compared["saved_view"]["name"] == "revenue-forecast"
+    assert compared["variance_context"] == {
+        "comparison": "Actual vs Budget",
+        "period": "Sep",
+        "year": "",
+        "threshold": 1000.0,
+        "pov_overrides": {"Product": "Snacks"},
+    }
+    assert compared["result"]["compared_cells"] == 2
+    assert compared["result"]["matched_cells"] == 1
 
 
 def test_agent_service_persists_action_draft_for_conversation(
