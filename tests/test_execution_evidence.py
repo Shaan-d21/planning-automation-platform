@@ -227,3 +227,23 @@ def test_agent_execution_evidence_reports_success_with_rejections() -> None:
     assert evidence["diagnosis"] == (
         "Completed, but Oracle reported 1 rejected record."
     )
+
+
+def test_agent_execution_evidence_explains_safe_flow_stop() -> None:
+    started = datetime(2026, 9, 17, 10, 0, tzinfo=UTC)
+    run = WorkflowRun(
+        execution_id="run-cancelled",
+        workflow_name="September Close",
+        status=WorkflowStatus.CANCELLED,
+        started_at=started,
+        completed_at=started + timedelta(seconds=5),
+        error_message=(
+            "The user requested a safe stop. Completed Oracle steps were "
+            "retained and remaining steps were not started."
+        ),
+    )
+
+    evidence = agent_execution_evidence(run)
+
+    assert evidence["status"] == "CANCELLED"
+    assert evidence["diagnosis"] == run.error_message

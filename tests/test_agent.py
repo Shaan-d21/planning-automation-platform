@@ -1032,6 +1032,24 @@ class _OperationManager:
         )
 
 
+class _ActiveFlowOperationManager:
+    def __init__(self) -> None:
+        self.stop_requests: list[tuple[str, str]] = []
+
+    def get(self, execution_id: str):
+        if execution_id != "active-flow-1":
+            return None
+        return SimpleNamespace(status=SimpleNamespace(value="RUNNING"))
+
+    def request_flow_stop(self, execution_id: str, *, requested_by: str):
+        self.stop_requests.append((execution_id, requested_by))
+        return SimpleNamespace(
+            execution_id=execution_id,
+            target_name="September Close",
+            status=SimpleNamespace(value="RUNNING"),
+        )
+
+
 def test_agent_service_persists_provider_neutral_conversation(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     access = AccessControlService(settings.workflow_database_file)
@@ -1066,6 +1084,69 @@ def test_agent_service_persists_provider_neutral_conversation(tmp_path: Path) ->
     assert [item.role.value for item in messages] == ["user", "assistant"]
     assert result["message"].content.startswith("The configured operations")
     assert service.list_conversations(user)[0].title == "What can I run?"
+
+
+def test_agent_safe_stop_targets_latest_active_standalone_flow(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    AccessControlService(settings.workflow_database_file).bootstrap_administrator(
+        username="admin",
+        display_name="Administrator",
+        email=None,
+        password="Strong password 123!",
+    )
+    repository = SQLiteAgentRepository(settings.workflow_database_file)
+    user = _user()
+    conversation = repository.create_conversation(
+        user_id=user.user_id,
+        provider="gemini",
+        model="test-model",
+    )
+    repository.reserve_action_decision(
+        request_id="run-active-flow",
+        conversation_id=conversation.conversation_id,
+        user_id=user.user_id,
+        username=user.username,
+        operation_code="standalone-flow",
+        artifact_name="September Close",
+        decision="APPROVE",
+        payload_checksum="a" * 64,
+        payload_snapshot={"name": "September Close"},
+    )
+    repository.finalize_action_decision(
+        request_id="run-active-flow",
+        user_id=user.user_id,
+        conversation_id=conversation.conversation_id,
+        outcome_status="SUBMITTED",
+        execution_id="active-flow-1",
+    )
+    manager = _ActiveFlowOperationManager()
+    service = AgentApplicationService(
+        settings,
+        gateway=AgentCapabilityGateway(
+            settings,
+            control_center=_ControlCenter(),
+            data_review=_DataReview(),
+        ),
+        repository=repository,
+        operation_manager=manager,
+    )
+
+    result = service.send_message(
+        conversation_id=conversation.conversation_id,
+        user=user,
+        content="Stop after this step.",
+    )
+
+    assert manager.stop_requests == [("active-flow-1", "planner")]
+    assert result["execution"] == {
+        "execution_id": "active-flow-1",
+        "operation_code": "standalone-flow",
+        "target_name": "September Close",
+        "status": "RUNNING",
+    }
+    assert "no later flow step will start" in result["message"].content
 
 
 def test_agent_conversations_are_scoped_to_their_owner(tmp_path: Path) -> None:

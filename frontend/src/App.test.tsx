@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
 import type { BootstrapResponse, HomeResponse } from "./api/types";
+import { AgentExecutionCard } from "./components/EpmAssistantWorkspace";
 
 const bootstrap: BootstrapResponse = {
   product: { name: "BISP EPM Automation", company: "BISP Solutions", api_version: "v1" },
@@ -1973,6 +1974,81 @@ describe("App", () => {
     expect((screen.getByLabelText("Message the EPM Assistant") as HTMLTextAreaElement).value).toContain("Cube: Plan2");
     expect((screen.getByLabelText("Message the EPM Assistant") as HTMLTextAreaElement).value).toContain("Scenario=Actual");
     expect((screen.getByLabelText("Message the EPM Assistant") as HTMLTextAreaElement).value).toContain("Account=Units|Average_Selling_Price|Total_Revenue");
+  });
+
+  it("requests a safe stop for an active standalone flow", async () => {
+    const execution = {
+      execution_id: "flow-execution-1",
+      operation_name: "Standalone Planning Flow - September Close",
+      status: "RUNNING" as const,
+      started_at: "2026-09-17T10:00:00Z",
+      completed_at: null,
+      error_message: null,
+      cancellation_requested_at: null,
+      cancellation_requested_by: null,
+      initiated_by: "Finance Planner",
+      trigger_source: "AI_AGENT",
+      steps: [],
+      completed_steps: 1,
+      total_steps: 3,
+      artifacts: [],
+      record_statistics: null,
+      flow_progress: {
+        status: "RUNNING",
+        total_steps: 3,
+        completed_steps: 1,
+        successful_steps: 1,
+        progress_percent: 33,
+        current_step: {
+          sequence: 2,
+          operation_code: "business-rules",
+          display_name: "Calculate forecast",
+          artifact_name: "Calculate Forecast",
+          status: "RUNNING",
+          started_at: "2026-09-17T10:01:00Z",
+          completed_at: null,
+          error_message: null,
+          oracle_job_id: "123",
+          oracle_status: "Processing",
+          active_stage: "Waiting for Oracle",
+          record_statistics: null
+        },
+        steps: [],
+        recovery: null
+      },
+      log_url: null,
+      terminal: false
+    };
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/v1/operations/runs/flow-execution-1" && !init?.method) return response(execution);
+      if (url === "/api/v1/operations/runs/flow-execution-1/stop" && init?.method === "POST") return response({
+        status: "stop_requested",
+        execution_id: "flow-execution-1",
+        execution_status: "RUNNING",
+        cancellation_requested_at: "2026-09-17T10:02:00Z",
+        message: "The current Oracle step will finish; later flow steps will not start."
+      });
+      return response({ detail: "Unexpected request" }, 404);
+    });
+
+    render(<AgentExecutionCard
+      approved={{ execution_id: "flow-execution-1", operation_code: "standalone-flow", target_name: "September Close", status: "RUNNING" }}
+      csrfToken="test-csrf"
+      onRecoveryStarted={vi.fn()}
+      onDismiss={vi.fn()}
+    />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Stop after current step" }));
+    const stopButtons = screen.getAllByRole("button", { name: "Stop after current step" });
+    fireEvent.click(stopButtons[stopButtons.length - 1]);
+
+    expect(await screen.findByText(/later flow steps will not start/i)).toBeTruthy();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/operations/runs/flow-execution-1/stop",
+      expect.objectContaining({ method: "POST" })
+    );
   });
 
   it("shows the sign-in experience when there is no session", async () => {

@@ -182,6 +182,30 @@ def test_failed_flow_recovery_requires_review_and_queues_new_execution(
     assert actor.trigger_source is TriggerSource.MANUAL
 
 
+def test_standalone_flow_stop_requests_safe_worker_boundary(
+    tmp_path: Path,
+) -> None:
+    app = create_app(_settings(tmp_path), session_secret="test-secret")
+    client = TestClient(app)
+    _login(client)
+    app.state.operation_manager = Mock()
+    app.state.operation_manager.request_flow_stop.return_value = SimpleNamespace(
+        execution_id="active-flow",
+        status=OperationExecutionStatus.RUNNING,
+        cancellation_requested_at=datetime(2026, 9, 17, 9, 30, tzinfo=UTC),
+    )
+
+    response = client.post("/api/v1/operations/runs/active-flow/stop")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "stop_requested"
+    assert "current Oracle step will finish" in response.json()["message"]
+    app.state.operation_manager.request_flow_stop.assert_called_once_with(
+        "active-flow",
+        requested_by="admin",
+    )
+
+
 class _SuccessfulConnection:
     def execute(self) -> ConnectionResult:
         return ConnectionResult(

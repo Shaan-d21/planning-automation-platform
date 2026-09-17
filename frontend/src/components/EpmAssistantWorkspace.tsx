@@ -1772,14 +1772,21 @@ export function AgentExecutionCard({ approved, csrfToken, onRecoveryStarted, onD
   const [recoveryPlan, setRecoveryPlan] = useState<StandaloneFlowRecoveryPlan | null>(null);
   const [reviewingRecovery, setReviewingRecovery] = useState(false);
   const [recoveryError, setRecoveryError] = useState<string | null>(null);
+  const [confirmStop, setConfirmStop] = useState(false);
+  const [stopping, setStopping] = useState(false);
+  const [stopMessage, setStopMessage] = useState<string | null>(null);
+  const [stopError, setStopError] = useState<string | null>(null);
   const status = execution?.status ?? approved.status;
   const terminal = execution?.terminal ?? false;
   const success = status === "SUCCESS";
+  const cancelled = status === "CANCELLED";
   const failed = ["FAILED", "RECOVERY_REQUIRED"].includes(status);
   const operationName = approved.operation_code === "standalone-flow" ? "Standalone Planning Flow" : approved.operation_code === "user-variables" ? "User Variable change" : approved.operation_code === "substitution-variables" ? "Substitution Variable change" : approved.operation_code === "cube-refresh" ? "Cube Refresh" : approved.operation_code === "pipelines" ? "Pipeline" : approved.operation_code === "data-integrations" ? "Data Integration" : approved.operation_code === "metadata-import" ? "Metadata Import" : approved.operation_code === "data-import" ? "Planning Data Import" : approved.operation_code === "data-maps" ? "Data Map" : "Business Rule";
   const flow = execution?.flow_progress ?? null;
   const currentStep = flow?.current_step;
   const canRecover = approved.operation_code === "standalone-flow" && status === "FAILED";
+  const cancellationRequested = Boolean(execution?.cancellation_requested_at || stopMessage);
+  const canStop = approved.operation_code === "standalone-flow" && !terminal && !cancellationRequested;
 
   async function reviewRecovery() {
     setReviewingRecovery(true);
@@ -1793,21 +1800,37 @@ export function AgentExecutionCard({ approved, csrfToken, onRecoveryStarted, onD
       setReviewingRecovery(false);
     }
   }
-  const message = monitorError
-    || (success
-      ? `${operationName} completed successfully.`
-      : failed
-        ? execution?.error_message || `${operationName} execution failed.`
-        : currentStep
-          ? `Step ${currentStep.sequence} of ${flow.total_steps}: ${currentStep.display_name} is ${currentStep.status === "RUNNING" ? "running" : "waiting to start"}.`
-          : `${operationName} is queued or running in Oracle.`);
-  return <article className={`assistant-agent-execution${flow ? " is-flow" : ""}${success ? " is-success" : failed ? " is-failed" : " is-active"}`} aria-label={`Approved ${operationName} execution`}>
-    <span className="assistant-agent-execution__icon">{success ? <Icon name="check" /> : failed ? <Icon name="alert" /> : <span className="spinner spinner--dark" />}</span>
+  async function stopFlow() {
+    setStopping(true);
+    setStopError(null);
+    try {
+      const response = await api.stopStandaloneFlow(approved.execution_id, csrfToken);
+      setStopMessage(response.message);
+      setConfirmStop(false);
+    } catch (reason) {
+      setStopError(errorMessage(reason));
+    } finally {
+      setStopping(false);
+    }
+  }
+  let message = monitorError;
+  if (!message) {
+    if (cancelled) message = execution?.error_message || "The standalone flow was stopped safely.";
+    else if (success) message = `${operationName} completed successfully.`;
+    else if (failed) message = execution?.error_message || `${operationName} execution failed.`;
+    else if (cancellationRequested) message = stopMessage || "A safe stop was requested. The current Oracle step will finish before the flow stops.";
+    else if (currentStep) message = `Step ${currentStep.sequence} of ${flow.total_steps}: ${currentStep.display_name} is ${currentStep.status === "RUNNING" ? "running" : "waiting to start"}.`;
+    else message = `${operationName} is queued or running in Oracle.`;
+  }
+  return <article className={`assistant-agent-execution${flow ? " is-flow" : ""}${success ? " is-success" : failed ? " is-failed" : cancelled ? " is-cancelled" : " is-active"}`} aria-label={`Approved ${operationName} execution`}>
+    <span className="assistant-agent-execution__icon">{success ? <Icon name="check" /> : failed || cancelled ? <Icon name="alert" /> : <span className="spinner spinner--dark" />}</span>
     <div><span className="eyebrow">Approved Oracle execution</span><h3>{approved.target_name}</h3><p>{message}</p><small>Execution {approved.execution_id.slice(0, 8)} · {friendlyName(status)}</small></div>
-    <footer>{canRecover && <button type="button" className="button button--primary" disabled={reviewingRecovery} onClick={() => void reviewRecovery()}>{reviewingRecovery ? <><span className="spinner" /> Reviewing…</> : <>Review recovery <Icon name="arrow" /></>}</button>}<a className="button button--secondary" href={`/?execution_id=${encodeURIComponent(approved.execution_id)}#jobs`}>{terminal ? "View evidence" : "Open live status"} <Icon name="arrow" /></a><button type="button" className="icon-button" aria-label="Dismiss execution status" title="Dismiss" onClick={onDismiss}><Icon name="close" /></button></footer>
+    <footer>{canStop && <button type="button" className="button button--secondary" onClick={() => setConfirmStop(true)}>Stop after current step</button>}{canRecover && <button type="button" className="button button--primary" disabled={reviewingRecovery} onClick={() => void reviewRecovery()}>{reviewingRecovery ? <><span className="spinner" /> Reviewing…</> : <>Review recovery <Icon name="arrow" /></>}</button>}<a className="button button--secondary" href={`/?execution_id=${encodeURIComponent(approved.execution_id)}#jobs`}>{terminal ? "View evidence" : "Open live status"} <Icon name="arrow" /></a><button type="button" className="icon-button" aria-label="Dismiss execution status" title="Dismiss" onClick={onDismiss}><Icon name="close" /></button></footer>
     {recoveryError && <div className="assistant-agent-execution__recovery-error"><Icon name="alert" />{recoveryError}</div>}
+    {stopError && !confirmStop && <div className="assistant-agent-execution__recovery-error"><Icon name="alert" />{stopError}</div>}
     {flow && <StandaloneFlowTimeline flow={flow} />}
     {recoveryPlan && <StandaloneFlowRecoveryDialog plan={recoveryPlan} csrfToken={csrfToken} onClose={() => setRecoveryPlan(null)} onStarted={(accepted) => { setRecoveryPlan(null); onRecoveryStarted({ execution_id: accepted.execution_id, operation_code: "standalone-flow", target_name: `Recovery - ${recoveryPlan.flow_name}`, status: "QUEUED" }); }} />}
+    {confirmStop && <ConfirmationDialog title="Stop this standalone flow?" description="The platform will prevent all remaining steps from starting." warning="An Oracle job that is already running will not be interrupted. It will finish first, and the flow will stop before the next step." confirmLabel="Stop after current step" tone="danger" busy={stopping} error={stopError} onConfirm={stopFlow} onClose={() => { if (!stopping) { setConfirmStop(false); setStopError(null); } }} />}
   </article>;
 }
 
