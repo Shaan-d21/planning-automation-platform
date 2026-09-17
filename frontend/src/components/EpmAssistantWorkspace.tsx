@@ -112,6 +112,21 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
     setConversations(response.conversations);
   }
 
+  async function refreshExecutionCompletion() {
+    if (!activeId) return;
+    try {
+      const response = await api.agentMessages(activeId);
+      setMessages(response.messages);
+      setDrafts(response.action_drafts);
+      setApproval(response.approval_request);
+      setClarification(response.clarification_request);
+      setInputRequest(response.input_request);
+      await refreshConversations();
+    } catch (reason) {
+      setError(errorMessage(reason));
+    }
+  }
+
   async function openConversation(conversationId: string) {
     keepConversationAtBottom.current = true;
     setActiveId(conversationId);
@@ -475,7 +490,7 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
           {clarification && <ClarificationCard clarification={clarification} busy={selecting} onSubmit={resolveClarification} onSynchronize={synchronizeClarificationArtifacts} onRegister={registerClarificationArtifact} />}
           {inputRequest && <GuidedInputCard request={inputRequest} busy={savingInputs} csrfToken={csrfToken} onSubmit={resolveInput} />}
           {approval && <ApprovalCard approval={approval} deciding={deciding} onDecision={resolveApproval} />}
-          {approvedExecution && <AgentExecutionCard approved={approvedExecution} csrfToken={csrfToken} onRecoveryStarted={setApprovedExecution} onDismiss={() => setApprovedExecution(null)} />}
+          {approvedExecution && <AgentExecutionCard approved={approvedExecution} csrfToken={csrfToken} onRecoveryStarted={setApprovedExecution} onTerminal={refreshExecutionCompletion} onDismiss={() => setApprovedExecution(null)} />}
           {approvedSchedule && <AgentScheduleResultCard schedule={approvedSchedule} onDismiss={() => setApprovedSchedule(null)} />}
           {sending && <article className="assistant-message assistant-message--assistant is-thinking"><span className="assistant-avatar"><Icon name="assistant" /></span><div><span className="eyebrow">EPM Assistant</span><p><span className="spinner" /> Inspecting the permitted platform context…</p></div></article>}
           <div ref={messageEnd} />
@@ -1762,10 +1777,11 @@ function AgentScheduleResultCard({ schedule, onDismiss }: {
   </article>;
 }
 
-export function AgentExecutionCard({ approved, csrfToken, onRecoveryStarted, onDismiss }: {
+export function AgentExecutionCard({ approved, csrfToken, onRecoveryStarted, onTerminal, onDismiss }: {
   approved: AgentApprovedExecution;
   csrfToken: string;
   onRecoveryStarted: (execution: AgentApprovedExecution) => void;
+  onTerminal?: () => void | Promise<void>;
   onDismiss: () => void;
 }) {
   const { execution, monitorError } = useOperationMonitor(approved.execution_id);
@@ -1776,6 +1792,7 @@ export function AgentExecutionCard({ approved, csrfToken, onRecoveryStarted, onD
   const [stopping, setStopping] = useState(false);
   const [stopMessage, setStopMessage] = useState<string | null>(null);
   const [stopError, setStopError] = useState<string | null>(null);
+  const completionReported = useRef(false);
   const status = execution?.status ?? approved.status;
   const terminal = execution?.terminal ?? false;
   const success = status === "SUCCESS";
@@ -1787,6 +1804,16 @@ export function AgentExecutionCard({ approved, csrfToken, onRecoveryStarted, onD
   const canRecover = approved.operation_code === "standalone-flow" && status === "FAILED";
   const cancellationRequested = Boolean(execution?.cancellation_requested_at || stopMessage);
   const canStop = approved.operation_code === "standalone-flow" && !terminal && !cancellationRequested;
+
+  useEffect(() => {
+    completionReported.current = false;
+  }, [approved.execution_id]);
+
+  useEffect(() => {
+    if (!terminal || completionReported.current) return;
+    completionReported.current = true;
+    void onTerminal?.();
+  }, [terminal, onTerminal]);
 
   async function reviewRecovery() {
     setReviewingRecovery(true);

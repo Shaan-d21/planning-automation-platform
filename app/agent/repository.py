@@ -528,6 +528,126 @@ class SQLAgentRepository:
             ).mappings().all()
         return tuple(self._action_decision(row) for row in rows)
 
+    def append_execution_followup(
+        self,
+        *,
+        execution_id: str,
+        completion_status: str,
+        content: str,
+    ) -> AgentMessage | None:
+        """Append one terminal execution message exactly once when possible."""
+        normalized_execution_id = str(execution_id).strip()
+        normalized_status = str(completion_status).strip().upper()
+        normalized_content = str(content).strip()
+        if not normalized_execution_id or not normalized_content:
+            return None
+        if normalized_status not in {
+            "SUCCESS",
+            "FAILED",
+            "RECOVERY_REQUIRED",
+            "CANCELLED",
+        }:
+            return None
+        now = datetime.now(UTC)
+        with self._database.begin() as connection:
+            statement = (
+                select(agent_action_decisions)
+                .where(
+                    agent_action_decisions.c.execution_id
+                    == normalized_execution_id,
+                    agent_action_decisions.c.decision == "APPROVE",
+                    agent_action_decisions.c.outcome_status == "SUBMITTED",
+                )
+                .order_by(agent_action_decisions.c.finalized_at.desc())
+                .limit(1)
+            )
+            decision = connection.execute(statement).mappings().one_or_none()
+            if (
+                decision is None
+                or decision["completion_notified_at"] is not None
+            ):
+                return None
+            conversation = connection.execute(
+                select(agent_conversations).where(
+                    agent_conversations.c.conversation_id
+                    == decision["conversation_id"],
+                    agent_conversations.c.user_id
+                    == decision["actor_user_id"],
+                )
+            ).mappings().one_or_none()
+            if conversation is None:
+                return None
+            claimed = connection.execute(
+                update(agent_action_decisions)
+                .where(
+                    agent_action_decisions.c.decision_id
+                    == decision["decision_id"],
+                    agent_action_decisions.c.completion_notified_at.is_(None),
+                )
+                .values(
+                    completion_status=normalized_status,
+                    completion_notified_at=now,
+                )
+            )
+            if claimed.rowcount != 1:
+                return None
+            message_id = int(
+                connection.execute(
+                    insert(agent_messages)
+                    .values(
+                        conversation_id=decision["conversation_id"],
+                        role=AgentMessageRole.ASSISTANT.value,
+                        content=normalized_content,
+                        created_at=now,
+                    )
+                    .returning(agent_messages.c.message_id)
+                ).scalar_one()
+            )
+            connection.execute(
+                update(agent_conversations)
+                .where(
+                    agent_conversations.c.conversation_id
+                    == decision["conversation_id"]
+                )
+                .values(updated_at=now)
+            )
+            connection.execute(
+                update(agent_action_decisions)
+                .where(
+                    agent_action_decisions.c.decision_id
+                    == decision["decision_id"],
+                )
+                .values(
+                    completion_message_id=message_id,
+                )
+            )
+        return AgentMessage(
+            message_id=message_id,
+            conversation_id=str(decision["conversation_id"]),
+            role=AgentMessageRole.ASSISTANT,
+            content=normalized_content,
+            created_at=now,
+        )
+
+    def find_action_decision_by_execution(
+        self,
+        execution_id: str,
+    ) -> AgentActionDecision | None:
+        """Return the approved agent decision associated with an execution."""
+        with self._database.connect() as connection:
+            row = connection.execute(
+                select(agent_action_decisions)
+                .where(
+                    agent_action_decisions.c.execution_id
+                    == str(execution_id).strip(),
+                    agent_action_decisions.c.decision == "APPROVE",
+                    agent_action_decisions.c.outcome_status == "SUBMITTED",
+                )
+                .order_by(agent_action_decisions.c.finalized_at.desc())
+                .limit(1)
+            ).mappings().one_or_none()
+        return self._action_decision(row) if row is not None else None
+
     def delete_conversation(self, conversation_id: str, user_id: int) -> bool:
         self._require_conversation(conversation_id, user_id)
         with self._database.begin() as connection:
@@ -645,6 +765,15 @@ class SQLAgentRepository:
             failure_summary=row["failure_summary"],
             decided_at=utc_datetime(row["decided_at"]),
             finalized_at=utc_datetime(row["finalized_at"]),
+            completion_status=row["completion_status"],
+            completion_message_id=(
+                int(row["completion_message_id"])
+                if row["completion_message_id"] is not None
+                else None
+            ),
+            completion_notified_at=utc_datetime(
+                row["completion_notified_at"]
+            ),
         )
 
     @staticmethod
