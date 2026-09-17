@@ -665,13 +665,15 @@ execution_queue = Table(
     Column("heartbeat_at", UTC_TIMESTAMP),
     Column("completed_at", UTC_TIMESTAMP),
     Column("error_message", Text),
+    Column("cancellation_requested_at", UTC_TIMESTAMP),
+    Column("cancellation_requested_by", String(80)),
     CheckConstraint(
         "job_type IN ('OPERATION', 'PROCESS', 'STANDALONE_FLOW')",
         name="job_type",
     ),
     CheckConstraint(
         "status IN ('QUEUED', 'RUNNING', 'SUCCESS', 'FAILED', "
-        "'RECOVERY_REQUIRED')",
+        "'RECOVERY_REQUIRED', 'CANCELLED')",
         name="status",
     ),
     CheckConstraint("attempt_count >= 0", name="attempt_nonnegative"),

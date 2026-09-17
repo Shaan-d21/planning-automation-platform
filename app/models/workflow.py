@@ -17,6 +17,7 @@ class WorkflowStatus(StrEnum):
     RUNNING = "RUNNING"
     SUCCESS = "SUCCESS"
     FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
 
 
 class WorkflowStepStatus(StrEnum):

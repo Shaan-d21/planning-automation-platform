@@ -395,6 +395,11 @@ def _execution_diagnosis(
         return "Completed successfully."
     if run.status is WorkflowStatus.RUNNING:
         return "Execution is still running."
+    if run.status is WorkflowStatus.CANCELLED:
+        return (
+            _safe_text(run.error_message)
+            or "Stopped safely; remaining workflow steps were not started."
+        )
     return "Execution is queued and has not started yet."
 
 

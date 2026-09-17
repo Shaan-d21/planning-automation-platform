@@ -1235,10 +1235,12 @@ export interface StandaloneFlowRecoveryAccepted extends OperationAcceptedRespons
 export interface OperationExecution {
   execution_id: string;
   operation_name: string;
-  status: "QUEUED" | "RUNNING" | "SUCCESS" | "FAILED" | "RECOVERY_REQUIRED";
+  status: "QUEUED" | "RUNNING" | "SUCCESS" | "FAILED" | "RECOVERY_REQUIRED" | "CANCELLED";
   started_at: string;
   completed_at: string | null;
   error_message: string | null;
+  cancellation_requested_at: string | null;
+  cancellation_requested_by: string | null;
   initiated_by: string | null;
   trigger_source: string | null;
   executed_by?: string | null;
@@ -1250,6 +1252,14 @@ export interface OperationExecution {
   flow_progress: StandaloneFlowProgress | null;
   log_url: string | null;
   terminal: boolean;
+}
+
+export interface StandaloneFlowStopResponse {
+  status: "cancelled" | "stop_requested";
+  execution_id: string;
+  execution_status: string;
+  cancellation_requested_at: string | null;
+  message: string;
 }
 
 export interface OracleRecordStatisticsDetail {

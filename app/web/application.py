@@ -3600,6 +3600,37 @@ def create_app(
             raise HTTPException(status_code=404, detail="Execution not found.")
         return payload
 
+    @app.post("/api/operations/runs/{execution_id}/stop")
+    async def stop_standalone_flow(request: Request, execution_id: str):
+        """Stop a flow before start or after its currently active Oracle step."""
+        _require_operation_execution_access(request, execution_id)
+        user = _current_user(request)
+        assert user is not None
+        try:
+            execution = await run_in_threadpool(
+                request.app.state.operation_manager.request_flow_stop,
+                execution_id,
+                requested_by=user.username,
+            )
+        except EPMError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        queued_cancel = execution.status.value == "CANCELLED"
+        return {
+            "status": "cancelled" if queued_cancel else "stop_requested",
+            "execution_id": execution.execution_id,
+            "execution_status": execution.status.value,
+            "cancellation_requested_at": (
+                execution.cancellation_requested_at.isoformat()
+                if execution.cancellation_requested_at
+                else None
+            ),
+            "message": (
+                "The standalone flow was cancelled before any Oracle step started."
+                if queued_cancel
+                else "The current Oracle step will finish; later flow steps will not start."
+            ),
+        }
+
     @app.get("/api/operations/runs/{execution_id}/recovery")
     async def get_standalone_flow_recovery(
         request: Request,
@@ -3888,6 +3919,14 @@ def _execution_payload(manager, execution_id: str, settings: Settings):
         "started_at": started_at,
         "completed_at": completed_at,
         "error_message": error_message,
+        "cancellation_requested_at": (
+            managed.cancellation_requested_at.isoformat()
+            if managed is not None and managed.cancellation_requested_at
+            else None
+        ),
+        "cancellation_requested_by": (
+            managed.cancellation_requested_by if managed is not None else None
+        ),
         "initiated_by": initiated_by,
         "trigger_source": trigger_source,
         "executed_by": executed_by,
@@ -3900,7 +3939,8 @@ def _execution_payload(manager, execution_id: str, settings: Settings):
             if managed is not None and managed.log_file.is_file()
             else None
         ),
-        "terminal": status in {"SUCCESS", "FAILED", "RECOVERY_REQUIRED"},
+        "terminal": status
+        in {"SUCCESS", "FAILED", "RECOVERY_REQUIRED", "CANCELLED"},
     }
 
 

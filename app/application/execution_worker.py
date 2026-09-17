@@ -190,17 +190,32 @@ class DurableExecutionWorker:
                 }
                 if actor is not None:
                     arguments["actor"] = actor
-                run = executor.execute(flow_input, **arguments)
+                run = executor.execute(
+                    flow_input,
+                    stop_requested=lambda: self._queue.cancellation_requested(
+                        job.execution_id
+                    ),
+                    **arguments,
+                )
             else:  # pragma: no cover - enum compatibility protection.
                 raise ValueError(
                     f"Unsupported execution job type '{job.job_type.value}'."
                 )
             if isinstance(run, WorkflowRun):
                 self._workflows.save(run)
-            self._queue.complete(
-                job.execution_id,
-                worker_id=self._worker_id,
-            )
+            if (
+                isinstance(run, WorkflowRun)
+                and run.status is WorkflowStatus.CANCELLED
+            ):
+                self._queue.cancel_claimed(
+                    job.execution_id,
+                    worker_id=self._worker_id,
+                )
+            else:
+                self._queue.complete(
+                    job.execution_id,
+                    worker_id=self._worker_id,
+                )
         except Exception as exc:
             message = " ".join(str(exc).split())[:1_500]
             self._record_failure(job, message)

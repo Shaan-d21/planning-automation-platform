@@ -684,6 +684,13 @@ class AgentApplicationService:
         )
         task_understanding = AgentTaskInterpreter.interpret(messages)
         task_context = task_understanding.to_payload()
+        if task_understanding.intent.value == "CANCEL_OPERATION":
+            stopped = self._stop_latest_active_flow(
+                conversation_id=conversation_id,
+                user=user,
+            )
+            if stopped is not None:
+                return stopped
         if self._settings.agent_orchestrator == "langgraph":
             if self._graph is None:
                 raise AgentConfigurationError(
@@ -1427,6 +1434,67 @@ class AgentApplicationService:
             conversation_id,
             user.user_id,
         )
+
+    def _stop_latest_active_flow(
+        self,
+        *,
+        conversation_id: str,
+        user: UserAccount,
+    ) -> dict[str, object] | None:
+        """Apply a conversational safe-stop to this user's latest active flow."""
+        if self._operation_manager is None:
+            return None
+        decisions = self._repository.list_action_decisions(
+            conversation_id,
+            user.user_id,
+        )
+        for decision in reversed(decisions):
+            if (
+                decision.operation_code != "standalone-flow"
+                or not decision.execution_id
+                or decision.outcome_status != "SUBMITTED"
+            ):
+                continue
+            managed = self._operation_manager.get(decision.execution_id)
+            if managed is None or managed.status.value not in {"QUEUED", "RUNNING"}:
+                continue
+            stopped = self._operation_manager.request_flow_stop(
+                decision.execution_id,
+                requested_by=user.username,
+            )
+            cancelled = stopped.status.value == "CANCELLED"
+            assistant = self._repository.add_message(
+                conversation_id=conversation_id,
+                user_id=user.user_id,
+                role=AgentMessageRole.ASSISTANT,
+                content=(
+                    "The standalone flow was still queued, so I cancelled it "
+                    "before any Oracle step started."
+                    if cancelled
+                    else "I requested a safe stop. The current Oracle job will "
+                    "finish normally, and no later flow step will start."
+                ),
+            )
+            return {
+                "message": assistant,
+                "tool_activity": (),
+                "action_drafts": self._repository.list_action_drafts(
+                    conversation_id,
+                    user.user_id,
+                ),
+                "approval_request": None,
+                "clarification_request": None,
+                "input_request": None,
+                "execution": {
+                    "execution_id": stopped.execution_id,
+                    "operation_code": "standalone-flow",
+                    "target_name": stopped.target_name,
+                    "status": stopped.status.value,
+                },
+                "schedule": None,
+                "decision": None,
+            }
+        return None
 
     def _replay_action_decision(
         self,
