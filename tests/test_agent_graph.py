@@ -23,13 +23,18 @@ from app.application.operations import (
     PipelineVariablePreview,
 )
 from app.application.reports import ReportCatalogItem
-from app.application.data_review import DataReviewGrid
+from app.application.data_review import DataReviewComparison, DataReviewGrid
 from app.application.substitution_variables import SubstitutionVariableCatalog
 from app.application.user_variables import UserVariableCatalog
 from app.config.settings import Settings
 from app.models.substitution_variable import SubstitutionVariable
 from app.models.environment import DimensionInfo
-from app.models.data_validation import FormGrid, FormGridRow
+from app.models.data_validation import (
+    DataMismatch,
+    DataValidationResult,
+    FormGrid,
+    FormGridRow,
+)
 from app.models.workflow import (
     WorkflowRun,
     WorkflowStatus,
@@ -139,9 +144,53 @@ class _ReportWorkspace:
                 name="revenue-forecast",
                 title="Revenue Forecast",
                 cube="Plan2",
-                default_pov=(("Scenario", "Actual"), ("Year", "FY24")),
+                default_pov=(
+                    ("Scenario", "Actual"),
+                    ("Year", "FY24"),
+                    ("Product", "BaseData"),
+                ),
                 rows=(("Account", ("Revenue",)),),
                 columns=(("Period", ("Jan", "Feb")),),
+            ),
+        )
+
+
+class _VarianceDataReview(_DataReview):
+    def compare_slices(
+        self,
+        source,
+        target,
+        *,
+        tolerance,
+        max_mismatches,
+        include_cells,
+    ):
+        assert source.pov["Scenario"] == "Actual"
+        assert target.pov["Scenario"] == "Budget"
+        assert source.pov["Year"] == target.pov["Year"] == "FY26"
+        assert source.pov["Product"] == target.pov["Product"] == "Snacks"
+        assert source.columns[0].members == target.columns[0].members == ("Sep",)
+        assert tolerance == 500
+        assert max_mismatches == 100
+        assert include_cells is False
+        return DataReviewComparison(
+            source_cube="Plan2",
+            target_cube="Plan2",
+            result=DataValidationResult(
+                source_form="Actual Sep",
+                target_form="Budget Sep",
+                compared_cells=3,
+                matched_cells=2,
+                mismatches=(
+                    DataMismatch(
+                        row_headers=("Revenue",),
+                        column_headers=("Sep",),
+                        source_value=2000,
+                        target_value=1000,
+                        difference=1000,
+                    ),
+                ),
+                tolerance=500,
             ),
         )
 
@@ -240,6 +289,49 @@ class _StandaloneFlowOperationCatalog:
 
     def discover_registered(self):
         return type("Catalog", (), {"pipelines": (), "data_integrations": ()})()
+
+
+class _CompleteStandaloneFlowOperationCatalog:
+    def discover_job_names(self, *, job_type):
+        return {
+            "RULES": ("Calculate Forecast",),
+            "PLAN_TYPE_MAP": ("Forecast to Reporting",),
+        }.get(job_type, ())
+
+    def discover_registered(self):
+        integration = type("Integration", (), {"name": "Revenue Load"})()
+        return type(
+            "Catalog",
+            (),
+            {"pipelines": (), "data_integrations": (integration,)},
+        )()
+
+
+class _ForecastSeedingOperationCatalog:
+    def discover_job_names(self, *, job_type):
+        if job_type == "RULES":
+            return ("Seed Forecast",)
+        return ()
+
+    def discover_registered(self):
+        pipeline = type(
+            "Pipeline",
+            (),
+            {"code": "FCST_SEED", "name": "Forecast Seeding"},
+        )()
+        integration = type(
+            "Integration",
+            (),
+            {"name": "Forecast Seed Load"},
+        )()
+        return type(
+            "Catalog",
+            (),
+            {
+                "pipelines": (pipeline,),
+                "data_integrations": (integration,),
+            },
+        )()
 
 
 class _RepeatedRuleFlowOperationCatalog:
@@ -2702,6 +2794,18 @@ def test_graph_configures_and_approves_executable_standalone_flow(
                 "Pipeline for these operations: Business Rules -> Data Maps."
             ),
         ),
+        task_context={
+            "intent": "MONTH_CLOSE",
+            "phase": "READY_FOR_PLAN",
+            "confidence": "HIGH_CONFIDENCE",
+            "parameters": {
+                "period": "Sep",
+                "activities": ["Business Rules", "Data Maps"],
+            },
+            "missing_parameters": [],
+            "clarification_prompt": None,
+            "objective": "Start September month close",
+        },
     )
 
     assert first.clarification_request is None, first.clarification_request
@@ -2757,6 +2861,217 @@ def test_graph_configures_and_approves_executable_standalone_flow(
     assert completed.tool_activity[0].result["standalone_flow"]["status"] == (
         "READY_FOR_APPROVAL"
     )
+
+
+def test_month_close_standalone_choice_advances_to_live_artifact_selection(
+    tmp_path: Path,
+) -> None:
+    graph = _orchestrator(
+        tmp_path,
+        _NeverCalledProvider(),
+        operation_catalog=_CompleteStandaloneFlowOperationCatalog(),
+    )
+
+    result = graph.invoke(
+        conversation_id="conversation-month-close-standalone-choice",
+        user_id=7,
+        messages=(
+            _message("Start September month close."),
+            _message("Run Data Integration, then Business Rule, then Data Map."),
+            _message(
+                "Configure and execute a standalone flow without an Oracle "
+                "Pipeline for these operations: Data Integrations -> Business "
+                "Rules -> Data Maps. Objective: Sep Month Close."
+            ),
+        ),
+        task_context={
+            "intent": "MONTH_CLOSE",
+            "phase": "READY_FOR_PLAN",
+            "confidence": "HIGH_CONFIDENCE",
+            "parameters": {
+                "period": "Sep",
+                "activities": [
+                    "Data Integration",
+                    "Business Rule",
+                    "Data Map",
+                ],
+            },
+            "missing_parameters": [],
+            "clarification_prompt": None,
+            "objective": "Start September month close",
+        },
+    )
+
+    assert result.input_request is not None
+    assert result.input_request.operation_code == "data-integrations"
+    assert result.input_request.artifact_name == "Revenue Load"
+    assert result.input_request.context["flow_step"] == {
+        "sequence": 1,
+        "total": 3,
+    }
+    assert result.tool_activity == ()
+
+
+def test_forecast_seeding_asks_for_the_approved_live_method_when_ambiguous(
+    tmp_path: Path,
+) -> None:
+    graph = _orchestrator(
+        tmp_path,
+        _NeverCalledProvider(),
+        operation_catalog=_ForecastSeedingOperationCatalog(),
+    )
+
+    result = graph.invoke(
+        conversation_id="conversation-forecast-method",
+        user_id=7,
+        messages=(
+            _message("Prepare the new forecast."),
+            _message("Use actuals through August."),
+        ),
+        task_context={
+            "intent": "FORECAST_SEEDING",
+            "phase": "READY_FOR_PLAN",
+            "confidence": "HIGH_CONFIDENCE",
+            "parameters": {"cutoff_period": "Aug"},
+            "missing_parameters": [],
+            "clarification_prompt": None,
+            "objective": "Prepare the new forecast",
+        },
+    )
+
+    assert "more than one approved Oracle route" in result.text
+    assert "Oracle Pipeline" in result.text
+    assert "Business Rule" in result.text
+    assert "Data Integration" in result.text
+    assert result.tool_activity == ()
+
+
+def test_forecast_seeding_method_advances_to_live_artifact_and_inputs(
+    tmp_path: Path,
+) -> None:
+    graph = _orchestrator(
+        tmp_path,
+        _NeverCalledProvider(),
+        operation_catalog=_ForecastSeedingOperationCatalog(),
+    )
+    conversation_id = "conversation-forecast-rule"
+
+    choice = graph.invoke(
+        conversation_id=conversation_id,
+        user_id=7,
+        messages=(
+            _message("Prepare the new forecast."),
+            _message("Use actuals through August."),
+            _message("Use the Business Rule."),
+        ),
+        task_context={
+            "intent": "FORECAST_SEEDING",
+            "phase": "READY_FOR_PLAN",
+            "confidence": "HIGH_CONFIDENCE",
+            "parameters": {
+                "cutoff_period": "Aug",
+                "execution_method": "BUSINESS_RULE",
+            },
+            "missing_parameters": [],
+            "clarification_prompt": None,
+            "objective": "Prepare the new forecast",
+        },
+    )
+
+    assert choice.clarification_request is not None
+    assert choice.clarification_request.operation_code == "business-rules"
+    assert choice.clarification_request.options == ("Seed Forecast",)
+    inputs = graph.resume_clarification(
+        conversation_id=conversation_id,
+        user_id=7,
+        request_id=choice.clarification_request.request_id,
+        value="Seed Forecast",
+    )
+    assert inputs.input_request is not None
+    assert inputs.input_request.operation_code == "business-rules"
+    assert inputs.input_request.context["task_context"] == {
+        "cutoff_period": "Aug",
+        "execution_method": "BUSINESS_RULE",
+    }
+
+
+def test_variance_reporting_lists_saved_layouts_before_reading_data(
+    tmp_path: Path,
+) -> None:
+    graph = _orchestrator(
+        tmp_path,
+        _NeverCalledProvider(),
+        report_workspace=_ReportWorkspace(),
+    )
+
+    result = graph.invoke(
+        conversation_id="conversation-variance-layouts",
+        user_id=7,
+        messages=(_message("Show September Actual vs Budget variance."),),
+        allowed_tool_names=("list_variance_views", "review_saved_variance"),
+        task_context={
+            "intent": "VARIANCE_REPORTING",
+            "phase": "READY_FOR_PLAN",
+            "confidence": "HIGH_CONFIDENCE",
+            "parameters": {
+                "comparison": "Actual vs Budget",
+                "period": "Sep",
+            },
+            "missing_parameters": [],
+            "clarification_prompt": None,
+            "objective": "Show September Actual vs Budget variance.",
+        },
+    )
+
+    assert result.tool_activity[0].name == "list_variance_views"
+    assert result.tool_activity[0].result["purpose"] == "variance"
+    assert "Choose one below" in result.text
+
+
+def test_variance_reporting_uses_selected_layout_for_live_comparison(
+    tmp_path: Path,
+) -> None:
+    graph = _orchestrator(
+        tmp_path,
+        _NeverCalledProvider(),
+        data_review=_VarianceDataReview(),
+        report_workspace=_ReportWorkspace(),
+    )
+
+    result = graph.invoke(
+        conversation_id="conversation-variance-review",
+        user_id=7,
+        messages=(
+            _message("Show September Actual vs Budget variance above 500 for FY26."),
+            _message(
+                "Use saved Data Explorer view `revenue-forecast` for the variance review."
+            ),
+        ),
+        allowed_tool_names=("list_variance_views", "review_saved_variance"),
+        task_context={
+            "intent": "VARIANCE_REPORTING",
+            "phase": "READY_FOR_PLAN",
+            "confidence": "HIGH_CONFIDENCE",
+            "parameters": {
+                "comparison": "Actual vs Budget",
+                "period": "Sep",
+                "year": "FY26",
+                "threshold": 500,
+                "saved_view": "revenue-forecast",
+                "pov_overrides": {"Product": "Snacks"},
+            },
+            "missing_parameters": [],
+            "clarification_prompt": None,
+            "objective": "Show September Actual vs Budget variance above 500 for FY26.",
+        },
+    )
+
+    assert result.tool_activity[0].name == "review_saved_variance"
+    assert result.tool_activity[0].arguments["pov_overrides"] == {
+        "Product": "Snacks"
+    }
+    assert result.tool_activity[0].result["result"]["compared_cells"] == 3
+    assert "found **1**" in result.text
 
 
 def test_standalone_flow_input_resume_returns_next_artifact_choice(

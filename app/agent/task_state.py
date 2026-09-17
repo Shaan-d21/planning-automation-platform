@@ -298,6 +298,23 @@ class AgentTaskInterpreter:
                 and bool(re.search(r",|;|\bthen\b|\bfollowed\s+by\b", latest))
             ):
                 return AgentTaskIntent.MONTH_CLOSE
+        if len(turns) > 1 and any(
+            cls._matches_intent(text, AgentTaskIntent.DATA_LOAD)
+            for text in turns[:-1]
+        ) and cls._is_data_load_method_reply(latest):
+            # This short answer completes the existing business task; it must
+            # not discard the scenario, period, and file already collected.
+            return AgentTaskIntent.DATA_LOAD
+        if len(turns) > 1 and any(
+            cls._matches_intent(text, AgentTaskIntent.FORECAST_SEEDING)
+            for text in turns[:-1]
+        ) and cls._is_forecast_execution_method_reply(latest):
+            return AgentTaskIntent.FORECAST_SEEDING
+        if len(turns) > 1 and any(
+            cls._matches_intent(text, AgentTaskIntent.VARIANCE_REPORTING)
+            for text in turns[:-1]
+        ) and cls._is_variance_view_reply(latest):
+            return AgentTaskIntent.VARIANCE_REPORTING
         direct = cls._direct_intent(turns[-1])
         if direct is not AgentTaskIntent.UNKNOWN:
             return direct
@@ -335,6 +352,37 @@ class AgentTaskInterpreter:
             or re.search(r"\b(?:latest|newest|most\s+recent)\b", normalized)
             or re.search(r"\.(?:csv|txt|zip|dat)\b", normalized)
             or re.search(r"\b(?:instead|correction|change\s+it\s+to)\b", normalized)
+            or cls._is_data_load_method_reply(normalized)
+        )
+
+    @staticmethod
+    def _is_data_load_method_reply(normalized: str) -> bool:
+        return bool(
+            re.search(r"\bdata\s+integration\b", normalized)
+            or re.search(
+                r"\b(?:saved\s+)?(?:planning\s+|native\s+)?"
+                r"import\s+data(?:\s+job)?\b",
+                normalized,
+            )
+            or re.search(r"\bplanning\s+import\b", normalized)
+        )
+
+    @staticmethod
+    def _is_forecast_execution_method_reply(normalized: str) -> bool:
+        return bool(
+            re.search(r"\b(?:oracle\s+)?pipeline\b", normalized)
+            or re.search(r"\b(?:business|calculation|calc)\s+rule\b", normalized)
+            or re.search(r"\bdata\s+integration\b", normalized)
+        )
+
+    @staticmethod
+    def _is_variance_view_reply(normalized: str) -> bool:
+        return bool(
+            re.search(
+                r"^use saved data explorer view `[^`]+` for (?:the )?"
+                r"variance review\.?$",
+                normalized,
+            )
         )
 
     @classmethod
@@ -379,6 +427,38 @@ class AgentTaskInterpreter:
                     f"{comparison.group(2).title()}"
                 )
 
+            threshold = re.search(
+                r"\b(?:above|over|greater\s+than|threshold(?:\s+of)?|"
+                r"tolerance(?:\s+of)?)\s*[$]?([0-9][0-9,]*(?:\.[0-9]+)?)",
+                normalized,
+            )
+            if threshold:
+                parameters["threshold"] = float(
+                    threshold.group(1).replace(",", "")
+                )
+
+            variance_view = re.search(
+                r"\bsaved data explorer view `([^`]+)`",
+                text.strip(),
+                re.IGNORECASE,
+            )
+            if intent is AgentTaskIntent.VARIANCE_REPORTING and variance_view:
+                parameters["saved_view"] = variance_view.group(1).strip()
+
+            if (
+                intent is AgentTaskIntent.VARIANCE_REPORTING
+                and re.search(r"\bpov\s+overrides?\s*:", text, re.IGNORECASE)
+            ):
+                overrides = {
+                    dimension.strip(): member.strip()
+                    for dimension, member in re.findall(
+                        r"([A-Za-z][A-Za-z0-9 _-]{0,79})\s*=\s*`([^`]{1,200})`",
+                        text,
+                    )
+                }
+                if overrides:
+                    parameters["pov_overrides"] = overrides
+
             for scenario in ("Actual", "Forecast", "Budget"):
                 if re.search(rf"\b{scenario.casefold()}s?\b", normalized):
                     parameters["scenario"] = scenario
@@ -407,6 +487,28 @@ class AgentTaskInterpreter:
                     ):
                         parameters["dimension"] = dimension
                         break
+
+            if intent is AgentTaskIntent.DATA_LOAD:
+                if re.search(r"\bdata\s+integration\b", normalized):
+                    parameters["load_method"] = "DATA_INTEGRATION"
+                elif re.search(
+                    r"\b(?:saved\s+)?(?:planning\s+|native\s+)?"
+                    r"import\s+data(?:\s+job)?\b|"
+                    r"\bplanning\s+import\b",
+                    normalized,
+                ):
+                    parameters["load_method"] = "PLANNING_IMPORT"
+
+            if intent is AgentTaskIntent.FORECAST_SEEDING:
+                if re.search(r"\b(?:oracle\s+)?pipeline\b", normalized):
+                    parameters["execution_method"] = "PIPELINE"
+                elif re.search(
+                    r"\b(?:business|calculation|calc)\s+rule\b",
+                    normalized,
+                ):
+                    parameters["execution_method"] = "BUSINESS_RULE"
+                elif re.search(r"\bdata\s+integration\b", normalized):
+                    parameters["execution_method"] = "DATA_INTEGRATION"
 
             if intent is AgentTaskIntent.FORECAST_SEEDING and period is not None:
                 if re.search(
@@ -487,7 +589,12 @@ class AgentTaskInterpreter:
         requirements: dict[AgentTaskIntent, tuple[str, ...]] = {
             AgentTaskIntent.MONTH_CLOSE: ("period", "activities"),
             AgentTaskIntent.METADATA_LOAD: ("dimension", "file_reference"),
-            AgentTaskIntent.DATA_LOAD: ("scenario", "period", "file_reference"),
+            AgentTaskIntent.DATA_LOAD: (
+                "scenario",
+                "period",
+                "file_reference",
+                "load_method",
+            ),
             AgentTaskIntent.FORECAST_SEEDING: ("cutoff_period",),
             AgentTaskIntent.VARIANCE_REPORTING: ("comparison", "period"),
         }
@@ -547,6 +654,13 @@ class AgentTaskInterpreter:
             ): (
                 "Which data file should I use? You can also ask me to find "
                 "the latest one."
+            ),
+            (
+                AgentTaskIntent.DATA_LOAD,
+                "load_method",
+            ): (
+                "How should Oracle load this file: use a configured Data "
+                "Integration, or run a saved Planning Import Data job?"
             ),
             (
                 AgentTaskIntent.FORECAST_SEEDING,

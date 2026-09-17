@@ -15,7 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.exc import OperationalError
 
-from app.agent.models import AgentMessageRole
+from app.agent.models import AgentMessageRole, AgentToolActivity
 from app.agent.repository import SQLiteAgentRepository
 from app.application.connection import ConnectionResult
 from app.models.environment import ApplicationInfo
@@ -97,7 +97,29 @@ from app.models.automation_schedule import (
 from app.models.substitution_variable import SubstitutionVariable
 from app.utils.exceptions import AuthenticationError
 from app.web import application as web_application
-from app.web.application import create_app
+from app.web.application import _agent_tool_activity_payload, create_app
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    ("list_variance_views", "review_saved_variance"),
+)
+def test_variance_tool_results_are_exposed_to_the_agent_workspace(
+    tool_name: str,
+) -> None:
+    result = {"purpose": "variance", "views": [], "count": 0, "total_count": 0}
+
+    payload = _agent_tool_activity_payload(
+        AgentToolActivity(
+            name=tool_name,
+            arguments={},
+            status="SUCCESS",
+            summary="Variance review completed.",
+            result=result,
+        )
+    )
+
+    assert payload["result"] == result
 
 
 def test_failed_flow_recovery_requires_review_and_queues_new_execution(

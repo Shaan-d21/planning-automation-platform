@@ -748,6 +748,7 @@ class AgentApplicationService:
             tool_names=(
                 "review_data_slice",
                 "review_saved_data_view",
+                "review_saved_variance",
                 "compare_data_slices",
             ),
         )
@@ -2250,7 +2251,9 @@ class AgentApplicationService:
                     "list_cube_dimensions",
                     "search_dimension_members",
                     "list_data_explorer_views",
+                    "list_variance_views",
                     "review_saved_data_view",
+                    "review_saved_variance",
                     "review_data_slice",
                     "compare_data_slices",
                 }

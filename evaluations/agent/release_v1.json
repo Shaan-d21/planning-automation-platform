@@ -59,7 +59,7 @@
       "kind": "intent_route",
       "prompt": "Show Planning data from Plan1 for Actual versus Forecast.",
       "expected_intent": "DATA_REVIEW",
-      "expected_tools": ["get_environment_summary", "list_platform_operations", "list_planning_cubes", "list_cube_dimensions", "search_dimension_members", "list_data_explorer_views", "review_saved_data_view", "review_data_slice", "compare_data_slices"]
+      "expected_tools": ["get_environment_summary", "list_platform_operations", "list_planning_cubes", "list_cube_dimensions", "search_dimension_members", "list_data_explorer_views", "list_variance_views", "review_saved_data_view", "review_saved_variance", "review_data_slice", "compare_data_slices"]
     },
     {
       "id": "route-contextual-data-refinement",
@@ -69,7 +69,7 @@
       "prompt": "Change the year to FY27 and show the same rows.",
       "has_data_review_context": true,
       "expected_intent": "DATA_REVIEW",
-      "expected_tools": ["get_environment_summary", "list_platform_operations", "list_planning_cubes", "list_cube_dimensions", "search_dimension_members", "list_data_explorer_views", "review_saved_data_view", "review_data_slice", "compare_data_slices"]
+      "expected_tools": ["get_environment_summary", "list_platform_operations", "list_planning_cubes", "list_cube_dimensions", "search_dimension_members", "list_data_explorer_views", "list_variance_views", "review_saved_data_view", "review_saved_variance", "review_data_slice", "compare_data_slices"]
     },
     {
       "id": "route-explicit-operation-over-review-context",
@@ -131,14 +131,14 @@
       "prompt": "Load last month's actuals using the latest file",
       "today": "2026-09-16",
       "expected_task_intent": "DATA_LOAD",
-      "expected_phase": "READY_FOR_PLAN",
+      "expected_phase": "COLLECTING_INFORMATION",
       "expected_parameters": {
         "scenario": "Actual",
         "period": "Aug",
         "period_reference": "previous_month",
         "file_preference": "latest"
       },
-      "expected_missing_parameters": []
+      "expected_missing_parameters": ["load_method"]
     },
     {
       "id": "understand-period-correction",
@@ -147,11 +147,16 @@
       "kind": "task_understanding",
       "turns": [
         "Load August actuals using Actual_Aug.csv",
-        "Sorry, September instead"
+        "Sorry, September instead",
+        "Use Data Integration"
       ],
       "expected_task_intent": "DATA_LOAD",
       "expected_phase": "READY_FOR_PLAN",
-      "expected_parameters": {"period": "Sep", "scenario": "Actual"},
+      "expected_parameters": {
+        "period": "Sep",
+        "scenario": "Actual",
+        "load_method": "DATA_INTEGRATION"
+      },
       "expected_missing_parameters": []
     },
     {
@@ -165,6 +170,24 @@
       "expected_parameters": {
         "comparison": "Actual vs Budget",
         "period": "Sep"
+      },
+      "expected_missing_parameters": []
+    },
+    {
+      "id": "understand-progressive-forecast-seeding",
+      "category": "business-task-understanding",
+      "severity": "critical",
+      "kind": "task_understanding",
+      "turns": [
+        "Prepare the new forecast",
+        "Use actuals through August",
+        "Use the Business Rule"
+      ],
+      "expected_task_intent": "FORECAST_SEEDING",
+      "expected_phase": "READY_FOR_PLAN",
+      "expected_parameters": {
+        "cutoff_period": "Aug",
+        "execution_method": "BUSINESS_RULE"
       },
       "expected_missing_parameters": []
     },
