@@ -1606,6 +1606,76 @@ def test_agent_service_persists_action_draft_for_conversation(
     assert persisted[0].message_id == result["message"].message_id
 
 
+def test_agent_reports_authenticated_users_own_role_and_permissions(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    access = AccessControlService(settings.workflow_database_file)
+    account = access.bootstrap_administrator(
+        username="planner",
+        display_name="Finance Planner",
+        email=None,
+        password="Strong password 123!",
+    )
+    repository = SQLiteAgentRepository(settings.workflow_database_file)
+    service = AgentApplicationService(
+        settings,
+        gateway=AgentCapabilityGateway(
+            settings,
+            control_center=_ControlCenter(),
+            data_review=_DataReview(),
+        ),
+        repository=repository,
+        provider_factory=_NeverCalledProvider,
+    )
+    user = replace(
+        _user(Permission.OPERATION_EXECUTE, Permission.DATA_REVIEW),
+        user_id=account.user_id,
+        username="planner",
+        display_name="Finance Planner",
+    )
+    conversation = service.create_conversation(user)
+
+    permissions = service.send_message(
+        conversation_id=conversation.conversation_id,
+        user=user,
+        content="Hello, can you describe my allowed permisions?",
+    )
+    role = service.send_message(
+        conversation_id=conversation.conversation_id,
+        user=user,
+        content="What is my role?",
+    )
+
+    for response in (permissions, role):
+        content = response["message"].content
+        assert "Finance Planner (`planner`)" in content
+        assert "Platform role:** Power User" in content
+        assert "operation.execute" in content
+        assert "data.review" in content
+        assert "governed operational assistant" not in content.casefold()
+        assert response["tool_activity"][0].name == "get_current_user_access"
+        assert response["tool_activity"][0].result["username"] == "planner"
+
+
+def test_personal_access_detection_does_not_confuse_assistant_identity() -> None:
+    assert AgentApplicationService._is_current_user_access_request(
+        "Tell me my permissions, not yours."
+    )
+    assert AgentApplicationService._is_current_user_access_request(
+        "What permissions do I have?"
+    )
+    assert not AgentApplicationService._is_current_user_access_request(
+        "What is your role?"
+    )
+    assert not AgentApplicationService._is_current_user_access_request(
+        "List the platform operations."
+    )
+    assert not AgentApplicationService._is_current_user_access_request(
+        "What can I run?"
+    )
+
+
 def test_explicit_agent_approval_queues_rule_without_redundant_draft(
     tmp_path: Path,
 ) -> None:
