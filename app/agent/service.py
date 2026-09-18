@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import datetime
@@ -29,6 +30,8 @@ from app.agent.models import (
     AgentApprovalRequest,
     AgentClarificationRequest,
     AgentMessageRole,
+    AgentProviderResult,
+    AgentToolActivity,
 )
 from app.agent.preflight import AgentActionPreflightService
 from app.agent.provider import AgentProvider
@@ -84,6 +87,7 @@ from app.config.settings import Settings
 from app.models.access_control import (
     ExecutionActor,
     Permission,
+    RoleCode,
     TriggerSource,
     UserAccount,
 )
@@ -98,6 +102,28 @@ from app.utils.exceptions import (
 
 
 ProviderFactory = Callable[[], AgentProvider]
+
+_ROLE_LABELS = {
+    RoleCode.SERVICE_ADMINISTRATOR: "Service Administrator",
+    RoleCode.POWER_USER: "Power User",
+    RoleCode.USER: "User",
+    RoleCode.VIEWER: "Viewer",
+}
+
+_PERMISSION_LABELS = {
+    Permission.PROCESS_RUN: "Run assigned Planning processes",
+    Permission.PROCESS_DESIGN: "Design and administer Planning processes",
+    Permission.SCHEDULE_MANAGE: "Create and manage automation schedules",
+    Permission.OPERATION_EXECUTE: "Execute governed Oracle operations",
+    Permission.VARIABLE_UPDATE: "Update substitution variables",
+    Permission.USER_VARIABLE_UPDATE: "Update Planning user variables",
+    Permission.DATA_REVIEW: "Review authorized Planning data",
+    Permission.REPORT_GENERATE: "Generate and export reports",
+    Permission.HISTORY_VIEW: "View execution history and evidence",
+    Permission.USER_MANAGE: "Manage platform users and access mappings",
+    Permission.CATALOG_MANAGE: "Manage registered Oracle artifact catalogs",
+    Permission.AGENT_USE: "Use EPM Assistant",
+}
 
 SYSTEM_INSTRUCTION = """
 You are the governed operational assistant inside BISP Solutions Oracle EPM
@@ -692,6 +718,12 @@ class AgentApplicationService:
             role=AgentMessageRole.USER,
             content=prompt,
         )
+        if self._is_current_user_access_request(prompt):
+            return self._persist_agent_result(
+                conversation_id=conversation_id,
+                user=user,
+                result=self._current_user_access_result(user),
+            )
         messages = self._repository.list_messages(
             conversation_id,
             user.user_id,
@@ -1218,6 +1250,67 @@ class AgentApplicationService:
             "schedule": schedule,
             "decision": None,
         }
+
+    @staticmethod
+    def _is_current_user_access_request(prompt: str) -> bool:
+        """Recognize questions about the authenticated user's own access."""
+        normalized = " ".join(str(prompt or "").casefold().split())
+        permission = r"permis{1,2}ions?"
+        patterns = (
+            rf"\bmy\b.{{0,30}}\b(?:role|roles|{permission}|access)\b",
+            rf"\b(?:role|roles|{permission}|access)\b.{{0,30}}"
+            r"\b(?:do i have|assigned to me|for me)\b",
+            r"\bwhat\s+am\s+i\s+allowed\s+to\s+do\b",
+            r"\bam\s+i\s+allowed\b",
+            r"\bwho\s+am\s+i\b",
+        )
+        return any(re.search(pattern, normalized) for pattern in patterns)
+
+    @staticmethod
+    def _current_user_access_result(user: UserAccount) -> AgentProviderResult:
+        """Return session-backed identity facts without asking the model."""
+        roles = tuple(_ROLE_LABELS.get(role, role.value) for role in user.roles)
+        permissions = tuple(
+            (permission, _PERMISSION_LABELS.get(permission, permission.value))
+            for permission in sorted(user.permissions, key=lambda item: item.value)
+        )
+        role_text = ", ".join(roles) if roles else "No platform role assigned"
+        permission_lines = (
+            "\n".join(
+                f"- **{label}** (`{permission.value}`)"
+                for permission, label in permissions
+            )
+            if permissions
+            else "- No active platform permissions are assigned."
+        )
+        status = "Active" if user.active else "Inactive"
+        content = (
+            "**Your current platform access**\n\n"
+            f"- **User:** {user.display_name} (`{user.username}`)\n"
+            f"- **Account status:** {status}\n"
+            f"- **Platform role:** {role_text}\n\n"
+            "**Granted permissions**\n\n"
+            f"{permission_lines}\n\n"
+            "These values come from your authenticated platform session and "
+            "are the permissions enforced by this application. They describe "
+            "your account, not the EPM Assistant. Platform roles are shown "
+            "here; this response does not claim to list raw Oracle groups or "
+            "Oracle-native role assignments."
+        )
+        activity = AgentToolActivity(
+            name="get_current_user_access",
+            arguments={},
+            status="SUCCESS",
+            summary="Authenticated user access returned.",
+            result={
+                "username": user.username,
+                "display_name": user.display_name,
+                "active": user.active,
+                "roles": [role.value for role in user.roles],
+                "permissions": [permission.value for permission, _ in permissions],
+            },
+        )
+        return AgentProviderResult(text=content, tool_activity=(activity,))
 
     def _submit_approved_flow(
         self,
