@@ -883,6 +883,7 @@ export interface DataIntegrationRunInput {
   import_mode: string;
   export_mode: string;
   upload_token: string | null;
+  upload_target?: string | null;
   inbox_file: string | null;
   use_configured_file?: boolean;
   planning_task_id?: number | null;
@@ -1234,10 +1235,12 @@ export interface StandaloneFlowRecoveryAccepted extends OperationAcceptedRespons
 export interface OperationExecution {
   execution_id: string;
   operation_name: string;
-  status: "QUEUED" | "RUNNING" | "SUCCESS" | "FAILED" | "RECOVERY_REQUIRED";
+  status: "QUEUED" | "RUNNING" | "SUCCESS" | "FAILED" | "RECOVERY_REQUIRED" | "CANCELLED";
   started_at: string;
   completed_at: string | null;
   error_message: string | null;
+  cancellation_requested_at: string | null;
+  cancellation_requested_by: string | null;
   initiated_by: string | null;
   trigger_source: string | null;
   executed_by?: string | null;
@@ -1251,6 +1254,14 @@ export interface OperationExecution {
   terminal: boolean;
 }
 
+export interface StandaloneFlowStopResponse {
+  status: "cancelled" | "stop_requested";
+  execution_id: string;
+  execution_status: string;
+  cancellation_requested_at: string | null;
+  message: string;
+}
+
 export interface OracleRecordStatisticsDetail {
   dimension_name: string | null;
   load_type: string | null;
@@ -1260,7 +1271,7 @@ export interface OracleRecordStatisticsDetail {
 }
 
 export interface OracleRecordStatistics {
-  source: "ORACLE_JOB_DETAILS";
+  source: "ORACLE_JOB_DETAILS" | "ORACLE_DATA_INTEGRATION_STATUS" | "ORACLE_DATA_INTEGRATION_LOG" | "ORACLE_COMBINED_EVIDENCE";
   records_read: number;
   records_processed: number;
   records_rejected: number;

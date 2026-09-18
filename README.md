@@ -70,9 +70,18 @@ Conversations, messages, tool activity, action drafts, input snapshots, and
 human approval decisions use the existing PostgreSQL application tables;
 LangGraph checkpoints use separate PostgreSQL-managed checkpoint tables.
 
+Before tool selection, the assistant builds a provider-independent business-task
+context for Month Close, Metadata Load, Data Load, Forecast Seeding, Variance
+Reporting, Business Rules, Data Integrations, Pipelines, job status, and
+cancellation. It retains collected values across short follow-up answers and
+corrections, resolves common month expressions, and asks only the first missing
+question. This context is checkpoint-safe and contains no Oracle credentials.
+Live Oracle discovery and the existing governed input and approval flows still
+validate every artifact and executable value before submission.
+
 Agent releases also have a versioned deterministic evaluation gate covering
-least-privilege routing, governed preparation, safety boundaries, and
-conservative Oracle artifact matching. Run it with
+least-privilege routing, conversational task continuity, governed preparation,
+safety boundaries, and conservative Oracle artifact matching. Run it with
 `python -m app.agent.evaluation --fail-on-threshold`; see
 [Agent Evaluation and Release Gate](docs/AGENT_EVALUATION.md) for the suite,
 threshold policy, CI evidence, and separate live-provider UAT requirements.
@@ -1797,7 +1806,7 @@ process, or error-handling logic.
 ## Excel Pipeline Runner
 
 The first governed Excel interface is available under
-`outputs/excel_pipeline_runner`. It invokes an existing Oracle Pipeline through
+`integrations/excel_pipeline_runner`. It invokes an existing Oracle Pipeline through
 the FastAPI backend; it does not connect to Oracle or store Oracle credentials
 inside the workbook.
 
@@ -1812,6 +1821,6 @@ The integration provides:
 
 Apply migration `0003_external_api_tokens`, create the token with
 `python -m app.cli.api_tokens`, and follow the complete beginner instructions
-in `outputs/excel_pipeline_runner/README.md`. The workbook contains no
+in `integrations/excel_pipeline_runner/README.md`. The workbook contains no
 automatic `Workbook_Open` execution and this version does not upload local
 files from Excel.

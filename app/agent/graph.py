@@ -22,6 +22,7 @@ from app.agent.capabilities import (
     PIPELINE_SCHEDULE_RESUME,
 )
 from app.agent.checkpoints import AgentCheckpointStore
+from app.agent.execution_plan import AgentExecutionPlanBuilder
 from app.agent.models import (
     AgentMessage,
     AgentMessageRole,
@@ -53,7 +54,9 @@ GRAPH_TOOL_NAMES = frozenset(
         "list_cube_dimensions",
         "search_dimension_members",
         "list_data_explorer_views",
+        "list_variance_views",
         "review_saved_data_view",
+        "review_saved_variance",
         "review_data_slice",
         "compare_data_slices",
         "list_operation_artifacts",
@@ -92,6 +95,12 @@ MULTI_STEP_ARTIFACT_OPERATION_CODES = (
     "cube-refresh",
 )
 
+FORECAST_EXECUTION_METHODS = {
+    "PIPELINE": ("pipelines", "Oracle Pipeline"),
+    "BUSINESS_RULE": ("business-rules", "Business Rule"),
+    "DATA_INTEGRATION": ("data-integrations", "Data Integration"),
+}
+
 
 class AgentGraphState(TypedDict, total=False):
     """Checkpoint-safe state. Values intentionally remain JSON-like."""
@@ -108,12 +117,14 @@ class AgentGraphState(TypedDict, total=False):
     artifact_catalog_snapshot: dict[str, Any] | None
     deterministic_operation: str | None
     data_review_context: dict[str, Any] | None
+    task_context: dict[str, Any] | None
+    task_plan: dict[str, Any] | None
 
 
 class AgentGraphOrchestrator:
     """Compile and run the deterministic model -> tools -> model graph."""
 
-    STATE_SCHEMA_VERSION = 4
+    STATE_SCHEMA_VERSION = 6
 
     def __init__(
         self,
@@ -148,6 +159,7 @@ class AgentGraphOrchestrator:
         messages: Sequence[AgentMessage],
         allowed_tool_names: Sequence[str] | None = None,
         data_review_context: dict[str, Any] | None = None,
+        task_context: dict[str, Any] | None = None,
     ) -> AgentProviderResult:
         """Run one auditable assistant turn under an isolated thread ID."""
         initial: AgentGraphState = {
@@ -169,6 +181,8 @@ class AgentGraphOrchestrator:
             ),
             "approval_decision": None,
             "data_review_context": data_review_context,
+            "task_context": task_context,
+            "task_plan": None,
         }
         try:
             state = self._compiled_graph().invoke(
@@ -449,14 +463,52 @@ class AgentGraphOrchestrator:
                 ),
                 "pending_tool_calls": [],
             }
+        task_response = self._deterministic_task_response(state)
+        if task_response is not None:
+            return {
+                **state,
+                "assistant_text": task_response,
+                "pending_tool_calls": [],
+            }
+        # An explicit user choice from the multi-step plan card must take
+        # precedence over re-planning the broader business task. Otherwise a
+        # Month Close context recreates the same Pipeline recommendation card
+        # instead of advancing into standalone step configuration.
+        deterministic_task_call = (
+            self._deterministic_standalone_flow_call(state)
+            or self._deterministic_task_operation_call(state)
+            or self._deterministic_task_plan_call(state)
+            or self._deterministic_forecast_seeding_call(state)
+            or self._deterministic_variance_reporting_call(state)
+        )
+        task_blocker = self._deterministic_task_plan_blocker(
+            state,
+            deterministic_task_call,
+        )
+        if task_blocker is not None:
+            return {
+                **state,
+                "assistant_text": task_blocker,
+                "pending_tool_calls": [],
+            }
+        forecast_blocker = self._deterministic_forecast_seeding_blocker(
+            state,
+            deterministic_task_call,
+        )
+        if forecast_blocker is not None:
+            return {
+                **state,
+                "assistant_text": forecast_blocker,
+                "pending_tool_calls": [],
+            }
         deterministic_call = (
-            self._deterministic_execution_evidence_call(state)
+            deterministic_task_call
+            or self._deterministic_execution_evidence_call(state)
             or self._deterministic_saved_data_view_call(state)
             or self._deterministic_data_explorer_views_call(state)
             or self._deterministic_data_review_slice_call(state)
             or self._deterministic_data_review_cube_call(state)
             or self._deterministic_schedule_call(state)
-            or self._deterministic_standalone_flow_call(state)
             or self._deterministic_multi_step_plan_call(state)
             or self._deterministic_pipeline_call(state)
             or self._deterministic_business_rule_call(state)
@@ -469,7 +521,9 @@ class AgentGraphOrchestrator:
             deterministic_operation = {
                 "get_execution_evidence": "execution-evidence",
                 "list_data_explorer_views": "data-explorer-views",
+                "list_variance_views": "variance-views",
                 "review_saved_data_view": "saved-data-view",
+                "review_saved_variance": "variance-review",
                 "list_cube_dimensions": "data-review-dimensions",
                 "review_data_slice": "data-review-slice",
                 "plan_multi_step_request": "multi-step-plan",
@@ -498,6 +552,10 @@ class AgentGraphOrchestrator:
                     (deterministic_call,)
                 ),
                 "deterministic_operation": deterministic_operation,
+                "task_plan": self._task_plan_payload(
+                    state,
+                    deterministic_call,
+                ),
             }
         provider = self._get_provider()
         messages = tuple(
@@ -638,26 +696,462 @@ class AgentGraphOrchestrator:
         }
 
     def _instruction_for_state(self, state: AgentGraphState) -> str:
-        """Add only prior tool-validated slice selections to model context."""
+        """Add validated task and Data Explorer context to model instructions."""
+        sections = [self._system_instruction]
+        task_context = state.get("task_context")
+        if isinstance(task_context, dict) and task_context:
+            serialized_task = json.dumps(
+                task_context,
+                ensure_ascii=True,
+                separators=(",", ":"),
+            )[:6_000]
+            sections.append(
+                "Current deterministic business-task context:\n"
+                f"{serialized_task}\n"
+                "Preserve these collected parameters across short follow-up "
+                "answers and corrections. Ask only for the first missing "
+                "parameter. Never treat a value as Oracle-verified until a "
+                "platform discovery or preparation tool validates it."
+            )
+        task_plan = state.get("task_plan")
+        if isinstance(task_plan, dict) and task_plan:
+            serialized_plan = json.dumps(
+                task_plan,
+                ensure_ascii=True,
+                separators=(",", ":"),
+            )[:6_000]
+            sections.append(
+                "Current platform-validated execution plan:\n"
+                f"{serialized_plan}\n"
+                "This is preparation context only. Do not claim that a step "
+                "ran until governed approval and execution evidence confirm it."
+            )
         context = state.get("data_review_context")
-        if not isinstance(context, dict) or not context:
-            return self._system_instruction
-        serialized = json.dumps(
-            context,
-            ensure_ascii=True,
-            separators=(",", ":"),
-        )[:6_000]
-        return (
-            f"{self._system_instruction}\n\n"
-            "Current tool-validated Data Explorer context:\n"
-            f"{serialized}\n"
-            "For a follow-up Data Explorer request, preserve every prior cube, "
-            "POV, row, column, and member selection except fields the user "
-            "explicitly changes. Use review_data_slice or compare_data_slices "
-            "with the complete updated selection. If a requested change is "
-            "ambiguous, ask one concise clarification question. This context "
-            "contains selections only, never financial values."
+        if isinstance(context, dict) and context:
+            serialized = json.dumps(
+                context,
+                ensure_ascii=True,
+                separators=(",", ":"),
+            )[:6_000]
+            sections.append(
+                "Current tool-validated Data Explorer context:\n"
+                f"{serialized}\n"
+                "For a follow-up Data Explorer request, preserve every prior "
+                "cube, POV, row, column, and member selection except fields "
+                "the user explicitly changes. Use review_data_slice or "
+                "compare_data_slices with the complete updated selection. If "
+                "a requested change is ambiguous, ask one concise clarification "
+                "question. This context contains selections only, never "
+                "financial values."
+            )
+        return "\n\n".join(sections)
+
+    @staticmethod
+    def _deterministic_task_response(
+        state: AgentGraphState,
+    ) -> str | None:
+        """Return safety-critical task clarification without provider variance."""
+        context = state.get("task_context")
+        if not isinstance(context, dict):
+            return None
+        intent = str(context.get("intent") or "").strip().upper()
+        phase = str(context.get("phase") or "").strip().upper()
+        if intent == "CANCEL_OPERATION":
+            return (
+                "I stopped planning the current conversational task. No new "
+                "Oracle operation was submitted. If an Oracle job was already "
+                "submitted, it may continue unless its operation supports "
+                "cancellation."
+            )
+        if phase != "COLLECTING_INFORMATION":
+            return None
+        if intent not in {
+            "MONTH_CLOSE",
+            "METADATA_LOAD",
+            "DATA_LOAD",
+            "FORECAST_SEEDING",
+            "VARIANCE_REPORTING",
+        }:
+            return None
+        prompt = str(context.get("clarification_prompt") or "").strip()
+        return prompt or None
+
+    @staticmethod
+    def _deterministic_task_operation_call(
+        state: AgentGraphState,
+    ) -> AgentToolCall | None:
+        """Continue a clarified task into the existing governed operation flow."""
+        context = state.get("task_context")
+        if not isinstance(context, dict):
+            return None
+        if str(context.get("phase") or "").upper() != "READY_FOR_PLAN":
+            return None
+        allowed = {
+            str(item).strip() for item in state.get("allowed_tool_names", [])
+        }
+        if "prepare_operation_action" not in allowed:
+            return None
+        parameters = context.get("parameters")
+        task_parameters = parameters if isinstance(parameters, dict) else {}
+        operation_code = {
+            "METADATA_LOAD": "metadata-import",
+            "DATA_LOAD": {
+                "DATA_INTEGRATION": "data-integrations",
+                "PLANNING_IMPORT": "data-import",
+            }.get(str(task_parameters.get("load_method") or "").upper()),
+            "RUN_BUSINESS_RULE": "business-rules",
+        }.get(str(context.get("intent") or "").strip().upper())
+        if operation_code is None:
+            return None
+        return AgentToolCall(
+            name="prepare_operation_action",
+            arguments={
+                "operation_code": operation_code,
+                "objective": str(context.get("objective") or "").strip()
+                or "Prepare the clarified Oracle EPM task.",
+            },
+            call_id=f"deterministic-task-{operation_code}",
         )
+
+    def _deterministic_task_plan_call(
+        self,
+        state: AgentGraphState,
+    ) -> AgentToolCall | None:
+        """Convert Month Close activities into the existing live planner."""
+        context = state.get("task_context")
+        if not isinstance(context, dict):
+            return None
+        if str(context.get("phase") or "").strip().upper() != "READY_FOR_PLAN":
+            return None
+        if str(context.get("intent") or "").strip().upper() != "MONTH_CLOSE":
+            return None
+        allowed = {
+            str(item).strip() for item in state.get("allowed_tool_names", [])
+        }
+        if "plan_multi_step_request" not in allowed:
+            return None
+        parameters = context.get("parameters")
+        task_parameters = parameters if isinstance(parameters, dict) else {}
+        activities = task_parameters.get("activities")
+        if not isinstance(activities, list):
+            return None
+        activity_text = " then ".join(
+            str(item).strip() for item in activities if str(item).strip()
+        )
+        requested_steps = self._requested_multi_step_codes_with_artifacts(
+            activity_text
+        )
+        if len(requested_steps) < 2:
+            return None
+        period = str(task_parameters.get("period") or "").strip()
+        objective = str(context.get("objective") or "").strip()
+        return AgentToolCall(
+            name="plan_multi_step_request",
+            arguments={
+                "objective": (
+                    f"{period} Month Close: {objective}" if period else objective
+                )[:1000],
+                "requested_steps": list(requested_steps),
+                "prefer_standalone": False,
+            },
+            call_id="deterministic-task-month-close-plan",
+        )
+
+    def _deterministic_forecast_seeding_call(
+        self,
+        state: AgentGraphState,
+    ) -> AgentToolCall | None:
+        """Route forecast seeding only through an approved Oracle mechanism."""
+        context = state.get("task_context")
+        if not isinstance(context, dict):
+            return None
+        if str(context.get("phase") or "").strip().upper() != "READY_FOR_PLAN":
+            return None
+        if str(context.get("intent") or "").strip().upper() != "FORECAST_SEEDING":
+            return None
+        allowed = {
+            str(item).strip() for item in state.get("allowed_tool_names", [])
+        }
+        if "prepare_operation_action" not in allowed:
+            return None
+        parameters = context.get("parameters")
+        task_parameters = parameters if isinstance(parameters, dict) else {}
+        method = str(task_parameters.get("execution_method") or "").upper()
+        configured = FORECAST_EXECUTION_METHODS.get(method)
+        if configured is not None:
+            operation_code = configured[0]
+            try:
+                has_live_artifact = bool(
+                    self._gateway.artifact_catalog(operation_code)
+                )
+            except Exception as exc:
+                self._logger.debug(
+                    "Selected forecast method discovery failed for '%s': %s",
+                    operation_code,
+                    exc,
+                )
+                has_live_artifact = False
+            recovery = self._gateway.artifact_recovery_definition(
+                operation_code
+            )
+            if not has_live_artifact and not recovery.get("enabled"):
+                return None
+        else:
+            available = self._available_forecast_execution_methods()
+            if len(available) != 1:
+                return None
+            operation_code = available[0]
+        cutoff = str(task_parameters.get("cutoff_period") or "").strip()
+        year = str(task_parameters.get("year") or "").strip()
+        business_context = " ".join(
+            item
+            for item in (
+                f"Actual cutoff: {cutoff}." if cutoff else "",
+                f"Planning year: {year}." if year else "",
+            )
+            if item
+        )
+        objective = str(context.get("objective") or "").strip()
+        return AgentToolCall(
+            name="prepare_operation_action",
+            arguments={
+                "operation_code": operation_code,
+                "objective": " ".join(
+                    item
+                    for item in (
+                        objective,
+                        business_context,
+                        "Use only the selected approved Oracle forecast logic.",
+                    )
+                    if item
+                )[:1000],
+            },
+            call_id=f"deterministic-forecast-seeding-{operation_code}",
+        )
+
+    def _available_forecast_execution_methods(self) -> tuple[str, ...]:
+        available: list[str] = []
+        for operation_code, _label in FORECAST_EXECUTION_METHODS.values():
+            try:
+                catalog = self._gateway.artifact_catalog(operation_code)
+            except Exception as exc:
+                self._logger.debug(
+                    "Forecast method discovery skipped for '%s': %s",
+                    operation_code,
+                    exc,
+                )
+                continue
+            if catalog:
+                available.append(operation_code)
+        return tuple(available)
+
+    def _deterministic_forecast_seeding_blocker(
+        self,
+        state: AgentGraphState,
+        task_call: AgentToolCall | None,
+    ) -> str | None:
+        """Ask one focused question instead of inventing forecast logic."""
+        context = state.get("task_context")
+        if not isinstance(context, dict) or task_call is not None:
+            return None
+        if str(context.get("phase") or "").strip().upper() != "READY_FOR_PLAN":
+            return None
+        if str(context.get("intent") or "").strip().upper() != "FORECAST_SEEDING":
+            return None
+        available = self._available_forecast_execution_methods()
+        labels = {
+            operation_code: label
+            for operation_code, label in FORECAST_EXECUTION_METHODS.values()
+        }
+        if not available:
+            return (
+                "I have the forecast cutoff, but I could not find a registered "
+                "Oracle Pipeline, Business Rule, or Data Integration to perform "
+                "the seeding. I will not invent forecast logic. Register or "
+                "synchronize the approved Oracle artifact, then try again."
+            )
+        choices = [labels[item] for item in available]
+        if len(choices) == 1:
+            selected_method = str(
+                (
+                    context.get("parameters")
+                    if isinstance(context.get("parameters"), dict)
+                    else {}
+                ).get("execution_method")
+                or ""
+            ).upper()
+            selected_label = (
+                FORECAST_EXECUTION_METHODS.get(selected_method) or ("", "")
+            )[1]
+            if selected_label:
+                return (
+                    f"I could not find a live {selected_label} for forecast "
+                    f"seeding. I did find {choices[0]}. Should I use that "
+                    "approved Oracle route instead?"
+                )
+            return (
+                f"I found {choices[0]} as the available approved Oracle route "
+                "for forecast seeding. Please confirm that I should use it."
+            )
+        if len(choices) == 2:
+            readable = " or ".join(choices)
+        else:
+            readable = ", ".join(choices[:-1]) + f", or {choices[-1]}"
+        return (
+            "I found more than one approved Oracle route that could seed the "
+            f"forecast: {readable}. Which one should I use? I will show the "
+            "current live artifacts for that route before approval."
+        )
+
+    @staticmethod
+    def _deterministic_variance_reporting_call(
+        state: AgentGraphState,
+    ) -> AgentToolCall | None:
+        """Use a saved layout for live variance analysis without guessing."""
+        context = state.get("task_context")
+        if not isinstance(context, dict):
+            return None
+        if str(context.get("phase") or "").strip().upper() != "READY_FOR_PLAN":
+            return None
+        if str(context.get("intent") or "").strip().upper() != "VARIANCE_REPORTING":
+            return None
+        parameters = context.get("parameters")
+        values = parameters if isinstance(parameters, dict) else {}
+        comparison = str(values.get("comparison") or "").strip()
+        period = str(values.get("period") or "").strip()
+        if not comparison or not period:
+            return None
+        allowed = {
+            str(item).strip() for item in state.get("allowed_tool_names", [])
+        }
+        common: dict[str, Any] = {
+            "comparison": comparison,
+            "period": period,
+        }
+        year = str(values.get("year") or "").strip()
+        if year:
+            common["year"] = year
+        threshold = values.get("threshold")
+        if threshold is not None:
+            common["threshold"] = threshold
+        pov_overrides = values.get("pov_overrides")
+        if isinstance(pov_overrides, dict) and pov_overrides:
+            common["pov_overrides"] = pov_overrides
+        saved_view = str(values.get("saved_view") or "").strip()
+        if saved_view:
+            if "review_saved_variance" not in allowed:
+                return None
+            return AgentToolCall(
+                name="review_saved_variance",
+                arguments={"name": saved_view, **common},
+                call_id="deterministic-variance-review",
+            )
+        if "list_variance_views" not in allowed:
+            return None
+        return AgentToolCall(
+            name="list_variance_views",
+            arguments=common,
+            call_id="deterministic-variance-views",
+        )
+
+    @staticmethod
+    def _deterministic_task_plan_blocker(
+        state: AgentGraphState,
+        task_call: AgentToolCall | None,
+    ) -> str | None:
+        """Stop provider guessing when a ready Month Close cannot be mapped."""
+        context = state.get("task_context")
+        if not isinstance(context, dict) or task_call is not None:
+            return None
+        if str(context.get("phase") or "").strip().upper() != "READY_FOR_PLAN":
+            return None
+        if str(context.get("intent") or "").strip().upper() != "MONTH_CLOSE":
+            return None
+        return (
+            "I understood the Month Close activities, but I could not safely "
+            "map at least two of them to current platform operations. Please "
+            "name the operation types in order—for example: Data Integration, "
+            "Business Rule, then Data Map. I will validate the live Oracle "
+            "artifacts before asking for approval."
+        )
+
+    @staticmethod
+    def _task_plan_payload(
+        state: AgentGraphState,
+        call: AgentToolCall,
+    ) -> dict[str, Any] | None:
+        if call.name == "prepare_operation_action":
+            codes = [str(call.arguments.get("operation_code") or "")]
+        elif call.name == "plan_multi_step_request":
+            raw_steps = call.arguments.get("requested_steps")
+            codes = list(raw_steps) if isinstance(raw_steps, list) else []
+        else:
+            return state.get("task_plan")
+        plan = AgentExecutionPlanBuilder.build(
+            state.get("task_context"),
+            codes,
+        )
+        return (
+            plan.to_payload()
+            if plan.status == "READY"
+            else state.get("task_plan")
+        )
+
+    @staticmethod
+    def _task_guided_input_context(
+        state: AgentGraphState,
+        operation_code: str,
+    ) -> dict[str, Any]:
+        """Carry safe business inputs forward without inventing Oracle names."""
+        task = state.get("task_context")
+        if not isinstance(task, dict):
+            return {}
+        parameters = task.get("parameters")
+        if not isinstance(parameters, dict):
+            return {}
+        task_intent = str(task.get("intent") or "").strip().upper()
+        expected_operations = {
+            "DATA_LOAD": {"data-integrations", "data-import"},
+            "METADATA_LOAD": {"metadata-import"},
+            "FORECAST_SEEDING": {
+                "pipelines",
+                "business-rules",
+                "data-integrations",
+            },
+        }.get(task_intent, set())
+        if operation_code not in expected_operations:
+            return {}
+        keys = {
+            "DATA_LOAD": (
+                "scenario",
+                "period",
+                "year",
+                "file",
+                "file_preference",
+            ),
+            "METADATA_LOAD": ("dimension", "file", "file_preference"),
+            "FORECAST_SEEDING": (
+                "cutoff_period",
+                "year",
+                "execution_method",
+            ),
+        }[task_intent]
+        summary = {
+            key: parameters[key]
+            for key in keys
+            if str(parameters.get(key) or "").strip()
+        }
+        result: dict[str, Any] = {"task_context": summary}
+        if operation_code == "data-integrations" and task_intent == "DATA_LOAD":
+            prefill = {
+                "year": str(parameters.get("year") or "").strip(),
+                "start_month": str(parameters.get("period") or "").strip(),
+                "end_month": str(parameters.get("period") or "").strip(),
+            }
+            result["prefill"] = {
+                key: value for key, value in prefill.items() if value
+            }
+        return result
 
     @staticmethod
     def _route_after_model(
@@ -1908,6 +2402,72 @@ class AgentGraphOrchestrator:
                     "values, or start a fresh cube layout in Data Explorer."
                 )
             return "The saved Data Explorer views could not be loaded."
+        if operation_code == "variance-views":
+            activity = next(
+                (
+                    item
+                    for item in reversed(activities)
+                    if item.get("name") == "list_variance_views"
+                ),
+                None,
+            )
+            if isinstance(activity, dict) and str(
+                activity.get("status") or ""
+            ).upper() == "SUCCESS":
+                result = activity.get("result")
+                count = (
+                    int(result.get("count") or 0)
+                    if isinstance(result, dict)
+                    else 0
+                )
+                if count:
+                    return (
+                        "I found saved Data Explorer layouts that can safely "
+                        "define the variance scope. Choose one below; I will "
+                        "then retrieve and compare current Oracle values."
+                    )
+                return (
+                    "No saved Data Explorer layout is available for variance "
+                    "analysis. Create and validate a reusable layout in Data "
+                    "Explorer first; no Oracle data was changed."
+                )
+            return "The saved variance layouts could not be loaded."
+        if operation_code == "variance-review":
+            activity = next(
+                (
+                    item
+                    for item in reversed(activities)
+                    if item.get("name") == "review_saved_variance"
+                ),
+                None,
+            )
+            if isinstance(activity, dict) and str(
+                activity.get("status") or ""
+            ).upper() == "SUCCESS":
+                result = activity.get("result")
+                validation = (
+                    result.get("result") if isinstance(result, dict) else None
+                )
+                if isinstance(validation, dict):
+                    compared = int(validation.get("compared_cells") or 0)
+                    matched = int(validation.get("matched_cells") or 0)
+                    different = max(0, compared - matched)
+                    return (
+                        f"The live variance review compared **{compared:,}** "
+                        f"cells and found **{different:,}** above the selected "
+                        "threshold. Review the returned differences "
+                        "below or export the comparison to Excel."
+                    )
+                return "The live variance comparison is ready below."
+            error = ""
+            if isinstance(activity, dict) and isinstance(
+                activity.get("result"), dict
+            ):
+                error = str(activity["result"].get("error") or "").strip()
+            return (
+                "The variance comparison could not be loaded from Oracle. "
+                + (f"The platform returned: {error}" if error else "")
+            ).strip()
         if operation_code == "saved-data-view":
             activity = next(
                 (
@@ -2208,6 +2768,29 @@ class AgentGraphOrchestrator:
             if self._is_artifact_confirmation_reply(latest_user_text)
             else None
         )
+        task_context = state.get("task_context")
+        trusted_task_objective = ""
+        if (
+            operation_code == "business-rules"
+            and isinstance(task_context, dict)
+            and str(task_context.get("intent") or "").strip().upper()
+            == "RUN_BUSINESS_RULE"
+        ):
+            trusted_task_objective = str(
+                task_context.get("objective") or ""
+            ).strip()
+        task_artifact = (
+            self._artifact_alias_named_in_user_text(
+                display_names,
+                trusted_task_objective,
+            )
+            or self._artifact_named_in_user_text(
+                choices,
+                trusted_task_objective,
+            )
+            if trusted_task_objective
+            else None
+        )
         explicitly_named = self._artifact_alias_named_in_user_text(
             display_names,
             latest_user_text,
@@ -2218,7 +2801,7 @@ class AgentGraphOrchestrator:
             choices,
             latest_user_text,
             previous_assistant_text,
-        ) or confirmed_prior_artifact
+        ) or confirmed_prior_artifact or task_artifact
         canonical_requested = explicitly_named or next(
             (
                 item
@@ -2396,6 +2979,12 @@ class AgentGraphOrchestrator:
             if self._is_artifact_confirmation_reply(latest_user_text)
             else latest_user_text_original
         )
+        if operation_code == "business-rules" and trusted_task_objective:
+            input_source_text = " ".join(
+                item
+                for item in (trusted_task_objective, input_source_text)
+                if item
+            )
         if guided is not None and operation_code == "substitution-variables":
             context = dict(guided.get("context") or {})
             creating_variable = str(context.get("action") or "") == "CREATE"
@@ -2464,6 +3053,15 @@ class AgentGraphOrchestrator:
                 ),
             }
             guided = {**guided, "context": context}
+        if guided is not None:
+            task_input_context = self._task_guided_input_context(
+                state,
+                operation_code,
+            )
+            if task_input_context:
+                context = dict(guided.get("context") or {})
+                context.update(task_input_context)
+                guided = {**guided, "context": context}
         if guided is not None:
             input_response = interrupt(
                 {"kind": "operation_input_collection", **guided}
@@ -2934,6 +3532,7 @@ class AgentGraphOrchestrator:
             "ahead",
             "continue",
             "proceed",
+            "now",
         }
         confirmation_words = {
             "yes",

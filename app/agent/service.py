@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import datetime
@@ -23,11 +24,14 @@ from app.agent.groq_provider import GroqAgentProvider
 from app.agent.checkpoints import AgentCheckpointStore
 from app.agent.graph import AgentGraphOrchestrator
 from app.agent.intent import AgentIntentRouter
+from app.agent.task_state import AgentTaskInterpreter
 from app.agent.models import (
     AgentActionDecision,
     AgentApprovalRequest,
     AgentClarificationRequest,
     AgentMessageRole,
+    AgentProviderResult,
+    AgentToolActivity,
 )
 from app.agent.preflight import AgentActionPreflightService
 from app.agent.provider import AgentProvider
@@ -75,11 +79,15 @@ from app.models.automation_schedule import (
 from app.models.oracle_artifact import OracleEnvironment
 from app.services.data_integration_service import DataIntegrationService
 from app.services.data_service import DataService
+from app.services.agent_execution_followup_service import (
+    AgentExecutionFollowUpService,
+)
 from app.services.metadata_service import MetadataService
 from app.config.settings import Settings
 from app.models.access_control import (
     ExecutionActor,
     Permission,
+    RoleCode,
     TriggerSource,
     UserAccount,
 )
@@ -95,12 +103,36 @@ from app.utils.exceptions import (
 
 ProviderFactory = Callable[[], AgentProvider]
 
+_ROLE_LABELS = {
+    RoleCode.SERVICE_ADMINISTRATOR: "Service Administrator",
+    RoleCode.POWER_USER: "Power User",
+    RoleCode.USER: "User",
+    RoleCode.VIEWER: "Viewer",
+}
+
+_PERMISSION_LABELS = {
+    Permission.PROCESS_RUN: "Run assigned Planning processes",
+    Permission.PROCESS_DESIGN: "Design and administer Planning processes",
+    Permission.SCHEDULE_MANAGE: "Create and manage automation schedules",
+    Permission.OPERATION_EXECUTE: "Execute governed Oracle operations",
+    Permission.VARIABLE_UPDATE: "Update substitution variables",
+    Permission.USER_VARIABLE_UPDATE: "Update Planning user variables",
+    Permission.DATA_REVIEW: "Review authorized Planning data",
+    Permission.REPORT_GENERATE: "Generate and export reports",
+    Permission.HISTORY_VIEW: "View execution history and evidence",
+    Permission.USER_MANAGE: "Manage platform users and access mappings",
+    Permission.CATALOG_MANAGE: "Manage registered Oracle artifact catalogs",
+    Permission.AGENT_USE: "Use EPM Assistant",
+}
+
 SYSTEM_INSTRUCTION = """
-You are the read-only assistant inside BISP Solutions Oracle EPM Automation.
-Help Oracle EPM consultants, planners, finance users, and administrators
-understand the platform and inspect its current state. Use the provided tools
-when the answer depends on configured or live platform information. Clearly
-distinguish tool-confirmed facts from general Oracle EPM guidance.
+You are the governed operational assistant inside BISP Solutions Oracle EPM
+Automation. Help Oracle EPM consultants, planners, finance users, and
+administrators accomplish business tasks conversationally, while the platform's
+deterministic services remain responsible for validation and execution. Use the
+provided tools when the answer depends on configured or live platform
+information. Clearly distinguish tool-confirmed facts from general Oracle EPM
+guidance.
 
 Safety rules:
 - You cannot execute, schedule, modify, upload, delete, approve, or retry work
@@ -110,6 +142,12 @@ Safety rules:
 - When a user clearly wants to perform an operation, use the preparation tool
   to create an exact reviewable proposal. Supported direct operations run only
   after explicit platform approval; all others become governed action drafts.
+- Preserve the current structured business-task context across short answers
+  and corrections. If required information is missing, ask only one focused
+  question at a time instead of presenting a long technical form.
+- Understand business phrases such as Month Close, metadata load, actual data
+  load, forecast seeding, and variance reporting. Do not invent the Oracle
+  artifact that implements a business task; discover and validate it first.
 - Use the artifact-listing tool when an exact Oracle artifact was not supplied.
   Never guess an artifact name; let the user choose from platform results.
 - Treat "Data Push", "push data", and "publish Planning data" as Data Maps:
@@ -187,6 +225,11 @@ class AgentApplicationService:
         self._logger = logger or logging.getLogger(__name__)
         self._graph = graph_orchestrator
         self._operation_manager = operation_manager
+        self._execution_followups = AgentExecutionFollowUpService(
+            settings.database_target,
+            repository=self._repository,
+            logger=self._logger.getChild("execution_followups"),
+        )
         self._schedule_service = schedule_service
         self._schedule_coordinator = schedule_coordinator
         self._schedule_environment_key = OracleEnvironment.from_settings(
@@ -251,6 +294,17 @@ class AgentApplicationService:
 
     def get_messages(self, conversation_id: str, user: UserAccount):
         self._require_agent_use(user)
+        try:
+            self._execution_followups.publish_for_conversation(
+                conversation_id,
+                user.user_id,
+            )
+        except Exception:
+            self._logger.exception(
+                "Unable to reconcile agent execution follow-ups for "
+                "conversation '%s'.",
+                conversation_id,
+            )
         return self._repository.list_messages(conversation_id, user.user_id)
 
     def get_action_drafts(self, conversation_id: str, user: UserAccount):
@@ -664,6 +718,12 @@ class AgentApplicationService:
             role=AgentMessageRole.USER,
             content=prompt,
         )
+        if self._is_current_user_access_request(prompt):
+            return self._persist_agent_result(
+                conversation_id=conversation_id,
+                user=user,
+                result=self._current_user_access_result(user),
+            )
         messages = self._repository.list_messages(
             conversation_id,
             user.user_id,
@@ -673,6 +733,15 @@ class AgentApplicationService:
             conversation_id,
             user,
         )
+        task_understanding = AgentTaskInterpreter.interpret(messages)
+        task_context = task_understanding.to_payload()
+        if task_understanding.intent.value == "CANCEL_OPERATION":
+            stopped = self._stop_latest_active_flow(
+                conversation_id=conversation_id,
+                user=user,
+            )
+            if stopped is not None:
+                return stopped
         if self._settings.agent_orchestrator == "langgraph":
             if self._graph is None:
                 raise AgentConfigurationError(
@@ -682,11 +751,15 @@ class AgentApplicationService:
                 prompt,
                 self._allowed_tool_names(user),
                 has_data_review_context=data_review_context is not None,
+                task_intent=task_understanding.intent.value,
             )
             self._logger.info(
-                "Agent intent classified: user='%s', intent='%s'.",
+                "Agent intent classified: user='%s', intent='%s', "
+                "task_intent='%s', task_phase='%s'.",
                 user.username,
                 intent.intent.value,
+                task_understanding.intent.value,
+                task_understanding.phase.value,
             )
             result = self._graph.invoke(
                 conversation_id=conversation_id,
@@ -694,6 +767,7 @@ class AgentApplicationService:
                 messages=messages,
                 allowed_tool_names=intent.tool_names,
                 data_review_context=data_review_context,
+                task_context=task_context,
             )
         else:
             provider = self._provider_factory()
@@ -732,6 +806,7 @@ class AgentApplicationService:
             tool_names=(
                 "review_data_slice",
                 "review_saved_data_view",
+                "review_saved_variance",
                 "compare_data_slices",
             ),
         )
@@ -1176,6 +1251,67 @@ class AgentApplicationService:
             "decision": None,
         }
 
+    @staticmethod
+    def _is_current_user_access_request(prompt: str) -> bool:
+        """Recognize questions about the authenticated user's own access."""
+        normalized = " ".join(str(prompt or "").casefold().split())
+        permission = r"permis{1,2}ions?"
+        patterns = (
+            rf"\bmy\b.{{0,30}}\b(?:role|roles|{permission}|access)\b",
+            rf"\b(?:role|roles|{permission}|access)\b.{{0,30}}"
+            r"\b(?:do i have|assigned to me|for me)\b",
+            r"\bwhat\s+am\s+i\s+allowed\s+to\s+do\b",
+            r"\bam\s+i\s+allowed\b",
+            r"\bwho\s+am\s+i\b",
+        )
+        return any(re.search(pattern, normalized) for pattern in patterns)
+
+    @staticmethod
+    def _current_user_access_result(user: UserAccount) -> AgentProviderResult:
+        """Return session-backed identity facts without asking the model."""
+        roles = tuple(_ROLE_LABELS.get(role, role.value) for role in user.roles)
+        permissions = tuple(
+            (permission, _PERMISSION_LABELS.get(permission, permission.value))
+            for permission in sorted(user.permissions, key=lambda item: item.value)
+        )
+        role_text = ", ".join(roles) if roles else "No platform role assigned"
+        permission_lines = (
+            "\n".join(
+                f"- **{label}** (`{permission.value}`)"
+                for permission, label in permissions
+            )
+            if permissions
+            else "- No active platform permissions are assigned."
+        )
+        status = "Active" if user.active else "Inactive"
+        content = (
+            "**Your current platform access**\n\n"
+            f"- **User:** {user.display_name} (`{user.username}`)\n"
+            f"- **Account status:** {status}\n"
+            f"- **Platform role:** {role_text}\n\n"
+            "**Granted permissions**\n\n"
+            f"{permission_lines}\n\n"
+            "These values come from your authenticated platform session and "
+            "are the permissions enforced by this application. They describe "
+            "your account, not the EPM Assistant. Platform roles are shown "
+            "here; this response does not claim to list raw Oracle groups or "
+            "Oracle-native role assignments."
+        )
+        activity = AgentToolActivity(
+            name="get_current_user_access",
+            arguments={},
+            status="SUCCESS",
+            summary="Authenticated user access returned.",
+            result={
+                "username": user.username,
+                "display_name": user.display_name,
+                "active": user.active,
+                "roles": [role.value for role in user.roles],
+                "permissions": [permission.value for permission, _ in permissions],
+            },
+        )
+        return AgentProviderResult(text=content, tool_activity=(activity,))
+
     def _submit_approved_flow(
         self,
         payload: dict[str, object],
@@ -1410,6 +1546,67 @@ class AgentApplicationService:
             conversation_id,
             user.user_id,
         )
+
+    def _stop_latest_active_flow(
+        self,
+        *,
+        conversation_id: str,
+        user: UserAccount,
+    ) -> dict[str, object] | None:
+        """Apply a conversational safe-stop to this user's latest active flow."""
+        if self._operation_manager is None:
+            return None
+        decisions = self._repository.list_action_decisions(
+            conversation_id,
+            user.user_id,
+        )
+        for decision in reversed(decisions):
+            if (
+                decision.operation_code != "standalone-flow"
+                or not decision.execution_id
+                or decision.outcome_status != "SUBMITTED"
+            ):
+                continue
+            managed = self._operation_manager.get(decision.execution_id)
+            if managed is None or managed.status.value not in {"QUEUED", "RUNNING"}:
+                continue
+            stopped = self._operation_manager.request_flow_stop(
+                decision.execution_id,
+                requested_by=user.username,
+            )
+            cancelled = stopped.status.value == "CANCELLED"
+            assistant = self._repository.add_message(
+                conversation_id=conversation_id,
+                user_id=user.user_id,
+                role=AgentMessageRole.ASSISTANT,
+                content=(
+                    "The standalone flow was still queued, so I cancelled it "
+                    "before any Oracle step started."
+                    if cancelled
+                    else "I requested a safe stop. The current Oracle job will "
+                    "finish normally, and no later flow step will start."
+                ),
+            )
+            return {
+                "message": assistant,
+                "tool_activity": (),
+                "action_drafts": self._repository.list_action_drafts(
+                    conversation_id,
+                    user.user_id,
+                ),
+                "approval_request": None,
+                "clarification_request": None,
+                "input_request": None,
+                "execution": {
+                    "execution_id": stopped.execution_id,
+                    "operation_code": "standalone-flow",
+                    "target_name": stopped.target_name,
+                    "status": stopped.status.value,
+                },
+                "schedule": None,
+                "decision": None,
+            }
+        return None
 
     def _replay_action_decision(
         self,
@@ -2234,7 +2431,9 @@ class AgentApplicationService:
                     "list_cube_dimensions",
                     "search_dimension_members",
                     "list_data_explorer_views",
+                    "list_variance_views",
                     "review_saved_data_view",
+                    "review_saved_variance",
                     "review_data_slice",
                     "compare_data_slices",
                 }

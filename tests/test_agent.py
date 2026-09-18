@@ -288,7 +288,10 @@ class _SavedViewReportWorkspace:
                 name="revenue-forecast",
                 title="Revenue Forecast",
                 cube="Plan1",
-                default_pov=(("Scenario", "Forecast"),),
+                default_pov=(
+                    ("Scenario", "Forecast"),
+                    ("Product", "BaseData"),
+                ),
                 rows=(("Account", ("Revenue",)),),
                 columns=(("Period", ("Jan",)),),
             ),
@@ -297,6 +300,52 @@ class _SavedViewReportWorkspace:
                 title="Legacy layout",
                 cube="Plan1",
                 default_pov=(),
+            ),
+        )
+
+
+class _VarianceDataReview:
+    def __init__(self, expected_product: str = "BaseData") -> None:
+        self.expected_product = expected_product
+
+    def compare_slices(
+        self,
+        source,
+        target,
+        *,
+        tolerance,
+        max_mismatches,
+        include_cells,
+    ):
+        assert source.cube == target.cube == "Plan1"
+        assert source.pov["Scenario"] == "Actual"
+        assert target.pov["Scenario"] == "Budget"
+        assert source.pov["Product"] == self.expected_product
+        assert target.pov["Product"] == self.expected_product
+        assert source.columns[0].dimension == "Period"
+        assert source.columns[0].members == ("Sep",)
+        assert target.columns[0].members == ("Sep",)
+        assert tolerance == 1000
+        assert max_mismatches == 100
+        assert include_cells is False
+        return DataReviewComparison(
+            source_cube="Plan1",
+            target_cube="Plan1",
+            result=DataValidationResult(
+                source_form="Actual Sep",
+                target_form="Budget Sep",
+                compared_cells=2,
+                matched_cells=1,
+                mismatches=(
+                    DataMismatch(
+                        row_headers=("Revenue",),
+                        column_headers=("Sep",),
+                        source_value=5000,
+                        target_value=3500,
+                        difference=1500,
+                    ),
+                ),
+                tolerance=1000,
             ),
         )
 
@@ -320,6 +369,15 @@ class _OperationCatalog:
     def discover_job_names(self, *, job_type):
         assert job_type == "RULES"
         return ("Revenue Forecast",)
+
+
+class _NamedRuleCatalog:
+    def __init__(self, *names: str) -> None:
+        self._names = names
+
+    def discover_job_names(self, *, job_type):
+        assert job_type == "RULES"
+        return self._names
 
 
 class _DataMapCatalog:
@@ -983,6 +1041,24 @@ class _OperationManager:
         )
 
 
+class _ActiveFlowOperationManager:
+    def __init__(self) -> None:
+        self.stop_requests: list[tuple[str, str]] = []
+
+    def get(self, execution_id: str):
+        if execution_id != "active-flow-1":
+            return None
+        return SimpleNamespace(status=SimpleNamespace(value="RUNNING"))
+
+    def request_flow_stop(self, execution_id: str, *, requested_by: str):
+        self.stop_requests.append((execution_id, requested_by))
+        return SimpleNamespace(
+            execution_id=execution_id,
+            target_name="September Close",
+            status=SimpleNamespace(value="RUNNING"),
+        )
+
+
 def test_agent_service_persists_provider_neutral_conversation(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     access = AccessControlService(settings.workflow_database_file)
@@ -1017,6 +1093,69 @@ def test_agent_service_persists_provider_neutral_conversation(tmp_path: Path) ->
     assert [item.role.value for item in messages] == ["user", "assistant"]
     assert result["message"].content.startswith("The configured operations")
     assert service.list_conversations(user)[0].title == "What can I run?"
+
+
+def test_agent_safe_stop_targets_latest_active_standalone_flow(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    AccessControlService(settings.workflow_database_file).bootstrap_administrator(
+        username="admin",
+        display_name="Administrator",
+        email=None,
+        password="Strong password 123!",
+    )
+    repository = SQLiteAgentRepository(settings.workflow_database_file)
+    user = _user()
+    conversation = repository.create_conversation(
+        user_id=user.user_id,
+        provider="gemini",
+        model="test-model",
+    )
+    repository.reserve_action_decision(
+        request_id="run-active-flow",
+        conversation_id=conversation.conversation_id,
+        user_id=user.user_id,
+        username=user.username,
+        operation_code="standalone-flow",
+        artifact_name="September Close",
+        decision="APPROVE",
+        payload_checksum="a" * 64,
+        payload_snapshot={"name": "September Close"},
+    )
+    repository.finalize_action_decision(
+        request_id="run-active-flow",
+        user_id=user.user_id,
+        conversation_id=conversation.conversation_id,
+        outcome_status="SUBMITTED",
+        execution_id="active-flow-1",
+    )
+    manager = _ActiveFlowOperationManager()
+    service = AgentApplicationService(
+        settings,
+        gateway=AgentCapabilityGateway(
+            settings,
+            control_center=_ControlCenter(),
+            data_review=_DataReview(),
+        ),
+        repository=repository,
+        operation_manager=manager,
+    )
+
+    result = service.send_message(
+        conversation_id=conversation.conversation_id,
+        user=user,
+        content="Stop after this step.",
+    )
+
+    assert manager.stop_requests == [("active-flow-1", "planner")]
+    assert result["execution"] == {
+        "execution_id": "active-flow-1",
+        "operation_code": "standalone-flow",
+        "target_name": "September Close",
+        "status": "RUNNING",
+    }
+    assert "no later flow step will start" in result["message"].content
 
 
 def test_agent_conversations_are_scoped_to_their_owner(tmp_path: Path) -> None:
@@ -1135,10 +1274,39 @@ def test_agent_service_restores_saved_data_explorer_view_as_exact_context(
         "tool": "review_saved_data_view",
         "selection": {
             "cube": "Plan1",
-            "pov": {"Scenario": "Forecast"},
+            "pov": {"Scenario": "Forecast", "Product": "BaseData"},
             "rows": [{"dimension": "Account", "members": ["Revenue"]}],
             "columns": [{"dimension": "Period", "members": ["Jan"]}],
         },
+    }
+
+    variance_arguments = {
+        "name": "revenue-forecast",
+        "comparison": "Actual vs Budget",
+        "period": "Sep",
+        "year": "FY26",
+        "threshold": 500,
+        "pov_overrides": {"Product": "Snacks"},
+    }
+    repository.record_tool_activity(
+        conversation_id=conversation.conversation_id,
+        user_id=1,
+        activities=(
+            AgentToolActivity(
+                name="review_saved_variance",
+                arguments=variance_arguments,
+                status="SUCCESS",
+                summary="Variance compared.",
+            ),
+        ),
+    )
+
+    assert service.get_data_review_context(
+        conversation.conversation_id,
+        _user(Permission.DATA_REVIEW),
+    ) == {
+        "tool": "review_saved_variance",
+        "selection": variance_arguments,
     }
 
 
@@ -1335,7 +1503,7 @@ def test_agent_data_explorer_saved_view_uses_server_side_layout(
     }
     assert reviewed["request"] == {
         "cube": "Plan1",
-        "pov": {"Scenario": "Forecast"},
+        "pov": {"Scenario": "Forecast", "Product": "BaseData"},
         "rows": [{"dimension": "Account", "members": ["Revenue"]}],
         "columns": [{"dimension": "Period", "members": ["Jan"]}],
     }
@@ -1347,6 +1515,54 @@ def test_agent_data_explorer_saved_view_uses_server_side_layout(
                 arguments={"name": "missing"},
             )
         )
+
+
+def test_agent_variance_review_reuses_saved_layout_and_live_values(
+    tmp_path: Path,
+) -> None:
+    gateway = AgentCapabilityGateway(
+        _settings(tmp_path),
+        control_center=_ControlCenter(),
+        data_review=_VarianceDataReview(expected_product="Snacks"),
+        report_workspace=_SavedViewReportWorkspace(),
+    )
+
+    catalog = gateway.execute(
+        AgentToolCall(
+            name="list_variance_views",
+            arguments={
+                "comparison": "Actual vs Budget",
+                "period": "Sep",
+                "threshold": 1000,
+            },
+        )
+    )
+    compared = gateway.execute(
+        AgentToolCall(
+            name="review_saved_variance",
+            arguments={
+                "name": "revenue-forecast",
+                "comparison": "Actual vs Budget",
+                "period": "Sep",
+                "threshold": 1000,
+                "pov_overrides": {"Product": "Snacks"},
+            },
+        )
+    )
+
+    assert catalog["purpose"] == "variance"
+    assert catalog["comparison"] == "Actual vs Budget"
+    assert catalog["views"][0]["name"] == "revenue-forecast"
+    assert compared["saved_view"]["name"] == "revenue-forecast"
+    assert compared["variance_context"] == {
+        "comparison": "Actual vs Budget",
+        "period": "Sep",
+        "year": "",
+        "threshold": 1000.0,
+        "pov_overrides": {"Product": "Snacks"},
+    }
+    assert compared["result"]["compared_cells"] == 2
+    assert compared["result"]["matched_cells"] == 1
 
 
 def test_agent_service_persists_action_draft_for_conversation(
@@ -1388,6 +1604,76 @@ def test_agent_service_persists_action_draft_for_conversation(
     assert persisted == result["action_drafts"]
     assert persisted[0].artifact_name == "Revenue Forecast"
     assert persisted[0].message_id == result["message"].message_id
+
+
+def test_agent_reports_authenticated_users_own_role_and_permissions(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    access = AccessControlService(settings.workflow_database_file)
+    account = access.bootstrap_administrator(
+        username="planner",
+        display_name="Finance Planner",
+        email=None,
+        password="Strong password 123!",
+    )
+    repository = SQLiteAgentRepository(settings.workflow_database_file)
+    service = AgentApplicationService(
+        settings,
+        gateway=AgentCapabilityGateway(
+            settings,
+            control_center=_ControlCenter(),
+            data_review=_DataReview(),
+        ),
+        repository=repository,
+        provider_factory=_NeverCalledProvider,
+    )
+    user = replace(
+        _user(Permission.OPERATION_EXECUTE, Permission.DATA_REVIEW),
+        user_id=account.user_id,
+        username="planner",
+        display_name="Finance Planner",
+    )
+    conversation = service.create_conversation(user)
+
+    permissions = service.send_message(
+        conversation_id=conversation.conversation_id,
+        user=user,
+        content="Hello, can you describe my allowed permisions?",
+    )
+    role = service.send_message(
+        conversation_id=conversation.conversation_id,
+        user=user,
+        content="What is my role?",
+    )
+
+    for response in (permissions, role):
+        content = response["message"].content
+        assert "Finance Planner (`planner`)" in content
+        assert "Platform role:** Power User" in content
+        assert "operation.execute" in content
+        assert "data.review" in content
+        assert "governed operational assistant" not in content.casefold()
+        assert response["tool_activity"][0].name == "get_current_user_access"
+        assert response["tool_activity"][0].result["username"] == "planner"
+
+
+def test_personal_access_detection_does_not_confuse_assistant_identity() -> None:
+    assert AgentApplicationService._is_current_user_access_request(
+        "Tell me my permissions, not yours."
+    )
+    assert AgentApplicationService._is_current_user_access_request(
+        "What permissions do I have?"
+    )
+    assert not AgentApplicationService._is_current_user_access_request(
+        "What is your role?"
+    )
+    assert not AgentApplicationService._is_current_user_access_request(
+        "List the platform operations."
+    )
+    assert not AgentApplicationService._is_current_user_access_request(
+        "What can I run?"
+    )
 
 
 def test_explicit_agent_approval_queues_rule_without_redundant_draft(
@@ -1527,6 +1813,116 @@ def test_business_rule_request_runs_full_governed_flow_without_model_tool_choice
     assert operation_input.rule_name == "Revenue Forecast"
     assert operation_input.runtime_prompts == {"Year": "FY27"}
     assert actor.trigger_source is TriggerSource.AI_AGENT
+
+
+@pytest.mark.parametrize(
+    ("prompt", "rule_name"),
+    (
+        ("Run Aggregate Plan rule.", "Aggregate Plan"),
+        (
+            "run clear facilities allocation rule",
+            "Clear Facilities Allocation",
+        ),
+    ),
+)
+def test_named_rule_request_does_not_require_business_rule_wording(
+    tmp_path: Path,
+    prompt: str,
+    rule_name: str,
+) -> None:
+    settings = _settings(tmp_path)
+    access = AccessControlService(settings.workflow_database_file)
+    account = access.bootstrap_administrator(
+        username="admin",
+        display_name="Administrator",
+        email=None,
+        password="Strong password 123!",
+    )
+    repository = SQLiteAgentRepository(settings.workflow_database_file)
+    service = AgentApplicationService(
+        settings,
+        gateway=AgentCapabilityGateway(
+            settings,
+            control_center=_ControlCenter(),
+            data_review=_DataReview(),
+            operation_catalog=_NamedRuleCatalog(rule_name),
+        ),
+        repository=repository,
+        provider_factory=_NeverCalledProvider,
+        operation_manager=_OperationManager(),
+    )
+    user = replace(
+        _user(Permission.OPERATION_EXECUTE),
+        user_id=account.user_id,
+    )
+    conversation = service.create_conversation(user)
+
+    prepared = service.send_message(
+        conversation_id=conversation.conversation_id,
+        user=user,
+        content=prompt,
+    )
+
+    assert prepared["input_request"] is not None
+    assert prepared["input_request"].artifact_name == rule_name
+
+
+def test_business_rule_confirmation_retains_original_rule_request(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    access = AccessControlService(settings.workflow_database_file)
+    account = access.bootstrap_administrator(
+        username="admin",
+        display_name="Administrator",
+        email=None,
+        password="Strong password 123!",
+    )
+    repository = SQLiteAgentRepository(settings.workflow_database_file)
+    service = AgentApplicationService(
+        settings,
+        gateway=AgentCapabilityGateway(
+            settings,
+            control_center=_ControlCenter(),
+            data_review=_DataReview(),
+            operation_catalog=_NamedRuleCatalog("Aggregate Plan"),
+        ),
+        repository=repository,
+        provider_factory=_NeverCalledProvider,
+        operation_manager=_OperationManager(),
+    )
+    user = replace(
+        _user(Permission.OPERATION_EXECUTE),
+        user_id=account.user_id,
+    )
+    conversation = service.create_conversation(user)
+    for role, content in (
+        (AgentMessageRole.USER, "run aggregate plan rule"),
+        (
+            AgentMessageRole.ASSISTANT,
+            "Would you like me to prepare the Aggregate Plan rule?",
+        ),
+        (AgentMessageRole.USER, "yes"),
+        (
+            AgentMessageRole.ASSISTANT,
+            "Would you like me to prepare it now?",
+        ),
+    ):
+        repository.add_message(
+            conversation_id=conversation.conversation_id,
+            user_id=user.user_id,
+            role=role,
+            content=content,
+        )
+
+    prepared = service.send_message(
+        conversation_id=conversation.conversation_id,
+        user=user,
+        content="yes prepare now",
+    )
+
+    assert prepared["input_request"] is not None
+    assert prepared["input_request"].artifact_name == "Aggregate Plan"
 
 
 def test_standalone_flow_runs_after_one_complete_approval(

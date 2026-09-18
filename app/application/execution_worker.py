@@ -28,6 +28,9 @@ from app.models.workflow import WorkflowRun, WorkflowStatus
 from app.services.execution_queue_repository import (
     SQLExecutionQueueRepository,
 )
+from app.services.agent_execution_followup_service import (
+    AgentExecutionFollowUpService,
+)
 from app.services.workflow_repository import SQLWorkflowRepository
 
 
@@ -42,6 +45,7 @@ class DurableExecutionWorker:
         operation_executor_factory: Callable[..., object] | None = None,
         process_executor_factory: Callable[..., object] | None = None,
         standalone_flow_executor_factory: Callable[..., object] | None = None,
+        completion_notifier: Callable[[str], object] | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._settings = settings
@@ -57,6 +61,12 @@ class DurableExecutionWorker:
         )
         self._standalone_flow_executor_factory = (
             standalone_flow_executor_factory or StandaloneFlowCommandExecutor
+        )
+        self._completion_notifier = completion_notifier or (
+            AgentExecutionFollowUpService(
+                settings.database_target,
+                logger=self._logger.getChild("agent_followups"),
+            ).publish
         )
         self._queue = SQLExecutionQueueRepository(settings.database_target)
         self._workflows = SQLWorkflowRepository(settings.database_target)
@@ -124,6 +134,7 @@ class DurableExecutionWorker:
                 job.error_message
                 or "Execution requires recovery after its worker lease expired.",
             )
+            self._publish_follow_up(job.execution_id)
         if jobs:
             self._logger.error(
                 "%d execution(s) require manual recovery after worker loss.",
@@ -190,17 +201,33 @@ class DurableExecutionWorker:
                 }
                 if actor is not None:
                     arguments["actor"] = actor
-                run = executor.execute(flow_input, **arguments)
+                run = executor.execute(
+                    flow_input,
+                    stop_requested=lambda: self._queue.cancellation_requested(
+                        job.execution_id
+                    ),
+                    **arguments,
+                )
             else:  # pragma: no cover - enum compatibility protection.
                 raise ValueError(
                     f"Unsupported execution job type '{job.job_type.value}'."
                 )
             if isinstance(run, WorkflowRun):
                 self._workflows.save(run)
-            self._queue.complete(
-                job.execution_id,
-                worker_id=self._worker_id,
-            )
+            if (
+                isinstance(run, WorkflowRun)
+                and run.status is WorkflowStatus.CANCELLED
+            ):
+                self._queue.cancel_claimed(
+                    job.execution_id,
+                    worker_id=self._worker_id,
+                )
+            else:
+                self._queue.complete(
+                    job.execution_id,
+                    worker_id=self._worker_id,
+                )
+            self._publish_follow_up(job.execution_id)
         except Exception as exc:
             message = " ".join(str(exc).split())[:1_500]
             self._record_failure(job, message)
@@ -215,6 +242,8 @@ class DurableExecutionWorker:
                     "Unable to persist queue failure for execution '%s'.",
                     job.execution_id,
                 )
+            else:
+                self._publish_follow_up(job.execution_id)
             self._logger.exception(
                 "Durable execution failed: execution_id='%s'.",
                 job.execution_id,
@@ -225,6 +254,15 @@ class DurableExecutionWorker:
             heartbeat_stop.set()
             heartbeat.join(timeout=2)
             self._cleanup_uploads(job)
+
+    def _publish_follow_up(self, execution_id: str) -> None:
+        try:
+            self._completion_notifier(execution_id)
+        except Exception:
+            self._logger.exception(
+                "Unable to publish agent execution follow-up for '%s'.",
+                execution_id,
+            )
 
     def _heartbeat(self, execution_id: str, stop: Event) -> None:
         interval = max(

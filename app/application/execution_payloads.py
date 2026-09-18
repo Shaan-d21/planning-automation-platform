@@ -153,6 +153,7 @@ def operation_from_payload(payload: dict[str, Any]) -> tuple[OperationInput, Exe
             import_mode=_text(values, "import_mode"),
             export_mode=_text(values, "export_mode"),
             upload_path=_optional_path(values.get("upload_path")),
+            upload_target=_optional_text(values.get("upload_target")),
             inbox_file=_optional_text(values.get("inbox_file")),
             use_configured_file=bool(values.get("use_configured_file", False)),
         )
@@ -360,6 +361,7 @@ def _operation_values(operation_input: OperationInput) -> tuple[OperationKind, d
             "import_mode": operation_input.import_mode,
             "export_mode": operation_input.export_mode,
             "upload_path": _path_text(operation_input.upload_path),
+            "upload_target": operation_input.upload_target,
             "inbox_file": operation_input.inbox_file,
             "use_configured_file": operation_input.use_configured_file,
         }

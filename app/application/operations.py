@@ -35,7 +35,7 @@ from app.models.data_integration import (
     DataIntegrationPeriodRange,
 )
 from app.models.data_integration_catalog import DataIntegrationDefinition
-from app.models.job import JobDefinition, JobRecordStatistics
+from app.models.job import JobDefinition, JobRecordStatistics, JobResult
 from app.models.pipeline_catalog import PipelineCatalogDefinition
 from app.models.oracle_artifact import (
     OracleArtifact,
@@ -194,6 +194,7 @@ class DataIntegrationOperationInput:
     import_mode: str
     export_mode: str
     upload_path: Path | None = None
+    upload_target: str | None = None
     inbox_file: str | None = None
     use_configured_file: bool = False
 
@@ -1257,15 +1258,72 @@ class OperationCommandExecutor:
             job_id: int,
             *,
             failed: bool = False,
+            job_result: JobResult | None = None,
         ) -> dict[str, Any]:
             if not isinstance(
                 operation_input,
-                (MetadataImportOperationInput, DataImportOperationInput),
+                (
+                    MetadataImportOperationInput,
+                    DataImportOperationInput,
+                    DataIntegrationOperationInput,
+                ),
             ):
                 return {}
             evidence: dict[str, Any] = {
                 "load_lineage": dict(state.get("load_lineage") or {}),
             }
+            if isinstance(operation_input, DataIntegrationOperationInput):
+                raw_response = (
+                    job_result.raw_response
+                    if job_result is not None
+                    and isinstance(job_result.raw_response, Mapping)
+                    else {}
+                )
+                try:
+                    status_statistics = JobRecordStatistics.from_response(
+                        raw_response
+                    )
+                except EPMError as exc:
+                    self._logger.warning(
+                        "Ignored invalid Data Integration counters for job "
+                        "%s: %s",
+                        job_id,
+                        exc,
+                    )
+                    status_statistics = None
+                if status_statistics is not None:
+                    status_payload = status_statistics.to_payload()
+                    status_payload["source"] = (
+                        "ORACLE_DATA_INTEGRATION_STATUS"
+                    )
+                    evidence["record_statistics"] = status_payload
+                log_file_name = str(
+                    raw_response.get("logFileName")
+                    or raw_response.get("log_file_name")
+                    or ""
+                ).strip()
+                log_evidence = OracleJobEvidenceService(
+                    FileService(client, allow_any_extension=True),
+                    self._settings.runtime_data_dir,
+                    logger=self._logger.getChild("oracle_job_evidence"),
+                ).capture_data_integration_log(
+                    execution_id=execution_id,
+                    oracle_file_name=log_file_name or None,
+                )
+                if log_evidence.get("record_statistics") is not None:
+                    evidence["record_statistics"] = log_evidence[
+                        "record_statistics"
+                    ]
+                evidence.update(
+                    {
+                        key: value
+                        for key, value in log_evidence.items()
+                        if key != "record_statistics"
+                    }
+                )
+                if evidence.get("record_statistics") is not None:
+                    evidence.pop("evidence_message", None)
+                return evidence
             job_service = state.get("job_service")
             if job_service is not None:
                 try:
@@ -1651,14 +1709,25 @@ class OperationCommandExecutor:
                         f"'{upload_path}'."
                     )
                 state["integration_upload"] = upload_path
+                state["integration_upload_target"] = (
+                    str(operation_input.upload_target).strip()
+                    if operation_input.upload_target
+                    else None
+                )
+                source_file = upload_path.name
+                file_source = "local_upload"
             elif operation_input.inbox_file:
                 state["integration_file"] = str(
                     DataIntegrationFileReference.from_existing(
                         str(operation_input.inbox_file)
                     )
                 )
+                source_file = state["integration_file"]
+                file_source = "existing_inbox"
             else:
                 state["integration_file"] = None
+                source_file = None
+                file_source = "oracle_configured"
             integration_name = str(
                 operation_input.integration_name
             ).strip()
@@ -1670,6 +1739,20 @@ class OperationCommandExecutor:
             state["period_range"] = period_range
             state["import_mode"] = import_mode
             state["export_mode"] = export_mode
+            state["load_lineage"] = {
+                "operation": "Data Integration",
+                "source_kind": file_source,
+                "source_file": source_file,
+                "staging_location": "Oracle Data Integration",
+                "oracle_job_name": integration_name,
+                "target_application": self._settings.application_name,
+                "target_system": "Oracle Planning data",
+                "origin_note": (
+                    "Counts and log evidence come from Oracle Data "
+                    "Integration; the platform does not infer the "
+                    "originating ERP system."
+                ),
+            }
             write(
                 f"Validated Data Integration '{integration_name}' for "
                 f"{period_range.oracle_period_name}."
@@ -1912,19 +1995,29 @@ class OperationCommandExecutor:
                 display_name = submission.job_name
             else:
                 if "integration_upload" in state:
+                    upload_target = _data_integration_upload_target(
+                        state["integration_upload"].name,
+                        state.get("integration_upload_target"),
+                    )
                     upload = FileService(
                         client,
-                        supported_extensions={".csv", ".txt", ".zip"},
+                        supported_extensions={
+                            ".csv",
+                            ".txt",
+                            ".zip",
+                            ".dat",
+                        },
                         logger=self._logger.getChild("file_service"),
-                    ).upload_to_inbox(state["integration_upload"])
-                    state["integration_file"] = str(
-                        DataIntegrationFileReference.from_default_upload(
-                            upload.file_name
-                        )
+                    ).upload_to_inbox(
+                        state["integration_upload"],
+                        target_file_name=upload_target[0],
+                        upload_directory=upload_target[1],
                     )
+                    state["integration_file"] = upload_target[2]
                     write(
-                        f"Uploaded '{upload.file_name}' to Applications "
-                        f"Inbox; replaced existing={upload.replaced_existing}."
+                        f"Uploaded '{upload.file_name}' as "
+                        f"'{state['integration_file']}'; replaced "
+                        f"existing={upload.replaced_existing}."
                     )
                 service = DataIntegrationService(
                     client,
@@ -1997,6 +2090,7 @@ class OperationCommandExecutor:
                 evidence = collect_import_evidence(
                     submission.job_id,
                     failed=True,
+                    job_result=exc.job,
                 )
                 raise JobFailedError(
                     exc.job,
@@ -2012,7 +2106,10 @@ class OperationCommandExecutor:
                 "status": result.descriptive_status or result.status,
                 "engine": "rest",
             }
-            import_evidence = collect_import_evidence(result.job_id)
+            import_evidence = collect_import_evidence(
+                result.job_id,
+                job_result=result,
+            )
             execution_details.update(import_evidence)
             try:
                 statistics = JobRecordStatistics.from_response(
@@ -2457,3 +2554,40 @@ class OperationCommandExecutor:
                 else None
             ),
         )
+
+
+def _data_integration_upload_target(
+    local_file_name: str,
+    requested_target: object,
+) -> tuple[str, str | None, str]:
+    """Resolve one safe Oracle upload destination and runtime reference."""
+    if requested_target is None or not str(requested_target).strip():
+        reference = DataIntegrationFileReference.from_default_upload(
+            local_file_name
+        )
+        return PurePath(local_file_name).name, None, str(reference)
+
+    reference = str(
+        DataIntegrationFileReference.from_existing(str(requested_target))
+    )
+    lower = reference.casefold()
+    if lower.startswith("#epminbox/"):
+        relative = reference[len("#epminbox/") :]
+        if "/" in relative:
+            raise OperationError(
+                "#epminbox supports a root Applications Inbox filename. "
+                "Use inbox/folder/filename for a Data Integration subfolder."
+            )
+        return relative, None, reference
+    if lower.startswith("inbox/"):
+        parts = reference.split("/")
+        file_name = parts[-1]
+        directory = "/".join(parts[:-1])
+        return file_name, directory, reference
+    if "/" in reference:
+        raise OperationError(
+            "Upload target must use #epminbox/filename or "
+            "inbox/folder/filename."
+        )
+    normalized = DataIntegrationFileReference.from_default_upload(reference)
+    return reference, None, str(normalized)

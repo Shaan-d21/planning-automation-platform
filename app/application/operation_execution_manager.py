@@ -48,7 +48,11 @@ from app.models.execution_queue import (
     ExecutionJobSubmission,
     ExecutionJobType,
 )
-from app.models.workflow import WorkflowRun, WorkflowStatus
+from app.models.workflow import (
+    WorkflowRun,
+    WorkflowStatus,
+    WorkflowStepStatus,
+)
 from app.models.access_control import ExecutionActor, TriggerSource
 from app.services.workflow_repository import SQLWorkflowRepository
 from app.services.execution_queue_repository import SQLExecutionQueueRepository
@@ -62,6 +66,7 @@ class OperationExecutionStatus(StrEnum):
     SUCCESS = "SUCCESS"
     FAILED = "FAILED"
     RECOVERY_REQUIRED = "RECOVERY_REQUIRED"
+    CANCELLED = "CANCELLED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +78,8 @@ class ManagedOperationExecution:
     submitted_at: datetime
     log_file: Path
     error_message: str | None = None
+    cancellation_requested_at: datetime | None = None
+    cancellation_requested_by: str | None = None
 
 
 class OperationExecutionManager:
@@ -256,6 +263,71 @@ class OperationExecutionManager:
     def get_workflow(self, execution_id: str) -> WorkflowRun | None:
         return self._repository.get(execution_id)
 
+    def request_flow_stop(
+        self,
+        execution_id: str,
+        *,
+        requested_by: str,
+    ) -> ManagedOperationExecution:
+        """Cancel a queued flow or stop it after its current Oracle step."""
+        job = self._queue.get(execution_id)
+        if job is None or job.job_type is not ExecutionJobType.STANDALONE_FLOW:
+            raise OperationError(
+                "Safe stop is available only for a standalone flow execution."
+            )
+        if job.status.terminal:
+            raise OperationError(
+                f"This standalone flow is already {job.status.value.lower()} "
+                "and cannot be stopped."
+            )
+        updated = self._queue.request_cancellation(
+            execution_id,
+            requested_by=requested_by,
+        )
+        if updated.status is ExecutionJobStatus.CANCELLED:
+            workflow = self._repository.get(execution_id)
+            if workflow is not None and workflow.status in {
+                WorkflowStatus.QUEUED,
+                WorkflowStatus.RUNNING,
+            }:
+                completed_at = updated.completed_at or datetime.now(UTC)
+                self._repository.save(
+                    replace(
+                        workflow,
+                        status=WorkflowStatus.CANCELLED,
+                        completed_at=completed_at,
+                        steps=tuple(
+                            replace(
+                                step,
+                                status=WorkflowStepStatus.SKIPPED,
+                                completed_at=completed_at,
+                                details={
+                                    **step.details,
+                                    "reason": (
+                                        "Cancelled before a worker started "
+                                        "the standalone flow."
+                                    ),
+                                },
+                            )
+                            if step.status is WorkflowStepStatus.PENDING
+                            else step
+                            for step in workflow.steps
+                        ),
+                        error_message=(
+                            "Cancelled before any Oracle step started."
+                        ),
+                    )
+                )
+        try:
+            _kind, target = updated.target_key.split(":", 1)
+        except ValueError:
+            target = updated.target_key
+        return self._managed(
+            updated,
+            kind=OperationKind.STANDALONE_FLOW,
+            target=target,
+        )
+
     def shutdown(self) -> None:
         if self._executor is not None:
             self._executor.shutdown(wait=False, cancel_futures=False)
@@ -298,6 +370,8 @@ class OperationExecutionManager:
                 / f"{job.execution_id}.log"
             ),
             error_message=job.error_message,
+            cancellation_requested_at=job.cancellation_requested_at,
+            cancellation_requested_by=job.cancellation_requested_by,
         )
 
     @staticmethod

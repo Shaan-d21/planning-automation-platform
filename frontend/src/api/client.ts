@@ -60,6 +60,7 @@ import type {
   OperationExecution,
   StandaloneFlowRecoveryAccepted,
   StandaloneFlowRecoveryResponse,
+  StandaloneFlowStopResponse,
   DataReviewCubesResponse,
   DataReviewDimensionsResponse,
   DataReviewMembersResponse,
@@ -586,6 +587,12 @@ export const api = {
     ),
   operationRun: (executionId: string) =>
       request<OperationExecution>(`/api/operations/runs/${encodeURIComponent(executionId)}`),
+    stopStandaloneFlow: (executionId: string, csrfToken: string) =>
+      request<StandaloneFlowStopResponse>(
+        `/api/operations/runs/${encodeURIComponent(executionId)}/stop`,
+        { method: "POST" },
+        csrfToken
+      ),
     standaloneFlowRecovery: (executionId: string) =>
       request<StandaloneFlowRecoveryResponse>(`/api/operations/runs/${encodeURIComponent(executionId)}/recovery`),
     retryStandaloneFlow: (

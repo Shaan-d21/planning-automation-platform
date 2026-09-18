@@ -14,6 +14,7 @@ from app.models.substitution_variable import (
     SubstitutionVariable,
     SubstitutionVariableUpdate,
 )
+from app.services.application_service import ApplicationService
 from app.utils.exceptions import (
     APIRequestError,
     SubstitutionVariableError,
@@ -41,45 +42,19 @@ class SubstitutionVariableService:
 
     def get_plan_types(self) -> tuple[PlanType, ...]:
         """Retrieve current Planning cubes and their storage types."""
-        try:
-            response = self._client.get(
-                f"{self._application_endpoint}/plantypes"
-            )
-        except APIRequestError as exc:
-            if exc.status_code != 404:
-                raise
-            self._logger.warning(
-                "Get Plan Types is unavailable in this Planning version; "
-                "deriving visible scopes from substitution variables."
-            )
-            scopes = sorted(
-                {
-                    variable.scope
-                    for variable in self.get_all_variables()
-                    if variable.scope.casefold() != "all"
-                },
-                key=str.casefold,
-            )
-            return tuple(
-                PlanType(
-                    name=scope,
-                    cube_name=scope,
-                    identifier=0,
-                    cube_type=0,
-                    dimension_count=0,
-                )
-                for scope in scopes
-            )
-        items = self._response_items(response, "plan types")
+        items = ApplicationService(
+            self._client,
+            logger=self._logger.getChild("application"),
+        ).get_plan_types()
         return tuple(
-            sorted(
-                (
-                    PlanType.from_response(item)
-                    for item in items
-                    if isinstance(item, Mapping)
-                ),
-                key=lambda item: item.cube_name.casefold(),
+            PlanType(
+                name=item.name,
+                cube_name=item.cube_name,
+                identifier=item.identifier or 0,
+                cube_type=item.cube_type or 0,
+                dimension_count=item.dimension_count or 0,
             )
+            for item in items
         )
 
     def get_all_variables(self) -> tuple[SubstitutionVariable, ...]:

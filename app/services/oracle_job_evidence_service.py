@@ -22,6 +22,11 @@ class OracleJobEvidenceService:
     _MAX_EXTRACTED_BYTES = 50 * 1024 * 1024
     _MAX_PREVIEW_ROWS = 200
     _SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
+    _DATA_INTEGRATION_COUNTERS = {
+        "records_read": ("read",),
+        "records_processed": ("processed", "loaded", "exported"),
+        "records_rejected": ("rejected", "failed"),
+    }
 
     def __init__(
         self,
@@ -112,6 +117,136 @@ class OracleJobEvidenceService:
         return {
             "artifacts": artifacts,
             "rejected_records": rejected_records,
+        }
+
+    def capture_data_integration_log(
+        self,
+        *,
+        execution_id: str,
+        oracle_file_name: str | None,
+    ) -> dict[str, Any]:
+        """Retain a Data Integration log and extract explicit Oracle counts.
+
+        The Data Integration status API exposes a log file rather than the
+        Planning Job Details structure used by native data and metadata jobs.
+        Counts are therefore returned only when the log explicitly supplies
+        an unambiguous read, processed/loaded, and rejected/failed total.
+        """
+        if not oracle_file_name:
+            return {}
+        normalized_oracle_file = (
+            str(oracle_file_name).strip().replace("\\", "/").lstrip("/")
+        )
+        if not normalized_oracle_file:
+            return {}
+        try:
+            content = self._files.download_from_repository(
+                normalized_oracle_file
+            )
+        except EPMError as exc:
+            self._logger.info(
+                "Oracle Data Integration log was not available: "
+                "execution_id=%s, file=%s, error=%s",
+                execution_id,
+                normalized_oracle_file,
+                exc,
+            )
+            return {
+                "artifacts": [],
+                "evidence_message": (
+                    "Oracle reported a Data Integration log, but it could "
+                    "not be downloaded from this environment."
+                ),
+            }
+        if not isinstance(content, (bytes, bytearray)):
+            return {
+                "artifacts": [],
+                "evidence_message": (
+                    "Oracle did not return a readable Data Integration log."
+                ),
+            }
+
+        content = bytes(content)
+        directory = self._execution_directory(execution_id)
+        display_name = PurePath(normalized_oracle_file).name
+        stored_name = self._unique_name(display_name or "integration.log")
+        (directory / stored_name).write_bytes(content)
+        evidence: dict[str, Any] = {
+            "artifacts": [
+                self._artifact(
+                    stored_name,
+                    display_name or stored_name,
+                    len(content),
+                    "ORACLE_DATA_INTEGRATION_LOG",
+                )
+            ]
+        }
+        text = self._decode(content)
+        statistics = (
+            self._data_integration_statistics(text) if text is not None else None
+        )
+        if statistics is not None:
+            evidence["record_statistics"] = statistics
+        else:
+            evidence["evidence_message"] = (
+                "The Oracle Data Integration log was retained, but it did "
+                "not expose one unambiguous read, processed, and rejected "
+                "record total. No counts were estimated."
+            )
+        return evidence
+
+    @classmethod
+    def _data_integration_statistics(
+        cls,
+        text: str,
+    ) -> dict[str, Any] | None:
+        """Parse only explicit, internally consistent Data Integration totals."""
+        selected: dict[str, int] = {}
+        for key, actions in cls._DATA_INTEGRATION_COUNTERS.items():
+            matches: list[tuple[int, bool]] = []
+            action_pattern = "|".join(re.escape(action) for action in actions)
+            patterns = (
+                re.compile(
+                    rf"(?i)(?P<label>\b(?:grand\s+total\s+|total\s+)?"
+                    rf"(?:number\s+of\s+)?(?:data\s+)?(?:records?|rows?)\s+"
+                    rf"(?:{action_pattern})\b)\s*(?:[:=]|is)?\s*"
+                    rf"(?P<count>\d[\d,]*)"
+                ),
+                re.compile(
+                    rf"(?i)(?P<label>\b(?:grand\s+total\s+|total\s+)?"
+                    rf"(?:{action_pattern})\s+(?:data\s+)?(?:records?|rows?)\b)"
+                    rf"\s*(?:[:=]|is)?\s*(?P<count>\d[\d,]*)"
+                ),
+            )
+            for line in text.splitlines():
+                for pattern in patterns:
+                    for match in pattern.finditer(line):
+                        count = int(match.group("count").replace(",", ""))
+                        label = match.group("label").casefold()
+                        matches.append((count, "total" in label))
+            if not matches:
+                return None
+            explicit_totals = {
+                count for count, is_total in matches if is_total
+            }
+            distinct = {count for count, _ in matches}
+            if len(explicit_totals) == 1:
+                selected[key] = next(iter(explicit_totals))
+            elif not explicit_totals and len(distinct) == 1:
+                selected[key] = next(iter(distinct))
+            else:
+                return None
+
+        return {
+            "source": "ORACLE_DATA_INTEGRATION_LOG",
+            **selected,
+            "details": [
+                {
+                    "dimension_name": None,
+                    "load_type": "Data Integration",
+                    **selected,
+                }
+            ],
         }
 
     def _execution_directory(self, execution_id: str) -> Path:

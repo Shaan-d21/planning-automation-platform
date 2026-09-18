@@ -58,6 +58,21 @@ def test_record_statistics_are_absent_for_unsupported_operations() -> None:
     assert aggregate_record_statistics(({"job_id": 42},)) is None
 
 
+def test_record_statistics_preserve_data_integration_log_source() -> None:
+    statistics = aggregate_record_statistics(({
+        "record_statistics": {
+            "source": "ORACLE_DATA_INTEGRATION_LOG",
+            "records_read": 20,
+            "records_processed": 19,
+            "records_rejected": 1,
+            "details": [],
+        }
+    },))
+
+    assert statistics is not None
+    assert statistics["source"] == "ORACLE_DATA_INTEGRATION_LOG"
+
+
 def test_import_evidence_projects_lineage_messages_and_artifacts() -> None:
     evidence = aggregate_import_evidence(({
         "load_lineage": {
@@ -212,3 +227,23 @@ def test_agent_execution_evidence_reports_success_with_rejections() -> None:
     assert evidence["diagnosis"] == (
         "Completed, but Oracle reported 1 rejected record."
     )
+
+
+def test_agent_execution_evidence_explains_safe_flow_stop() -> None:
+    started = datetime(2026, 9, 17, 10, 0, tzinfo=UTC)
+    run = WorkflowRun(
+        execution_id="run-cancelled",
+        workflow_name="September Close",
+        status=WorkflowStatus.CANCELLED,
+        started_at=started,
+        completed_at=started + timedelta(seconds=5),
+        error_message=(
+            "The user requested a safe stop. Completed Oracle steps were "
+            "retained and remaining steps were not started."
+        ),
+    )
+
+    evidence = agent_execution_evidence(run)
+
+    assert evidence["status"] == "CANCELLED"
+    assert evidence["diagnosis"] == run.error_message

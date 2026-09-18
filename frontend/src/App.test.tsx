@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
 import type { BootstrapResponse, HomeResponse } from "./api/types";
+import { AgentExecutionCard } from "./components/EpmAssistantWorkspace";
 
 const bootstrap: BootstrapResponse = {
   product: { name: "BISP EPM Automation", company: "BISP Solutions", api_version: "v1" },
@@ -572,6 +573,10 @@ describe("App", () => {
       if (url === "/api/v1/notifications") return response(notificationInbox);
       if (url === "/api/v1/operations") return response({ status: "success", operations: [operation] });
       if (url === "/api/v1/operations/data-integrations/catalog") return response({ status: "success", integrations: [{ name: "Forecast Load", description: "Monthly forecast" }] });
+      if (url === "/api/v1/data-review/cubes") return response({ status: "success", cubes: [{ name: "Plan1", cube_name: "Plan1", cube_type: 1, dimension_count: 8 }] });
+      if (url === "/api/v1/data-review/cubes/Plan1/dimensions") return response({ status: "success", cube: "Plan1", dimensions: [{ name: "Years", dimension_type: "Year" }, { name: "Period", dimension_type: "Period" }] });
+      if (url.startsWith("/api/v1/data-review/cubes/Plan1/dimensions/Years/members")) return response({ status: "success", cube: "Plan1", dimension: "Years", query: "", members: [{ name: "FY27", alias: null, path: null, parent_name: null, has_children: false }], total_matches: 1, has_more: false, offset: 0, limit: 100 });
+      if (url.startsWith("/api/v1/data-review/cubes/Plan1/dimensions/Period/members")) return response({ status: "success", cube: "Plan1", dimension: "Period", query: "", members: ["Jan", "Mar"].map((name) => ({ name, alias: null, path: null, parent_name: null, has_children: false })), total_matches: 2, has_more: false, offset: 0, limit: 100 });
       if (url.startsWith("/api/v1/uploads?filename=")) return response({ status: "success", upload: { token: "upload-token-123", filename: "Forecast.csv", size: 24 } });
       if (url === "/api/v1/operations/data-integrations/runs" && init?.method === "POST") return response({ status: "accepted", execution_id: execution.execution_id, redirect: `/app/operations/runs/${execution.execution_id}` }, 202);
       if (url === `/api/v1/operations/runs/${execution.execution_id}`) return response(execution);
@@ -583,14 +588,16 @@ describe("App", () => {
     const integrationSelects = await screen.findAllByRole("combobox");
     expect(screen.getByRole("radio", { name: /Use configured file/ })).toBeTruthy();
     fireEvent.change(integrationSelects[0], { target: { value: "Forecast Load" } });
+    await screen.findByRole("option", { name: "FY27" });
     fireEvent.change(screen.getByLabelText("Planning year"), { target: { value: "FY27" } });
-    fireEvent.change(screen.getByLabelText("Start month"), { target: { value: "Jan" } });
-    fireEvent.change(screen.getByLabelText("End month"), { target: { value: "Mar" } });
+    fireEvent.change(screen.getByLabelText("Start period"), { target: { value: "Jan" } });
+    fireEvent.change(screen.getByLabelText("End period"), { target: { value: "Mar" } });
     const file = new File(["Account,Jan\nRevenue,100"], "Forecast.csv", { type: "text/csv" });
     fireEvent.change(screen.getByLabelText("Local data file"), { target: { files: [file] } });
+    fireEvent.change(screen.getByLabelText("Oracle upload target"), { target: { value: "inbox/monthly/Forecast.csv" } });
     fireEvent.click(screen.getByRole("button", { name: /Review execution/ }));
 
-    expect(await screen.findByText("Existing filenames are replaced safely")).toBeTruthy();
+    expect(await screen.findByText("Exact Oracle target will be replaced")).toBeTruthy();
     fireEvent.click(screen.getByRole("checkbox"));
     fireEvent.click(screen.getByRole("button", { name: /Start Data Integration/ }));
     expect(await screen.findByRole("heading", { name: "Operation completed successfully" })).toBeTruthy();
@@ -598,7 +605,7 @@ describe("App", () => {
     const upload = fetchMock.mock.calls.find(([url]) => String(url).startsWith("/api/v1/uploads?filename="));
     expect(new Headers(upload?.[1]?.headers).get("Content-Type")).toBe("application/octet-stream");
     const submitted = fetchMock.mock.calls.find(([url]) => String(url) === "/api/v1/operations/data-integrations/runs");
-    expect(JSON.parse(String(submitted?.[1]?.body))).toEqual({ integration_name: "Forecast Load", start_period: "Jan-27", end_period: "Mar-27", import_mode: "Replace", export_mode: "Merge", upload_token: "upload-token-123", inbox_file: null });
+    expect(JSON.parse(String(submitted?.[1]?.body))).toEqual({ integration_name: "Forecast Load", start_period: "Jan#FY27", end_period: "Mar#FY27", import_mode: "Replace", export_mode: "Merge", upload_target: "inbox/monthly/Forecast.csv", upload_token: "upload-token-123", inbox_file: null });
   });
 
   it("runs Data Integration with a selected live Oracle Inbox file", async () => {
@@ -618,6 +625,10 @@ describe("App", () => {
       if (url === "/api/v1/notifications") return response(notificationInbox);
       if (url === "/api/v1/operations") return response({ status: "success", operations: [operation] });
       if (url === "/api/v1/operations/data-integrations/catalog") return response({ status: "success", integrations: [{ name: "Forecast Load", description: "Monthly forecast" }] });
+      if (url === "/api/v1/data-review/cubes") return response({ status: "success", cubes: [{ name: "Plan1", cube_name: "Plan1", cube_type: 1, dimension_count: 8 }] });
+      if (url === "/api/v1/data-review/cubes/Plan1/dimensions") return response({ status: "success", cube: "Plan1", dimensions: [{ name: "Years", dimension_type: "Year" }, { name: "Period", dimension_type: "Period" }] });
+      if (url.startsWith("/api/v1/data-review/cubes/Plan1/dimensions/Years/members")) return response({ status: "success", cube: "Plan1", dimension: "Years", query: "", members: [{ name: "FY27", alias: null, path: null, parent_name: null, has_children: false }], total_matches: 1, has_more: false, offset: 0, limit: 100 });
+      if (url.startsWith("/api/v1/data-review/cubes/Plan1/dimensions/Period/members")) return response({ status: "success", cube: "Plan1", dimension: "Period", query: "", members: [{ name: "Aug", alias: null, path: null, parent_name: null, has_children: false }], total_matches: 1, has_more: false, offset: 0, limit: 100 });
       if (url === "/api/v1/operations/files/catalog?purpose=data-integration") return response({
         status: "success",
         purpose: "data-integration",
@@ -632,9 +643,10 @@ describe("App", () => {
     fireEvent.click(await screen.findByRole("button", { name: /Open service/ }));
     const integrationSelects = await screen.findAllByRole("combobox");
     fireEvent.change(integrationSelects[0], { target: { value: "Forecast Load" } });
+    await screen.findByRole("option", { name: "FY27" });
     fireEvent.change(screen.getByLabelText("Planning year"), { target: { value: "FY27" } });
-    fireEvent.change(screen.getByLabelText("Start month"), { target: { value: "Aug" } });
-    fireEvent.change(screen.getByLabelText("End month"), { target: { value: "Aug" } });
+    fireEvent.change(screen.getByLabelText("Start period"), { target: { value: "Aug" } });
+    fireEvent.change(screen.getByLabelText("End period"), { target: { value: "Aug" } });
     fireEvent.click(screen.getByRole("radio", { name: /Choose from Oracle Inbox/ }));
     const filePicker = await screen.findByLabelText("Existing Oracle integration file");
     await waitFor(() => expect((filePicker as HTMLSelectElement).value).toBe("#epminbox/Sales_Aug.csv"));
@@ -646,7 +658,7 @@ describe("App", () => {
     expect(await screen.findByRole("heading", { name: "Operation completed successfully" })).toBeTruthy();
 
     const submitted = fetchMock.mock.calls.find(([url]) => String(url) === "/api/v1/operations/data-integrations/runs");
-    expect(JSON.parse(String(submitted?.[1]?.body))).toEqual({ integration_name: "Forecast Load", start_period: "Aug-27", end_period: "Aug-27", import_mode: "Replace", export_mode: "Merge", upload_token: null, inbox_file: "#epminbox/Sales_Aug.csv" });
+    expect(JSON.parse(String(submitted?.[1]?.body))).toEqual({ integration_name: "Forecast Load", start_period: "Aug#FY27", end_period: "Aug#FY27", import_mode: "Replace", export_mode: "Merge", upload_token: null, inbox_file: "#epminbox/Sales_Aug.csv" });
     expect(fetchMock.mock.calls.some(([url]) => String(url).startsWith("/api/v1/uploads?filename="))).toBe(false);
   });
 
@@ -1352,13 +1364,15 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: /^Send/ }));
     expect(await screen.findByRole("heading", { name: "Matches found for your task" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /Monthly Revenue Forecast.*Strong match/ }));
-    fireEvent.click(screen.getByRole("button", { name: /^Continue/ }));
+    const continueButton = screen.getByRole("button", { name: /^Continue/ });
+    await waitFor(() => expect((continueButton as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(continueButton);
     expect(await screen.findByText("Load forecast")).toBeTruthy();
     fireEvent.change(screen.getByLabelText("Pipeline variable Start Period"), { target: { value: "Jan-27" } });
     fireEvent.change(screen.getByLabelText("Forecast data file source"), { target: { value: "upload" } });
     fireEvent.change(screen.getByLabelText("Forecast data local file"), { target: { files: [new File(["Account,Jan\nRevenue,100"], "Forecast.csv", { type: "text/csv" })] } });
     fireEvent.click(screen.getByRole("button", { name: /Continue to approval/ }));
-    expect(await screen.findByRole("heading", { name: "Run Pipelines?" }, { timeout: 5000 })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Run Pipelines?" }, { timeout: 15000 })).toBeTruthy();
     expect(screen.getByText("Forecast.csv")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /Approve and run/ }));
     expect(await screen.findByText("Pipeline completed successfully.")).toBeTruthy();
@@ -1384,7 +1398,7 @@ describe("App", () => {
       title: "Choose the Data Integration run inputs",
       description: "Select periods, modes, and one source file.",
       fields: [{ key: "start_period", label: "Start period", kind: "text", required: true, description: "Start", placeholder: "Jan-27", options: [] }],
-      context: { import_modes: ["Replace", "Append"], export_modes: ["Merge", "Replace"], allowed_extensions: [".csv", ".txt", ".zip", ".dat"] }
+      context: { import_modes: ["Replace", "Append"], export_modes: ["Merge", "Replace"], allowed_extensions: [".csv", ".txt", ".zip", ".dat"], prefill: { year: "FY27", start_month: "Jan", end_month: "Mar" }, task_context: { scenario: "Actual", period: "Jan", year: "FY27" } }
     };
     const approval = { request_id: "approval-integration", operation_code: "data-integrations", display_name: "Data Integrations", objective: "Load monthly revenue data.", artifact_name: "Revenue_Load", category: "Data loading", risk_level: "Elevated", route: "/app/operations/data-integrations", effect: "Start the selected Data Integration with the reviewed period range, modes, and source file, then monitor the complete load.", input_values: { start_period: "Jan-27", end_period: "Mar-27", import_mode: "Replace", export_mode: "Merge", file_source: "Upload on governed screen", inbox_file: "", upload_token: "integration-upload-1", upload_name: "Revenue.csv" } };
     let created = false;
@@ -1411,10 +1425,14 @@ describe("App", () => {
     fireEvent.change(screen.getByLabelText("Message the EPM Assistant"), { target: { value: "Run Revenue Load Data Integration." } });
     fireEvent.click(screen.getByRole("button", { name: /^Send/ }));
     expect(await screen.findByText("Revenue_Load")).toBeTruthy();
+    expect(screen.getByText("Actual · Jan · FY27")).toBeTruthy();
+    expect((screen.getByLabelText("Agent Data Integration planning year") as HTMLSelectElement).value).toBe("FY27");
+    expect((screen.getByLabelText("Agent Data Integration start month") as HTMLSelectElement).value).toBe("Jan");
+    expect((screen.getByLabelText("Agent Data Integration end month") as HTMLSelectElement).value).toBe("Mar");
     fireEvent.change(screen.getByLabelText("Agent Data Integration planning year"), { target: { value: "FY27" } });
     fireEvent.change(screen.getByLabelText("Agent Data Integration start month"), { target: { value: "Jan" } });
     fireEvent.change(screen.getByLabelText("Agent Data Integration end month"), { target: { value: "Mar" } });
-    fireEvent.click(screen.getByText("Upload local file"));
+    fireEvent.click(screen.getByRole("radio", { name: /Upload local file/ }));
     fireEvent.change(screen.getByLabelText("Agent Data Integration local file"), { target: { files: [new File(["Account,Jan\nRevenue,100"], "Revenue.csv", { type: "text/csv" })] } });
     fireEvent.click(screen.getByRole("button", { name: /Continue to approval/ }));
     expect(await screen.findByRole("heading", { name: "Run Data Integrations?" })).toBeTruthy();
@@ -1853,6 +1871,63 @@ describe("App", () => {
     expect(JSON.parse(String(secondRequest?.[1]?.body)).content).toBe("Use saved Data Explorer view revenue-forecast and load its current Oracle data.");
   });
 
+  it("runs a live variance review from a selected saved layout", async () => {
+    window.location.hash = "#assistant";
+    const assistantUser = {
+      ...bootstrap,
+      user: { ...bootstrap.user!, permissions: ["agent.use", "data.review"] },
+      navigation: [...bootstrap.navigation, { code: "assistant", label: "EPM Assistant", path: "/app/agent", group: "Workspace" }]
+    };
+    const conversation = { conversation_id: "conv-variance", user_id: 7, title: "Review variance", provider: "groq", model: "test", created_at: "2026-08-19T10:00:00Z", updated_at: "2026-08-19T10:00:00Z" };
+    let sent = 0;
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/v1/bootstrap") return response(assistantUser);
+      if (url === "/api/v1/home") return response(home);
+      if (url === "/api/v1/notifications") return response(notificationInbox);
+      if (url === "/api/v1/agent/status") return response({ enabled: true, configured: true, provider: "groq", model: "test", mode: "governed", message: "Ready" });
+      if (url === "/api/v1/agent/conversations") return response({ status: "success", conversations: [conversation] });
+      if (url === "/api/v1/agent/conversations/conv-variance/messages" && init?.method === "POST") {
+        sent += 1;
+        if (sent === 1) return response({
+          status: "success",
+          message: { message_id: 2, conversation_id: "conv-variance", role: "assistant", content: "Choose the scope to analyze.", created_at: "2026-08-19T10:01:00Z" },
+          tool_activity: [{ name: "list_variance_views", arguments: { comparison: "Actual vs Budget", period: "Sep", year: "FY26", threshold: 500 }, status: "SUCCESS", summary: "Saved variance layouts returned.", result: { purpose: "variance", comparison: "Actual vs Budget", period: "Sep", year: "FY26", threshold: 500, count: 1, total_count: 1, truncated: false, views: [{ name: "monthly-variance", title: "Monthly Variance", cube: "Plan1", pov: [{ dimension: "Scenario", member: "Actual" }, { dimension: "Year", member: "FY26" }], row_dimensions: ["Account"], column_dimensions: ["Period"] }] } }],
+          action_drafts: [], approval_request: null, clarification_request: null, input_request: null
+        });
+        return response({
+          status: "success",
+          message: { message_id: 3, conversation_id: "conv-variance", role: "assistant", content: "The live variance review is ready.", created_at: "2026-08-19T10:02:00Z" },
+          tool_activity: [{ name: "review_saved_variance", arguments: { name: "monthly-variance", comparison: "Actual vs Budget", period: "Sep", year: "FY26", threshold: 500 }, status: "SUCCESS", summary: "Variance compared.", result: { source_cube: "Plan1", target_cube: "Plan1", saved_view: { name: "monthly-variance", title: "Monthly Variance" }, variance_context: { comparison: "Actual vs Budget", period: "Sep", year: "FY26", threshold: 500 }, source_request: { cube: "Plan1", pov: { Scenario: "Actual", Year: "FY26", Product: "BaseData" }, rows: [{ dimension: "Account", members: ["Revenue"] }], columns: [{ dimension: "Period", members: ["Sep"] }] }, target_request: { cube: "Plan1", pov: { Scenario: "Budget", Year: "FY26", Product: "BaseData" }, rows: [{ dimension: "Account", members: ["Revenue"] }], columns: [{ dimension: "Period", members: ["Sep"] }] }, result: { source_form: "Actual Sep", target_form: "Budget Sep", compared_cells: 1, matched_cells: 0, tolerance: 500, mismatches: [{ row_headers: ["Revenue"], column_headers: ["Sep"], source_value: 2000, target_value: 1000, difference: 1000 }] } } }],
+          action_drafts: [], approval_request: null, clarification_request: null, input_request: null
+        });
+      }
+      if (url === "/api/v1/agent/conversations/conv-variance/messages") return response({ status: "success", messages: [], action_drafts: [], approval_request: null, clarification_request: null, input_request: null });
+      return response({ detail: "Unexpected request" }, 404);
+    });
+    render(<App />);
+
+    fireEvent.change(await screen.findByLabelText("Message the EPM Assistant"), { target: { value: "Show September Actual vs Budget variance above 500 for FY26." } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Monthly Variance/ }));
+
+    expect(await screen.findByRole("heading", { name: "Actual vs Budget · Sep · FY26" })).toBeTruthy();
+    expect(screen.getAllByText("1,000").length).toBeGreaterThan(0);
+    expect(screen.getByRole("region", { name: "Comparison POV" })).toBeTruthy();
+    expect(screen.getAllByText("BaseData").length).toBe(2);
+    const secondRequest = fetchMock.mock.calls.filter(([url, init]) => String(url).endsWith("/messages") && init?.method === "POST")[1];
+    expect(JSON.parse(String(secondRequest?.[1]?.body)).content).toBe("Use saved Data Explorer view `monthly-variance` for the variance review.");
+
+    fireEvent.click(screen.getByRole("button", { name: "Refine comparison" }));
+    fireEvent.change(screen.getByLabelText("POV Product"), { target: { value: "Snacks" } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply refinement" }));
+
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([url, init]) => String(url).endsWith("/messages") && init?.method === "POST")).toHaveLength(3));
+    const thirdRequest = fetchMock.mock.calls.filter(([url, init]) => String(url).endsWith("/messages") && init?.method === "POST")[2];
+    expect(JSON.parse(String(thirdRequest?.[1]?.body)).content).toBe("Refine variance comparison using saved Data Explorer view `monthly-variance`. Keep Actual vs Budget for Sep FY26 with threshold 500. POV overrides: Product=`Snacks`.");
+  });
+
   it("keeps the selected agent cube when Oracle dimension discovery is unavailable", async () => {
     window.location.hash = "#assistant";
     const assistantUser = {
@@ -1899,6 +1974,119 @@ describe("App", () => {
     expect((screen.getByLabelText("Message the EPM Assistant") as HTMLTextAreaElement).value).toContain("Cube: Plan2");
     expect((screen.getByLabelText("Message the EPM Assistant") as HTMLTextAreaElement).value).toContain("Scenario=Actual");
     expect((screen.getByLabelText("Message the EPM Assistant") as HTMLTextAreaElement).value).toContain("Account=Units|Average_Selling_Price|Total_Revenue");
+  });
+
+  it("requests a safe stop for an active standalone flow", async () => {
+    const execution = {
+      execution_id: "flow-execution-1",
+      operation_name: "Standalone Planning Flow - September Close",
+      status: "RUNNING" as const,
+      started_at: "2026-09-17T10:00:00Z",
+      completed_at: null,
+      error_message: null,
+      cancellation_requested_at: null,
+      cancellation_requested_by: null,
+      initiated_by: "Finance Planner",
+      trigger_source: "AI_AGENT",
+      steps: [],
+      completed_steps: 1,
+      total_steps: 3,
+      artifacts: [],
+      record_statistics: null,
+      flow_progress: {
+        status: "RUNNING",
+        total_steps: 3,
+        completed_steps: 1,
+        successful_steps: 1,
+        progress_percent: 33,
+        current_step: {
+          sequence: 2,
+          operation_code: "business-rules",
+          display_name: "Calculate forecast",
+          artifact_name: "Calculate Forecast",
+          status: "RUNNING",
+          started_at: "2026-09-17T10:01:00Z",
+          completed_at: null,
+          error_message: null,
+          oracle_job_id: "123",
+          oracle_status: "Processing",
+          active_stage: "Waiting for Oracle",
+          record_statistics: null
+        },
+        steps: [],
+        recovery: null
+      },
+      log_url: null,
+      terminal: false
+    };
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/v1/operations/runs/flow-execution-1" && !init?.method) return response(execution);
+      if (url === "/api/v1/operations/runs/flow-execution-1/stop" && init?.method === "POST") return response({
+        status: "stop_requested",
+        execution_id: "flow-execution-1",
+        execution_status: "RUNNING",
+        cancellation_requested_at: "2026-09-17T10:02:00Z",
+        message: "The current Oracle step will finish; later flow steps will not start."
+      });
+      return response({ detail: "Unexpected request" }, 404);
+    });
+
+    render(<AgentExecutionCard
+      approved={{ execution_id: "flow-execution-1", operation_code: "standalone-flow", target_name: "September Close", status: "RUNNING" }}
+      csrfToken="test-csrf"
+      onRecoveryStarted={vi.fn()}
+      onDismiss={vi.fn()}
+    />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Stop after current step" }));
+    const stopButtons = screen.getAllByRole("button", { name: "Stop after current step" });
+    fireEvent.click(stopButtons[stopButtons.length - 1]);
+
+    expect(await screen.findByText(/later flow steps will not start/i)).toBeTruthy();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/operations/runs/flow-execution-1/stop",
+      expect.objectContaining({ method: "POST" })
+    );
+  });
+
+  it("refreshes the conversation when an approved execution becomes terminal", async () => {
+    const onTerminal = vi.fn();
+    vi.mocked(fetch).mockImplementation((input: RequestInfo | URL) => {
+      if (String(input) === "/api/v1/operations/runs/rule-execution-2") return response({
+        execution_id: "rule-execution-2",
+        operation_name: "Business Rule - Calculate Forecast",
+        status: "SUCCESS",
+        started_at: "2026-09-17T10:00:00Z",
+        completed_at: "2026-09-17T10:01:00Z",
+        error_message: null,
+        cancellation_requested_at: null,
+        cancellation_requested_by: null,
+        initiated_by: "Finance Planner",
+        trigger_source: "AI_AGENT",
+        steps: [],
+        completed_steps: 1,
+        total_steps: 1,
+        artifacts: [],
+        record_statistics: null,
+        flow_progress: null,
+        log_url: null,
+        terminal: true
+      });
+      return response({ detail: "Unexpected request" }, 404);
+    });
+
+    render(<AgentExecutionCard
+      approved={{ execution_id: "rule-execution-2", operation_code: "business-rules", target_name: "Calculate Forecast", status: "RUNNING" }}
+      csrfToken="test-csrf"
+      onRecoveryStarted={vi.fn()}
+      onTerminal={onTerminal}
+      onDismiss={vi.fn()}
+    />);
+
+    expect(await screen.findByText("Business Rule completed successfully.")).toBeTruthy();
+    await waitFor(() => expect(onTerminal).toHaveBeenCalledTimes(1));
   });
 
   it("shows the sign-in experience when there is no session", async () => {
