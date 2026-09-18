@@ -309,6 +309,48 @@ def test_technical_intents_allow_artifact_names(
     assert result.phase is AgentTaskPhase.READY_FOR_PLAN
 
 
+@pytest.mark.parametrize(
+    "prompt",
+    (
+        "Run Aggregate Plan rule.",
+        "run clear facilities allocation rule",
+        "Start the plan rule Allocate Expenses.",
+    ),
+)
+def test_business_rule_intent_accepts_business_friendly_rule_wording(
+    prompt: str,
+) -> None:
+    result = AgentTaskInterpreter.interpret(_messages(prompt))
+
+    assert result.intent is AgentTaskIntent.RUN_BUSINESS_RULE
+    assert result.phase is AgentTaskPhase.READY_FOR_PLAN
+
+
+def test_business_rule_affirmation_retains_original_task() -> None:
+    result = AgentTaskInterpreter.interpret(
+        _messages(
+            "run aggregate plan rule",
+            "yes",
+            "yes prepare now",
+        )
+    )
+
+    assert result.intent is AgentTaskIntent.RUN_BUSINESS_RULE
+    assert result.objective == "run aggregate plan rule"
+    assert result.phase is AgentTaskPhase.READY_FOR_PLAN
+
+
+def test_completed_business_rule_does_not_hijack_unrelated_help() -> None:
+    result = AgentTaskInterpreter.interpret(
+        _messages(
+            "Run Aggregate Plan rule.",
+            "What can you do?",
+        )
+    )
+
+    assert result.intent is AgentTaskIntent.HELP_EXPLAIN
+
+
 def test_completed_prior_task_does_not_hijack_an_unrelated_question() -> None:
     result = AgentTaskInterpreter.interpret(
         _messages(

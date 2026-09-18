@@ -35,6 +35,15 @@
       "expected_tools": ["get_environment_summary", "list_platform_operations", "list_operation_artifacts", "plan_multi_step_request", "prepare_operation_action", "prepare_standalone_flow_action"]
     },
     {
+      "id": "route-business-friendly-rule-preparation",
+      "category": "governed-operations",
+      "severity": "critical",
+      "kind": "intent_route",
+      "prompt": "Run Aggregate Plan rule.",
+      "expected_intent": "OPERATION_PREPARATION",
+      "expected_tools": ["get_environment_summary", "list_platform_operations", "list_operation_artifacts", "plan_multi_step_request", "prepare_operation_action", "prepare_standalone_flow_action"]
+    },
+    {
       "id": "route-pipeline-preparation",
       "category": "governed-operations",
       "severity": "critical",
@@ -189,6 +198,28 @@
         "cutoff_period": "Aug",
         "execution_method": "BUSINESS_RULE"
       },
+      "expected_missing_parameters": []
+    },
+    {
+      "id": "understand-business-friendly-rule-name",
+      "category": "business-task-understanding",
+      "severity": "critical",
+      "kind": "task_understanding",
+      "prompt": "run clear facilities allocation rule",
+      "expected_task_intent": "RUN_BUSINESS_RULE",
+      "expected_phase": "READY_FOR_PLAN",
+      "expected_parameters": {},
+      "expected_missing_parameters": []
+    },
+    {
+      "id": "understand-business-rule-confirmation-continuity",
+      "category": "business-task-understanding",
+      "severity": "critical",
+      "kind": "task_understanding",
+      "turns": ["run aggregate plan rule", "yes", "yes prepare now"],
+      "expected_task_intent": "RUN_BUSINESS_RULE",
+      "expected_phase": "READY_FOR_PLAN",
+      "expected_parameters": {},
       "expected_missing_parameters": []
     },
     {
