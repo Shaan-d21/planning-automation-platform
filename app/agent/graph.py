@@ -799,6 +799,7 @@ class AgentGraphOrchestrator:
                 "DATA_INTEGRATION": "data-integrations",
                 "PLANNING_IMPORT": "data-import",
             }.get(str(task_parameters.get("load_method") or "").upper()),
+            "RUN_BUSINESS_RULE": "business-rules",
         }.get(str(context.get("intent") or "").strip().upper())
         if operation_code is None:
             return None
@@ -2767,6 +2768,29 @@ class AgentGraphOrchestrator:
             if self._is_artifact_confirmation_reply(latest_user_text)
             else None
         )
+        task_context = state.get("task_context")
+        trusted_task_objective = ""
+        if (
+            operation_code == "business-rules"
+            and isinstance(task_context, dict)
+            and str(task_context.get("intent") or "").strip().upper()
+            == "RUN_BUSINESS_RULE"
+        ):
+            trusted_task_objective = str(
+                task_context.get("objective") or ""
+            ).strip()
+        task_artifact = (
+            self._artifact_alias_named_in_user_text(
+                display_names,
+                trusted_task_objective,
+            )
+            or self._artifact_named_in_user_text(
+                choices,
+                trusted_task_objective,
+            )
+            if trusted_task_objective
+            else None
+        )
         explicitly_named = self._artifact_alias_named_in_user_text(
             display_names,
             latest_user_text,
@@ -2777,7 +2801,7 @@ class AgentGraphOrchestrator:
             choices,
             latest_user_text,
             previous_assistant_text,
-        ) or confirmed_prior_artifact
+        ) or confirmed_prior_artifact or task_artifact
         canonical_requested = explicitly_named or next(
             (
                 item
@@ -2955,6 +2979,12 @@ class AgentGraphOrchestrator:
             if self._is_artifact_confirmation_reply(latest_user_text)
             else latest_user_text_original
         )
+        if operation_code == "business-rules" and trusted_task_objective:
+            input_source_text = " ".join(
+                item
+                for item in (trusted_task_objective, input_source_text)
+                if item
+            )
         if guided is not None and operation_code == "substitution-variables":
             context = dict(guided.get("context") or {})
             creating_variable = str(context.get("action") or "") == "CREATE"
@@ -3502,6 +3532,7 @@ class AgentGraphOrchestrator:
             "ahead",
             "continue",
             "proceed",
+            "now",
         }
         confirmation_words = {
             "yes",

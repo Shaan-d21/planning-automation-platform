@@ -371,6 +371,15 @@ class _OperationCatalog:
         return ("Revenue Forecast",)
 
 
+class _NamedRuleCatalog:
+    def __init__(self, *names: str) -> None:
+        self._names = names
+
+    def discover_job_names(self, *, job_type):
+        assert job_type == "RULES"
+        return self._names
+
+
 class _DataMapCatalog:
     def discover_job_names(self, *, job_type):
         assert job_type == "PLAN_TYPE_MAP"
@@ -1734,6 +1743,116 @@ def test_business_rule_request_runs_full_governed_flow_without_model_tool_choice
     assert operation_input.rule_name == "Revenue Forecast"
     assert operation_input.runtime_prompts == {"Year": "FY27"}
     assert actor.trigger_source is TriggerSource.AI_AGENT
+
+
+@pytest.mark.parametrize(
+    ("prompt", "rule_name"),
+    (
+        ("Run Aggregate Plan rule.", "Aggregate Plan"),
+        (
+            "run clear facilities allocation rule",
+            "Clear Facilities Allocation",
+        ),
+    ),
+)
+def test_named_rule_request_does_not_require_business_rule_wording(
+    tmp_path: Path,
+    prompt: str,
+    rule_name: str,
+) -> None:
+    settings = _settings(tmp_path)
+    access = AccessControlService(settings.workflow_database_file)
+    account = access.bootstrap_administrator(
+        username="admin",
+        display_name="Administrator",
+        email=None,
+        password="Strong password 123!",
+    )
+    repository = SQLiteAgentRepository(settings.workflow_database_file)
+    service = AgentApplicationService(
+        settings,
+        gateway=AgentCapabilityGateway(
+            settings,
+            control_center=_ControlCenter(),
+            data_review=_DataReview(),
+            operation_catalog=_NamedRuleCatalog(rule_name),
+        ),
+        repository=repository,
+        provider_factory=_NeverCalledProvider,
+        operation_manager=_OperationManager(),
+    )
+    user = replace(
+        _user(Permission.OPERATION_EXECUTE),
+        user_id=account.user_id,
+    )
+    conversation = service.create_conversation(user)
+
+    prepared = service.send_message(
+        conversation_id=conversation.conversation_id,
+        user=user,
+        content=prompt,
+    )
+
+    assert prepared["input_request"] is not None
+    assert prepared["input_request"].artifact_name == rule_name
+
+
+def test_business_rule_confirmation_retains_original_rule_request(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    access = AccessControlService(settings.workflow_database_file)
+    account = access.bootstrap_administrator(
+        username="admin",
+        display_name="Administrator",
+        email=None,
+        password="Strong password 123!",
+    )
+    repository = SQLiteAgentRepository(settings.workflow_database_file)
+    service = AgentApplicationService(
+        settings,
+        gateway=AgentCapabilityGateway(
+            settings,
+            control_center=_ControlCenter(),
+            data_review=_DataReview(),
+            operation_catalog=_NamedRuleCatalog("Aggregate Plan"),
+        ),
+        repository=repository,
+        provider_factory=_NeverCalledProvider,
+        operation_manager=_OperationManager(),
+    )
+    user = replace(
+        _user(Permission.OPERATION_EXECUTE),
+        user_id=account.user_id,
+    )
+    conversation = service.create_conversation(user)
+    for role, content in (
+        (AgentMessageRole.USER, "run aggregate plan rule"),
+        (
+            AgentMessageRole.ASSISTANT,
+            "Would you like me to prepare the Aggregate Plan rule?",
+        ),
+        (AgentMessageRole.USER, "yes"),
+        (
+            AgentMessageRole.ASSISTANT,
+            "Would you like me to prepare it now?",
+        ),
+    ):
+        repository.add_message(
+            conversation_id=conversation.conversation_id,
+            user_id=user.user_id,
+            role=role,
+            content=content,
+        )
+
+    prepared = service.send_message(
+        conversation_id=conversation.conversation_id,
+        user=user,
+        content="yes prepare now",
+    )
+
+    assert prepared["input_request"] is not None
+    assert prepared["input_request"].artifact_name == "Aggregate Plan"
 
 
 def test_standalone_flow_runs_after_one_complete_approval(

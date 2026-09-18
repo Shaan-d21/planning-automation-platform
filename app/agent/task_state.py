@@ -215,7 +215,8 @@ class AgentTaskInterpreter:
             AgentTaskIntent.RUN_BUSINESS_RULE,
             re.compile(
                 r"\b(?:run|execute|calculate|start)\b.{0,100}\b"
-                r"(?:business\s+rule|calculation\s+rule|calc\s+rule)\b",
+                r"(?:business\s+rule|calculation\s+rule|calc\s+rule|"
+                r"plan\s+rule|rule)\b",
                 re.IGNORECASE,
             ),
         ),
@@ -318,6 +319,11 @@ class AgentTaskInterpreter:
         direct = cls._direct_intent(turns[-1])
         if direct is not AgentTaskIntent.UNKNOWN:
             return direct
+        if len(turns) > 1 and cls._is_confirmation_reply(latest) and any(
+            cls._matches_intent(text, AgentTaskIntent.RUN_BUSINESS_RULE)
+            for text in turns[:-1]
+        ):
+            return AgentTaskIntent.RUN_BUSINESS_RULE
         if len(turns) < 2 or not cls._is_context_reply(latest):
             return AgentTaskIntent.UNKNOWN
         for text in reversed(turns[:-1]):
@@ -353,6 +359,54 @@ class AgentTaskInterpreter:
             or re.search(r"\.(?:csv|txt|zip|dat)\b", normalized)
             or re.search(r"\b(?:instead|correction|change\s+it\s+to)\b", normalized)
             or cls._is_data_load_method_reply(normalized)
+            or cls._is_confirmation_reply(normalized)
+        )
+
+    @staticmethod
+    def _is_confirmation_reply(normalized: str) -> bool:
+        """Recognize an affirmative continuation, never a new task."""
+        words = " ".join(normalized.casefold().split()).split()
+        if not words or len(words) > 6:
+            return False
+        allowed = {
+            "yes",
+            "yeah",
+            "yep",
+            "ok",
+            "okay",
+            "sure",
+            "please",
+            "prepare",
+            "run",
+            "execute",
+            "start",
+            "it",
+            "that",
+            "one",
+            "do",
+            "go",
+            "ahead",
+            "continue",
+            "proceed",
+            "now",
+        }
+        affirmative = {
+            "yes",
+            "yeah",
+            "yep",
+            "ok",
+            "okay",
+            "sure",
+            "prepare",
+            "run",
+            "execute",
+            "start",
+            "do",
+            "continue",
+            "proceed",
+        }
+        return all(word in allowed for word in words) and any(
+            word in affirmative for word in words
         )
 
     @staticmethod
