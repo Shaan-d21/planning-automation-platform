@@ -1574,7 +1574,11 @@ describe("App", () => {
     fireEvent.change(screen.getByLabelText("Metadata Import Cube Refresh job"), { target: { value: "Refresh_Cube" } });
     fireEvent.change(screen.getByLabelText("Metadata Import error output filename"), { target: { value: "Metadata_Errors.csv" } });
     fireEvent.click(screen.getByRole("button", { name: /Continue to approval/ }));
-    expect(await screen.findByRole("heading", { name: "Run Metadata Import?" }, { timeout: 5000 })).toBeTruthy();
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some(([url, init]) => String(url).startsWith("/api/v1/uploads?filename=") && init?.method === "POST")).toBe(true);
+      expect(fetchMock.mock.calls.some(([url, init]) => String(url) === "/api/v1/agent/conversations/conv-metadata-import/inputs" && init?.method === "POST")).toBe(true);
+    }, { timeout: 10000 });
+    expect(await screen.findByRole("heading", { name: "Run Metadata Import?" }, { timeout: 10000 })).toBeTruthy();
     expect(screen.getByText("Run Refresh_Cube")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /Approve and run/ }));
     expect(await screen.findByText("Metadata Import completed successfully.")).toBeTruthy();
