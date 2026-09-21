@@ -131,6 +131,30 @@ def test_explicit_operation_still_routes_governed_with_review_context() -> None:
     assert "prepare_operation_action" in decision.tool_names
 
 
+def test_calculation_request_overrides_old_data_review_context() -> None:
+    decision = AgentIntentRouter.route(
+        "Calculate Actual product revenue",
+        ALL_TOOLS,
+        has_data_review_context=True,
+        task_intent="RUN_BUSINESS_RULE",
+    )
+
+    assert decision.intent is AgentIntent.OPERATION_PREPARATION
+    assert "prepare_operation_action" in decision.tool_names
+
+
+def test_forecast_seed_request_overrides_old_data_review_context() -> None:
+    decision = AgentIntentRouter.route(
+        "Run forecast seeding",
+        ALL_TOOLS,
+        has_data_review_context=True,
+        task_intent="FORECAST_SEEDING",
+    )
+
+    assert "prepare_operation_action" in decision.tool_names
+    assert "list_operation_artifacts" in decision.tool_names
+
+
 def test_schedule_intent_exposes_only_governed_schedule_preparation() -> None:
     decision = AgentIntentRouter.route(
         "Schedule the monthly forecast Pipeline to run every week.",

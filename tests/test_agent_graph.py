@@ -10,6 +10,7 @@ import pytest
 from app.agent.capabilities import AgentCapabilityGateway
 from app.agent.checkpoints import AgentCheckpointStore
 from app.agent.graph import AgentGraphOrchestrator, GRAPH_TOOL_NAMES
+from app.agent.task_state import AgentTaskInterpreter
 from app.agent.models import (
     AgentMessage,
     AgentMessageRole,
@@ -332,6 +333,18 @@ class _ForecastSeedingOperationCatalog:
                 "data_integrations": (integration,),
             },
         )()
+
+
+class _ForecastSeedRuleCatalog(_ForecastSeedingOperationCatalog):
+    def discover_job_names(self, *, job_type):
+        if job_type == "RULES":
+            return (
+                "Actual to Forecast",
+                "Plan to Forecast",
+                "Create Forecast",
+                "Aggregate Forecast",
+            )
+        return ()
 
 
 class _RepeatedRuleFlowOperationCatalog:
@@ -2910,6 +2923,49 @@ def test_month_close_standalone_choice_advances_to_live_artifact_selection(
         "total": 3,
     }
     assert result.tool_activity == ()
+
+
+def test_explicit_forecast_seed_lists_live_rule_choices_and_synonyms(
+    tmp_path: Path,
+) -> None:
+    graph = _orchestrator(
+        tmp_path,
+        _NeverCalledProvider(),
+        operation_catalog=_ForecastSeedRuleCatalog(),
+    )
+    message = _message("Run forecast seeding")
+    conversation_id = "conversation-explicit-forecast-seed"
+
+    choice = graph.invoke(
+        conversation_id=conversation_id,
+        user_id=7,
+        messages=(message,),
+        task_context=AgentTaskInterpreter.interpret((message,)).to_payload(),
+    )
+
+    assert choice.clarification_request is not None
+    assert choice.clarification_request.operation_code == "business-rules"
+    assert set(choice.clarification_request.options) == {
+        "Actual to Forecast",
+        "Plan to Forecast",
+        "Create Forecast",
+        "Aggregate Forecast",
+    }
+    recommended = choice.clarification_request.recommendations
+    assert {item["name"] for item in recommended[:2]} == {
+        "Actual to Forecast", "Plan to Forecast"
+    }
+    assert all(item["confidence"] == "Possible match" for item in recommended)
+
+    selected = graph.resume_clarification(
+        conversation_id=conversation_id,
+        user_id=7,
+        request_id=choice.clarification_request.request_id,
+        value="Plan to Forecast",
+    )
+    assert selected.input_request is not None
+    assert selected.input_request.operation_code == "business-rules"
+    assert selected.input_request.artifact_name == "Plan to Forecast"
 
 
 def test_forecast_seeding_asks_for_the_approved_live_method_when_ambiguous(

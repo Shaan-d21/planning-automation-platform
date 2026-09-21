@@ -154,6 +154,21 @@ class AgentTaskInterpreter:
         r"^(?:help|explain|what\s+(?:can|does|is|are)|how\s+(?:can|does|do))\b",
         re.IGNORECASE,
     )
+    _NEW_TASK_START = re.compile(
+        r"^(?:(?:i\s+want\s+to|please|can\s+you)\s+)?"
+        r"(?:run|execute|start|load|import|update|add|create|prepare|"
+        r"show|generate|refresh|calculate|recalculate|compute|recompute|"
+        r"seed|complete|check|review|compare)\b",
+        re.IGNORECASE,
+    )
+    _CALCULATION_ACTION = re.compile(
+        r"^\s*(?:(?:please|kindly)\s+|(?:can|could|would)\s+you\s+|"
+        r"i\s+(?:want|need)\s+to\s+)*"
+        r"(?:(?:calculate|recalculate|compute|recompute)\b|"
+        r"(?:run|execute|start|perform|do)\b.{1,100}\b"
+        r"(?:calculations?|calc)\b)",
+        re.IGNORECASE,
+    )
     _INTENT_PATTERNS: tuple[tuple[AgentTaskIntent, re.Pattern[str]], ...] = (
         (
             AgentTaskIntent.MONTH_CLOSE,
@@ -172,7 +187,10 @@ class AgentTaskInterpreter:
             re.compile(
                 r"\b(?:seed(?:ing)?|prepare|create)\s+"
                 r"(?:(?:the|a|new)\s+){0,2}forecast\b|"
+                r"\bforecast[- ]?seed(?:ing)?\b|"
                 r"\bcopy\s+actuals?\s+(?:in)?to\s+forecast\b|"
+                r"\b(?:actuals?|plan(?:ning)?|budget)\s+"
+                r"(?:to|into)\s+forecast\b|"
                 r"\bactuals?\s+through\s+.+\bforecast\b",
                 re.IGNORECASE,
             ),
@@ -193,7 +211,18 @@ class AgentTaskInterpreter:
                 r"\bmetadata\s+(?:load|import|update)\b|"
                 r"\b(?:load|import|update)\s+(?:the\s+)?"
                 r"(?:account|entity|product)\s+metadata\b|"
-                r"\bupdate\s+(?:the\s+)?(?:account|entity|product)\s+hierarchy\b",
+                r"\b(?:load|import|update|add)\s+(?:(?:the|new)\s+){0,2}"
+                r"(?:account|entity|product|employee|job|project|scenario|"
+                r"version|period|year|currency)\s+"
+                r"(?:dimensions?|hierarch(?:y|ies)|members?)\b|"
+                r"\b(?:account|entity|product|employee|job|project|scenario|"
+                r"version|period|year|currency)\s+"
+                r"(?:dimensions?|hierarch(?:y|ies)|members?)\s+"
+                r"(?:load|import|update)\b|"
+                r"\b(?:add|create)\b.{1,100}\bas\s+(?:a\s+|an\s+)?"
+                r"new\s+(?:product|account|entity|member)\b|"
+                r"\b(?:add|create)\s+(?:a\s+)?new\s+"
+                r"(?:product|account|entity|member)\b",
                 re.IGNORECASE,
             ),
         ),
@@ -269,13 +298,48 @@ class AgentTaskInterpreter:
         intent = cls._latest_intent(user_turns)
         if intent is AgentTaskIntent.UNKNOWN and cls._HELP_PATTERN.search(latest):
             intent = AgentTaskIntent.HELP_EXPLAIN
+        task_turns = cls._current_task_turns(user_turns, intent)
         parameters = (
             {}
             if intent in {AgentTaskIntent.UNKNOWN, AgentTaskIntent.HELP_EXPLAIN}
-            else cls._extract_parameters(user_turns, intent, today=today)
+            else cls._extract_parameters(task_turns, intent, today=today)
         )
-        objective = cls._objective(user_turns, intent)
+        objective = cls._objective(task_turns, intent)
         return cls._understanding(intent, parameters, objective)
+
+    @classmethod
+    def _current_task_turns(
+        cls,
+        turns: Sequence[str],
+        intent: AgentTaskIntent,
+    ) -> Sequence[str]:
+        """Exclude inputs from older tasks without discarding same-task replies."""
+        if intent in {AgentTaskIntent.UNKNOWN, AgentTaskIntent.HELP_EXPLAIN}:
+            return turns[-1:]
+        anchor = 0
+        previous_start = ""
+        for index, text in enumerate(turns):
+            if not cls._NEW_TASK_START.search(text):
+                continue
+            candidate = cls._direct_intent(text)
+            if candidate not in {AgentTaskIntent.UNKNOWN, intent}:
+                previous_start = ""
+            if candidate is intent:
+                if (
+                    index > 0
+                    and intent is AgentTaskIntent.DATA_LOAD
+                    and cls._is_data_load_method_reply(text.casefold())
+                    and any(
+                        cls._matches_intent(prior, AgentTaskIntent.DATA_LOAD)
+                        for prior in turns[:index]
+                    )
+                ):
+                    continue
+                normalized = re.sub(r"\W+", " ", text.casefold()).strip()
+                if normalized != previous_start:
+                    anchor = index
+                    previous_start = normalized
+        return turns[anchor:]
 
     @classmethod
     def _latest_intent(cls, turns: Sequence[str]) -> AgentTaskIntent:
@@ -311,6 +375,16 @@ class AgentTaskInterpreter:
             for text in turns[:-1]
         ) and cls._is_forecast_execution_method_reply(latest):
             return AgentTaskIntent.FORECAST_SEEDING
+        if len(turns) > 1 and re.search(
+            r"^(?:(?:show|list)\s+(?:me\s+)?(?:the\s+)?"
+            r"(?:other\s+|available\s+)?rules?\b|"
+            r"(?:another|other|different)\s+(?:rule|one|option)\b)",
+            latest,
+        ) and any(
+            cls._matches_intent(text, AgentTaskIntent.FORECAST_SEEDING)
+            for text in turns[:-1]
+        ):
+            return AgentTaskIntent.FORECAST_SEEDING
         if len(turns) > 1 and any(
             cls._matches_intent(text, AgentTaskIntent.VARIANCE_REPORTING)
             for text in turns[:-1]
@@ -324,16 +398,33 @@ class AgentTaskInterpreter:
             for text in turns[:-1]
         ):
             return AgentTaskIntent.RUN_BUSINESS_RULE
-        if len(turns) < 2 or not cls._is_context_reply(latest):
+        if len(turns) < 2:
             return AgentTaskIntent.UNKNOWN
-        for text in reversed(turns[:-1]):
+        for index in range(len(turns) - 2, -1, -1):
+            text = turns[index]
             prior = cls._direct_intent(text)
-            if prior is not AgentTaskIntent.UNKNOWN:
+            if prior is AgentTaskIntent.UNKNOWN:
+                continue
+            if cls._is_context_reply(latest):
                 return prior
+            if (
+                cls._is_open_slot_reply(latest)
+                and cls._missing_parameters(
+                    prior,
+                    cls._extract_parameters(turns[index:-1], prior, today=None),
+                )
+            ):
+                return prior
+            break
         return AgentTaskIntent.UNKNOWN
 
     @classmethod
     def _direct_intent(cls, text: str) -> AgentTaskIntent:
+        if (
+            cls._CALCULATION_ACTION.search(text)
+            and not re.search(r"\b(?:then|followed\s+by)\b", text, re.IGNORECASE)
+        ):
+            return AgentTaskIntent.RUN_BUSINESS_RULE
         for intent, pattern in cls._INTENT_PATTERNS:
             if pattern.search(text):
                 return intent
@@ -357,6 +448,7 @@ class AgentTaskInterpreter:
             or re.search(r"\b(?:actual|forecast|budget)\b", normalized)
             or re.search(r"\b(?:latest|newest|most\s+recent)\b", normalized)
             or re.search(r"\.(?:csv|txt|zip|dat)\b", normalized)
+            or re.search(r"\bupload\b", normalized)
             or re.search(r"\b(?:instead|correction|change\s+it\s+to)\b", normalized)
             or cls._is_data_load_method_reply(normalized)
             or cls._is_confirmation_reply(normalized)
@@ -365,7 +457,7 @@ class AgentTaskInterpreter:
     @staticmethod
     def _is_confirmation_reply(normalized: str) -> bool:
         """Recognize an affirmative continuation, never a new task."""
-        words = " ".join(normalized.casefold().split()).split()
+        words = re.findall(r"[a-z]+", normalized.casefold())
         if not words or len(words) > 6:
             return False
         allowed = {
@@ -407,6 +499,17 @@ class AgentTaskInterpreter:
         }
         return all(word in allowed for word in words) and any(
             word in affirmative for word in words
+        )
+
+    @staticmethod
+    def _is_open_slot_reply(normalized: str) -> bool:
+        """Keep a pending task for codes or an explicit correction, not new topics."""
+        return bool(
+            re.fullmatch(
+                r"(?:i\s+)?already\s+(?:told|said)\s+(?:you|that)[.!]?",
+                normalized,
+            )
+            or re.fullmatch(r"[a-z][a-z0-9-]*_[a-z0-9_-]{1,79}", normalized)
         )
 
     @staticmethod
@@ -464,6 +567,26 @@ class AgentTaskInterpreter:
             if period is not None:
                 parameters["period"] = period[0]
                 parameters["period_reference"] = period[1]
+                if intent is AgentTaskIntent.DATA_LOAD:
+                    month_range = cls._month_range_from_text(normalized)
+                    if month_range is not None:
+                        parameters["start_period"], parameters["end_period"] = (
+                            month_range
+                        )
+                        parameters["period"] = month_range[1]
+                    elif parameters.get("start_period") and parameters.get(
+                        "end_period"
+                    ):
+                        if re.search(r"\bstart\s+(?:month|period)\b", normalized):
+                            parameters["start_period"] = period[0]
+                            parameters["period"] = parameters["end_period"]
+                        elif re.search(r"\bend\s+(?:month|period)\b", normalized):
+                            parameters["end_period"] = period[0]
+                        else:
+                            # A plain month correction replaces the previous
+                            # range rather than preserving stale endpoints.
+                            parameters.pop("start_period", None)
+                            parameters.pop("end_period", None)
 
             year_match = re.search(r"\bfy\s*([0-9]{2,4})\b", normalized)
             if year_match:
@@ -533,7 +656,66 @@ class AgentTaskInterpreter:
             ):
                 parameters["file_preference"] = "latest"
 
+            if (
+                intent is AgentTaskIntent.METADATA_LOAD
+                and re.search(
+                    r"\b(?:i(?:'ll| will| can)\s+upload|upload\s+it|"
+                    r"upload\s+on\s+the\s+(?:review|governed)\s+screen)\b",
+                    normalized,
+                )
+            ):
+                parameters["file_preference"] = "upload"
+
             if intent is AgentTaskIntent.METADATA_LOAD:
+                member_match = re.search(
+                    r"\b(?:add|create)\s+(.{1,80}?)\s+as\s+"
+                    r"(?:a\s+|an\s+)?(?:new\s+)?"
+                    r"(?:product|account|entity|member)\b",
+                    text,
+                    re.IGNORECASE,
+                ) or re.search(
+                    r"\b(?:add|create)\s+(?:a\s+)?new\s+"
+                    r"(?:product|account|entity|member)\s+(?:(?:called|named)\s+)?"
+                    r"(.{1,80}?)(?:[.!?]|$)",
+                    text,
+                    re.IGNORECASE,
+                )
+                if member_match:
+                    parameters["requested_member"] = member_match.group(1).strip()
+                parent_match = re.search(
+                    r"\b([A-Za-z][A-Za-z0-9_-]{0,79})\s+is\s+"
+                    r"(?:the\s+)?(?:name\s+of\s+)?(?:a\s+)?"
+                    r"(?:dimension\s+)?member\s+under\b|"
+                    r"\bparent(?:\s+member)?\s+(?:is|=)\s+"
+                    r"[`'\"]?([A-Za-z][A-Za-z0-9_-]{0,79})\b|"
+                    r"\b(?:add|create)\b.{0,100}?\b(?:under|beneath)\s+"
+                    r"[`'\"]?([A-Za-z][A-Za-z0-9_-]{0,79})\b",
+                    text,
+                    re.IGNORECASE,
+                )
+                if parent_match:
+                    parameters["parent_member"] = next(
+                        value for value in parent_match.groups() if value
+                    )
+                    parameters.pop("possible_parent_member", None)
+                elif (
+                    index > 0
+                    and parameters.get("requested_member")
+                    and not parameters.get("parent_member")
+                    and re.fullmatch(
+                        r"[A-Za-z][A-Za-z0-9-]*_[A-Za-z0-9_-]{1,79}",
+                        text.strip(),
+                    )
+                ):
+                    parameters["possible_parent_member"] = text.strip()
+                elif (
+                    cls._is_confirmation_reply(normalized)
+                    and parameters.get("possible_parent_member")
+                    and not parameters.get("parent_member")
+                ):
+                    parameters["parent_member"] = parameters.pop(
+                        "possible_parent_member"
+                    )
                 for dimension in cls._DIMENSIONS:
                     if re.search(
                         rf"\b{re.escape(dimension.casefold())}\b",
@@ -554,6 +736,14 @@ class AgentTaskInterpreter:
                     parameters["load_method"] = "PLANNING_IMPORT"
 
             if intent is AgentTaskIntent.FORECAST_SEEDING:
+                if re.search(
+                    r"\bforecast[- ]?seed(?:ing)?\b|"
+                    r"\bseed(?:ing)?\b.{0,50}\bforecast\b|"
+                    r"\b(?:actuals?|plan(?:ning)?|budget)\s+"
+                    r"(?:to|into)\s+forecast\b",
+                    normalized,
+                ):
+                    parameters["seed_requested"] = True
                 if re.search(r"\b(?:oracle\s+)?pipeline\b", normalized):
                     parameters["execution_method"] = "PIPELINE"
                 elif re.search(
@@ -606,6 +796,24 @@ class AgentTaskInterpreter:
         return cls._MONTHS[raw], "explicit"
 
     @classmethod
+    def _month_range_from_text(cls, normalized: str) -> tuple[str, str] | None:
+        month = r"(?:" + "|".join(cls._MONTHS) + r")"
+        period = rf"\b({month})\b(?:[-/#]\s*(?:fy)?\d{{2,4}})?"
+        connector = r"\s*(?:to|through|thru|until|[-–—])\s*"
+        match = re.search(period + connector + period, normalized)
+        if match is None:
+            match = re.search(
+                r"\bbetween\s+" + period + r"\s+and\s+" + period,
+                normalized,
+            )
+        if match is None:
+            return None
+        return (
+            cls._MONTHS[match.group(1).casefold()],
+            cls._MONTHS[match.group(2).casefold()],
+        )
+
+    @classmethod
     def _understanding(
         cls,
         intent: AgentTaskIntent,
@@ -631,7 +839,9 @@ class AgentTaskInterpreter:
             confidence=confidence,
             parameters=parameters,
             missing_parameters=missing,
-            clarification_prompt=cls._clarification_prompt(intent, missing),
+            clarification_prompt=cls._clarification_prompt(
+                intent, missing, parameters
+            ),
             objective=objective,
         )
 
@@ -647,13 +857,18 @@ class AgentTaskInterpreter:
                 "scenario",
                 "period",
                 "file_reference",
-                "load_method",
             ),
             AgentTaskIntent.FORECAST_SEEDING: ("cutoff_period",),
             AgentTaskIntent.VARIANCE_REPORTING: ("comparison", "period"),
         }
         missing: list[str] = []
         for name in requirements.get(intent, ()):
+            if (
+                intent is AgentTaskIntent.FORECAST_SEEDING
+                and name == "cutoff_period"
+                and parameters.get("seed_requested")
+            ):
+                continue
             if name == "file_reference":
                 if not (parameters.get("file") or parameters.get("file_preference")):
                     missing.append(name)
@@ -665,9 +880,40 @@ class AgentTaskInterpreter:
     def _clarification_prompt(
         intent: AgentTaskIntent,
         missing: tuple[str, ...],
+        parameters: dict[str, Any],
     ) -> str | None:
         if not missing:
             return None
+        if (
+            intent is AgentTaskIntent.METADATA_LOAD
+            and "file_reference" in missing
+            and parameters.get("requested_member")
+        ):
+            possible_parent = str(
+                parameters.get("possible_parent_member") or ""
+            ).strip()
+            if possible_parent and not parameters.get("parent_member"):
+                return (
+                    f"I still have your request to add a new member. Is "
+                    f"{possible_parent} its parent member? I can prepare a "
+                    "Metadata Import once a file containing the member and "
+                    "parent is available; chat cannot create it directly."
+                )
+            parent = str(parameters.get("parent_member") or "").strip()
+            parent_context = (
+                f" You identified {parent} as its parent; I have not "
+                "verified that in Oracle."
+                if parent else ""
+            )
+            return (
+                "I can prepare a governed Metadata Import, but I cannot "
+                "create a single member directly from chat. The metadata "
+                "file must define the new member and its parent."
+                + parent_context
+                + " Which metadata file contains this change? Give its "
+                "filename, or say 'I'll upload it' to choose a file on the "
+                "review screen."
+            )
         prompts: dict[tuple[AgentTaskIntent, str], str] = {
             (
                 AgentTaskIntent.MONTH_CLOSE,

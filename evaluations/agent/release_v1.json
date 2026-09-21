@@ -44,6 +44,15 @@
       "expected_tools": ["get_environment_summary", "list_platform_operations", "list_operation_artifacts", "plan_multi_step_request", "prepare_operation_action", "prepare_standalone_flow_action"]
     },
     {
+      "id": "route-natural-calculation-action",
+      "category": "governed-operations",
+      "severity": "critical",
+      "kind": "intent_route",
+      "prompt": "Calculate product revenue",
+      "expected_intent": "OPERATION_PREPARATION",
+      "expected_tools": ["get_environment_summary", "list_platform_operations", "list_operation_artifacts", "plan_multi_step_request", "prepare_operation_action", "prepare_standalone_flow_action"]
+    },
+    {
       "id": "route-pipeline-preparation",
       "category": "governed-operations",
       "severity": "critical",
@@ -133,6 +142,82 @@
       "expected_missing_parameters": ["file_reference"]
     },
     {
+      "id": "retain-business-friendly-metadata-load-after-confirmation",
+      "category": "business-task-understanding",
+      "severity": "critical",
+      "kind": "task_understanding",
+      "turns": ["Load new product dimensions", "Yes, prepare"],
+      "expected_task_intent": "METADATA_LOAD",
+      "expected_phase": "COLLECTING_INFORMATION",
+      "expected_parameters": {"dimension": "Product"},
+      "expected_missing_parameters": ["file_reference"]
+    },
+    {
+      "id": "retain-member-creation-across-opaque-oracle-member-code",
+      "category": "business-task-understanding",
+      "severity": "critical",
+      "kind": "task_understanding",
+      "turns": [
+        "Add Orange Juice as a new product",
+        "Product Dimension",
+        "P_TP",
+        "P_TP is the name of a dimension member under Product",
+        "already told you"
+      ],
+      "expected_task_intent": "METADATA_LOAD",
+      "expected_phase": "COLLECTING_INFORMATION",
+      "expected_parameters": {
+        "dimension": "Product",
+        "requested_member": "Orange Juice",
+        "parent_member": "P_TP"
+      },
+      "expected_missing_parameters": ["file_reference"]
+    },
+    {
+      "id": "new-metadata-task-does-not-reuse-prior-file",
+      "category": "business-task-understanding",
+      "severity": "critical",
+      "kind": "task_understanding",
+      "turns": [
+        "Load Account metadata using old_accounts.csv",
+        "Add Orange Juice as a new product"
+      ],
+      "expected_task_intent": "METADATA_LOAD",
+      "expected_phase": "COLLECTING_INFORMATION",
+      "expected_parameters": {
+        "dimension": "Product",
+        "requested_member": "Orange Juice"
+      },
+      "expected_missing_parameters": ["file_reference"]
+    },
+    {
+      "id": "understand-natural-calculation-action",
+      "category": "business-task-understanding",
+      "severity": "critical",
+      "kind": "task_understanding",
+      "prompt": "Run revenue calculation",
+      "expected_task_intent": "RUN_BUSINESS_RULE",
+      "expected_phase": "READY_FOR_PLAN",
+      "expected_parameters": {},
+      "expected_missing_parameters": []
+    },
+    {
+      "id": "understand-data-load-month-range",
+      "category": "business-task-understanding",
+      "severity": "critical",
+      "kind": "task_understanding",
+      "prompt": "Load product units data from Jan to Mar for FY27",
+      "expected_task_intent": "DATA_LOAD",
+      "expected_phase": "COLLECTING_INFORMATION",
+      "expected_parameters": {
+        "start_period": "Jan",
+        "end_period": "Mar",
+        "period": "Mar",
+        "year": "FY27"
+      },
+      "expected_missing_parameters": ["scenario", "file_reference"]
+    },
+    {
       "id": "understand-relative-actual-load",
       "category": "business-task-understanding",
       "severity": "critical",
@@ -140,14 +225,14 @@
       "prompt": "Load last month's actuals using the latest file",
       "today": "2026-09-16",
       "expected_task_intent": "DATA_LOAD",
-      "expected_phase": "COLLECTING_INFORMATION",
+      "expected_phase": "READY_FOR_PLAN",
       "expected_parameters": {
         "scenario": "Actual",
         "period": "Aug",
         "period_reference": "previous_month",
         "file_preference": "latest"
       },
-      "expected_missing_parameters": ["load_method"]
+      "expected_missing_parameters": []
     },
     {
       "id": "understand-period-correction",
@@ -180,6 +265,28 @@
         "comparison": "Actual vs Budget",
         "period": "Sep"
       },
+      "expected_missing_parameters": []
+    },
+    {
+      "id": "understand-explicit-forecast-seed",
+      "category": "business-task-understanding",
+      "severity": "critical",
+      "kind": "task_understanding",
+      "prompt": "Run forecast seeding",
+      "expected_task_intent": "FORECAST_SEEDING",
+      "expected_phase": "READY_FOR_PLAN",
+      "expected_parameters": {"seed_requested": true},
+      "expected_missing_parameters": []
+    },
+    {
+      "id": "understand-forecast-seed-alternative-rule",
+      "category": "business-task-understanding",
+      "severity": "critical",
+      "kind": "task_understanding",
+      "turns": ["Run forecast seeding", "another rule"],
+      "expected_task_intent": "FORECAST_SEEDING",
+      "expected_phase": "READY_FOR_PLAN",
+      "expected_parameters": {"seed_requested": true},
       "expected_missing_parameters": []
     },
     {

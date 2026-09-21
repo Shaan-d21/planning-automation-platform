@@ -1212,6 +1212,43 @@ describe("App", () => {
     expect(JSON.parse(String(inputs?.[1]?.body))).toEqual({ request_id: "input-1", values: { runtime_prompt_mode: "Use Calculation Manager defaults", runtime_prompts: {} } });
   });
 
+  it("shows RTP name and value prefilled from the prompt without a registry", async () => {
+    window.location.hash = "#assistant";
+    const assistantUser = {
+      ...bootstrap,
+      user: { ...bootstrap.user!, permissions: ["agent.use", "operation.execute"] },
+      navigation: [...bootstrap.navigation, { code: "assistant", label: "EPM Assistant", path: "/app/agent", group: "Workspace" }]
+    };
+    const conversation = { conversation_id: "conv-rtp-prefill", user_id: 7, title: "Revenue rule", provider: "groq", model: "test", created_at: "2026-08-11T10:00:00Z", updated_at: "2026-08-11T10:00:00Z" };
+    const inputRequest = {
+      request_id: "rtp-prefill-1", operation_code: "business-rules", display_name: "Business Rules",
+      artifact_name: "Revenue Rule", title: "Choose runtime prompt values",
+      description: "Review the RTP values before approval.", fields: [],
+      context: { rtp_definition: null, prefill: { runtime_prompt_mode: "Provide runtime prompt values", runtime_prompts: { Amount: "10" } } }
+    };
+    let created = false;
+    vi.mocked(fetch).mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/v1/bootstrap") return response(assistantUser);
+      if (url === "/api/v1/home") return response(home);
+      if (url === "/api/v1/notifications") return response(notificationInbox);
+      if (url === "/api/v1/agent/status") return response({ enabled: true, configured: true, provider: "groq", model: "test", mode: "read-only", message: "Agent is ready." });
+      if (url === "/api/v1/agent/conversations" && init?.method === "POST") { created = true; return response({ status: "success", conversation }); }
+      if (url === "/api/v1/agent/conversations") return response({ status: "success", conversations: created ? [conversation] : [] });
+      if (url === "/api/v1/agent/conversations/conv-rtp-prefill/messages" && init?.method === "POST") return response({ status: "success", message: { message_id: 2, conversation_id: conversation.conversation_id, role: "assistant", content: "Review the selected Business Rule.", created_at: "2026-08-11T10:01:00Z" }, tool_activity: [], action_drafts: [], approval_request: null, clarification_request: null, input_request: inputRequest });
+      if (url === "/api/v1/agent/conversations/conv-rtp-prefill/messages") return response({ status: "success", messages: [], action_drafts: [], approval_request: null, clarification_request: null, input_request: null });
+      return response({ detail: "Unexpected request" }, 404);
+    });
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "How can I help with Planning?" })).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Message the EPM Assistant"), { target: { value: "run revenue rule with RTP Amount=10" } });
+    fireEvent.click(screen.getByRole("button", { name: /^Send/ }));
+    await waitFor(() => expect((screen.getByLabelText(/Runtime prompt source/) as HTMLSelectElement).value).toBe("Provide runtime prompt values"));
+    expect(screen.getByDisplayValue("Amount")).toBeTruthy();
+    expect(screen.getByDisplayValue("10")).toBeTruthy();
+  });
+
   it("recovers a missing Pipeline through synchronization and exact registration", async () => {
     window.location.hash = "#assistant";
     const assistantUser = {
