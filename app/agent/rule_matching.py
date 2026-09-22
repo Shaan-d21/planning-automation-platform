@@ -75,6 +75,58 @@ def recommend_business_rules(
     )
 
 
+def recommend_forecast_seeding_rules(
+    artifacts: tuple[tuple[str, str], ...],
+    *,
+    limit: int = 5,
+) -> tuple[BusinessRuleMatch, ...]:
+    """Suggest live rule names; never claim their calculation logic is proven."""
+    target_terms = {"forecast", "forecasts", "projection", "projections"}
+    source_terms = {
+        "actual", "actuals", "plan", "budget", "prediction", "predictions"
+    }
+    action_terms = {
+        "seed", "seeding", "copy", "create", "initialize", "initialise",
+        "populate", "transfer", "move", "load", "rollforward",
+    }
+    matches: list[BusinessRuleMatch] = []
+    for identifier, display_name in artifacts:
+        tokens = set(_meaningful_tokens(display_name))
+        if not tokens & target_terms:
+            continue
+        source = bool(tokens & source_terms)
+        action = bool(tokens & action_terms)
+        expanded = _CAMEL_BOUNDARY.sub(" ", display_name).casefold()
+        source_to_forecast = bool(
+            re.search(
+                r"\b(?:actuals?|plan|budget|predictions?)\b"
+                r".{0,35}\b(?:to|into)\s+(?:the\s+)?forecast\b",
+                expanded,
+            )
+        )
+        score = min(100, 35 + 20 * source + 25 * action + 20 * source_to_forecast)
+        reason = (
+            "Name suggests source-to-Forecast movement; verify the rule logic."
+            if source_to_forecast
+            else "Name suggests Forecast setup; verify the rule logic."
+            if action
+            else "Name mentions Forecast; seeding purpose is not verified."
+        )
+        matches.append(
+            BusinessRuleMatch(
+                name=identifier,
+                display_name=display_name,
+                confidence="Possible match",
+                score=score,
+                reason=reason,
+            )
+        )
+    return tuple(
+        sorted(matches, key=lambda item: (-item.score, item.display_name.casefold()))
+        [: max(1, limit)]
+    )
+
+
 def recommend_artifacts(
     context: str,
     artifacts: tuple[tuple[str, str], ...],

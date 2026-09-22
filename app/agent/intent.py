@@ -148,7 +148,10 @@ class AgentIntentRouter:
         matches: list[AgentIntent] = []
         explicit_operation = any(
             term in normalized for term in cls._EXPLICIT_OPERATION_TERMS
-        )
+        ) or str(task_intent or "").strip().upper() in {
+            "RUN_BUSINESS_RULE",
+            "FORECAST_SEEDING",
+        }
         contextual_refinement = (
             has_data_review_context
             and not explicit_operation

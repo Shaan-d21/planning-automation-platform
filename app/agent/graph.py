@@ -36,7 +36,11 @@ from app.agent.models import (
     AgentToolDefinition,
 )
 from app.agent.provider import AgentProvider
-from app.agent.rule_matching import BusinessRuleMatch, recommend_artifacts
+from app.agent.rule_matching import (
+    BusinessRuleMatch,
+    recommend_artifacts,
+    recommend_forecast_seeding_rules,
+)
 from app.utils.exceptions import AgentProviderError
 
 
@@ -119,6 +123,7 @@ class AgentGraphState(TypedDict, total=False):
     data_review_context: dict[str, Any] | None
     task_context: dict[str, Any] | None
     task_plan: dict[str, Any] | None
+    load_discovery_blocker: str | None
 
 
 class AgentGraphOrchestrator:
@@ -183,6 +188,7 @@ class AgentGraphOrchestrator:
             "data_review_context": data_review_context,
             "task_context": task_context,
             "task_plan": None,
+            "load_discovery_blocker": None,
         }
         try:
             state = self._compiled_graph().invoke(
@@ -451,6 +457,12 @@ class AgentGraphOrchestrator:
             return self._graph
 
     def _model_node(self, state: AgentGraphState) -> AgentGraphState:
+        if state.get("load_discovery_blocker"):
+            return {
+                **state,
+                "assistant_text": state["load_discovery_blocker"],
+                "pending_tool_calls": [],
+            }
         deterministic_operation = str(
             state.get("deterministic_operation") or ""
         ).strip().casefold()
@@ -699,7 +711,11 @@ class AgentGraphOrchestrator:
         """Add validated task and Data Explorer context to model instructions."""
         sections = [self._system_instruction]
         task_context = state.get("task_context")
-        if isinstance(task_context, dict) and task_context:
+        if (
+            isinstance(task_context, dict)
+            and task_context
+            and str(task_context.get("intent") or "").upper() != "UNKNOWN"
+        ):
             serialized_task = json.dumps(
                 task_context,
                 ensure_ascii=True,
@@ -773,6 +789,16 @@ class AgentGraphOrchestrator:
             "VARIANCE_REPORTING",
         }:
             return None
+        if intent == "DATA_LOAD" or (
+            intent == "METADATA_LOAD"
+            and not (
+                isinstance(context.get("parameters"), dict)
+                and context["parameters"].get("requested_member")
+            )
+        ):
+            # Both load mechanisms have their own governed input form. Show
+            # current Oracle choices before asking for route-specific fields.
+            return None
         prompt = str(context.get("clarification_prompt") or "").strip()
         return prompt or None
 
@@ -784,23 +810,29 @@ class AgentGraphOrchestrator:
         context = state.get("task_context")
         if not isinstance(context, dict):
             return None
-        if str(context.get("phase") or "").upper() != "READY_FOR_PLAN":
+        intent = str(context.get("intent") or "").strip().upper()
+        phase = str(context.get("phase") or "").upper()
+        parameters = context.get("parameters")
+        task_parameters = parameters if isinstance(parameters, dict) else {}
+        if phase != "READY_FOR_PLAN" and not (
+            phase == "COLLECTING_INFORMATION"
+            and intent in {"DATA_LOAD", "METADATA_LOAD"}
+            and not task_parameters.get("requested_member")
+        ):
             return None
         allowed = {
             str(item).strip() for item in state.get("allowed_tool_names", [])
         }
         if "prepare_operation_action" not in allowed:
             return None
-        parameters = context.get("parameters")
-        task_parameters = parameters if isinstance(parameters, dict) else {}
         operation_code = {
             "METADATA_LOAD": "metadata-import",
             "DATA_LOAD": {
                 "DATA_INTEGRATION": "data-integrations",
                 "PLANNING_IMPORT": "data-import",
-            }.get(str(task_parameters.get("load_method") or "").upper()),
+            }.get(str(task_parameters.get("load_method") or "").upper(), "data-import"),
             "RUN_BUSINESS_RULE": "business-rules",
-        }.get(str(context.get("intent") or "").strip().upper())
+        }.get(intent)
         if operation_code is None:
             return None
         return AgentToolCall(
@@ -896,6 +928,19 @@ class AgentGraphOrchestrator:
             )
             if not has_live_artifact and not recovery.get("enabled"):
                 return None
+        elif task_parameters.get("seed_requested"):
+            # Explicit seeding requests default to discovering current rules.
+            # The selected rule is still reviewed; its name alone cannot
+            # prove that it implements the user's seeding logic.
+            operation_code = "business-rules"
+            try:
+                if not self._gateway.artifact_catalog(operation_code):
+                    return None
+            except Exception as exc:
+                self._logger.warning(
+                    "Forecast Business Rule discovery failed: %s", exc
+                )
+                return None
         else:
             available = self._available_forecast_execution_methods()
             if len(available) != 1:
@@ -958,6 +1003,24 @@ class AgentGraphOrchestrator:
             return None
         if str(context.get("intent") or "").strip().upper() != "FORECAST_SEEDING":
             return None
+        parameters = context.get("parameters")
+        task_parameters = parameters if isinstance(parameters, dict) else {}
+        if task_parameters.get("seed_requested") and str(
+            task_parameters.get("execution_method") or ""
+        ).upper() in {"", "BUSINESS_RULE"}:
+            if "prepare_operation_action" not in state.get("allowed_tool_names", []):
+                return (
+                    "I understand this as forecast seeding, but your current "
+                    "access does not allow me to prepare a Business Rule run. "
+                    "Ask an administrator for the appropriate permission."
+                )
+            return (
+                "I could not load any current Business Rules from the connected "
+                "Planning application for this forecast-seeding request. I "
+                "cannot verify a rule or invent one. Check the rule catalog "
+                "and your access, then try again. If the approved seeding "
+                "logic is a Pipeline or Data Integration, tell me that route."
+            )
         available = self._available_forecast_execution_methods()
         labels = {
             operation_code: label
@@ -1125,11 +1188,19 @@ class AgentGraphOrchestrator:
             "DATA_LOAD": (
                 "scenario",
                 "period",
+                "start_period",
+                "end_period",
                 "year",
                 "file",
                 "file_preference",
             ),
-            "METADATA_LOAD": ("dimension", "file", "file_preference"),
+            "METADATA_LOAD": (
+                "dimension",
+                "requested_member",
+                "parent_member",
+                "file",
+                "file_preference",
+            ),
             "FORECAST_SEEDING": (
                 "cutoff_period",
                 "year",
@@ -1140,13 +1211,22 @@ class AgentGraphOrchestrator:
             key: parameters[key]
             for key in keys
             if str(parameters.get(key) or "").strip()
+            and not (
+                key == "period"
+                and parameters.get("start_period")
+                and parameters.get("end_period")
+            )
         }
         result: dict[str, Any] = {"task_context": summary}
         if operation_code == "data-integrations" and task_intent == "DATA_LOAD":
             prefill = {
                 "year": str(parameters.get("year") or "").strip(),
-                "start_month": str(parameters.get("period") or "").strip(),
-                "end_month": str(parameters.get("period") or "").strip(),
+                "start_month": str(
+                    parameters.get("start_period") or parameters.get("period") or ""
+                ).strip(),
+                "end_month": str(
+                    parameters.get("end_period") or parameters.get("period") or ""
+                ).strip(),
             }
             result["prefill"] = {
                 key: value for key, value in prefill.items() if value
@@ -2641,6 +2721,50 @@ class AgentGraphOrchestrator:
                 )
         return "\n".join(lines)
 
+    def _load_route_artifacts(
+        self,
+        task_intent: str,
+    ) -> tuple[tuple[tuple[str, str], ...], tuple[str, ...]]:
+        """Compare both runnable load catalogs without guessing an artifact type."""
+        operations = (
+            ("data-integrations", "Data Integration"),
+            (
+                "data-import" if task_intent == "DATA_LOAD" else "metadata-import",
+                (
+                    "Saved Import Data job"
+                    if task_intent == "DATA_LOAD"
+                    else "Saved Import Metadata job"
+                ),
+            ),
+        )
+        options: list[tuple[str, str]] = []
+        errors: list[str] = []
+        for operation_code, route_label in operations:
+            try:
+                catalog = self._gateway.artifact_catalog(operation_code)
+            except Exception as exc:
+                self._logger.warning(
+                    "Load option discovery failed for '%s': %s",
+                    operation_code,
+                    exc,
+                )
+                errors.append(operation_code)
+                continue
+            for identifier, display_name in catalog:
+                note = (
+                    " · metadata purpose not verified"
+                    if task_intent == "METADATA_LOAD"
+                    and operation_code == "data-integrations"
+                    else ""
+                )
+                options.append(
+                    (
+                        f"{operation_code}::{identifier}",
+                        f"{route_label} · {display_name}{note}",
+                    )
+                )
+        return tuple(options), tuple(errors)
+
     def _approval_node(self, state: AgentGraphState) -> AgentGraphState:
         if any(
             item.get("name") == "prepare_standalone_flow_action"
@@ -2660,6 +2784,109 @@ class AgentGraphOrchestrator:
                 "The assistant must prepare one governed operation at a time."
             )
         call = calls[0]
+        route_selected = False
+        task_context = state.get("task_context")
+        task_intent = (
+            str(task_context.get("intent") or "").upper()
+            if isinstance(task_context, dict)
+            else ""
+        )
+        if (
+            call.name == "prepare_operation_action"
+            and task_intent in {"DATA_LOAD", "METADATA_LOAD"}
+            and isinstance(task_context, dict)
+            and str(task_context.get("phase") or "").upper()
+            in {"READY_FOR_PLAN", "COLLECTING_INFORMATION"}
+        ):
+            load_options, discovery_errors = self._load_route_artifacts(
+                task_intent
+            )
+            if not load_options:
+                kinds = (
+                    "Data Integrations or saved Import Data jobs"
+                    if task_intent == "DATA_LOAD"
+                    else "Data Integrations or saved Import Metadata jobs"
+                )
+                detail = (
+                    " One or more catalog reads failed; check the Oracle "
+                    "connection and retry."
+                    if discovery_errors else ""
+                )
+                return {
+                    **state,
+                    "load_discovery_blocker": (
+                        f"I could not find any selectable {kinds} in this "
+                        "environment. No operation was prepared."
+                        + detail
+                    ),
+                    "pending_tool_calls": [],
+                    "approval_decision": "reject",
+                }
+            labels = dict(load_options)
+            objective = str(task_context.get("objective") or "").strip()
+            recommendations = recommend_artifacts(objective, load_options)
+            source_label = (
+                "data" if task_intent == "DATA_LOAD" else "metadata"
+            )
+            warning = (
+                " Data Integration purpose is not exposed by this catalog; "
+                "choose one for metadata only if you know its Oracle target."
+                if task_intent == "METADATA_LOAD" else ""
+            )
+            incomplete = (
+                " One catalog could not be read, so the list may be incomplete."
+                if discovery_errors else ""
+            )
+            selection = interrupt(
+                {
+                    "kind": "operation_artifact_selection",
+                    "operation_code": "load-options",
+                    "display_name": f"{source_label} load options",
+                    "prompt": (
+                        f"Choose which {source_label} load to prepare."
+                        + warning
+                        + incomplete
+                    ),
+                    "options": [name for name, _label in load_options],
+                    "option_labels": labels,
+                    "allows_cancel": True,
+                    "recommendations": [
+                        item.as_payload() for item in recommendations
+                    ],
+                    "catalog_recovery": {},
+                    "search_context": objective,
+                }
+            )
+            selected = str(
+                selection.get("value", "")
+                if isinstance(selection, dict)
+                else selection
+            ).strip()
+            if not selected:
+                return {**state, "approval_decision": "reject"}
+            if selected not in labels:
+                raise AgentProviderError(
+                    "The selected load option is no longer available."
+                )
+            selected_operation, _, selected_artifact = selected.partition("::")
+            canonical = self._gateway.resolve_artifact_choice(
+                selected_operation, selected_artifact
+            )
+            if canonical is None:
+                raise AgentProviderError(
+                    "The selected Oracle load is no longer available. "
+                    "Refresh the conversation and try again."
+                )
+            call = AgentToolCall(
+                name=call.name,
+                arguments={
+                    **call.arguments,
+                    "operation_code": selected_operation,
+                    "artifact_name": canonical,
+                },
+                call_id=call.call_id,
+            )
+            route_selected = True
         user_messages = [
             str(item.get("content") or "")
             for item in state.get("messages", [])
@@ -2680,7 +2907,7 @@ class AgentGraphOrchestrator:
             ),
             "",
         )
-        if call.name == "prepare_operation_action":
+        if call.name == "prepare_operation_action" and not route_selected:
             resolved_operation = self._resolve_explicit_operation_intent(
                 latest_user_text,
                 str(call.arguments.get("operation_code") or ""),
@@ -2802,6 +3029,10 @@ class AgentGraphOrchestrator:
             latest_user_text,
             previous_assistant_text,
         ) or confirmed_prior_artifact or task_artifact
+        if route_selected:
+            # The user chose this exact live route; a name inferred from an
+            # earlier message must not replace it during artifact resolution.
+            explicitly_named = requested_artifact
         canonical_requested = explicitly_named or next(
             (
                 item
@@ -2830,14 +3061,17 @@ class AgentGraphOrchestrator:
             "metadata-import",
             "substitution-variables",
         }
+        catalog_choices = tuple(
+            (item, display_names.get(item, item)) for item in choices
+        )
         recommendations = (
-            recommend_artifacts(
-                search_context,
-                tuple(
-                    (item, display_names.get(item, item))
-                    for item in choices
-                ),
-            )
+            recommend_forecast_seeding_rules(catalog_choices)
+            if operation_code == "business-rules"
+            and task_intent == "FORECAST_SEEDING"
+            and isinstance(task_context, dict)
+            and isinstance(task_context.get("parameters"), dict)
+            and task_context["parameters"].get("seed_requested")
+            else recommend_artifacts(search_context, catalog_choices)
             if operation_code in recommendation_codes
             else ()
         )
@@ -2860,7 +3094,7 @@ class AgentGraphOrchestrator:
         if recommended_artifact is not None:
             canonical_requested = recommended_artifact
         user_explicitly_named_artifact = bool(
-            explicitly_named or recommended_artifact
+            explicitly_named or recommended_artifact or route_selected
         )
         if (choices or recovery) and not user_explicitly_named_artifact:
             selection_display_name = {
@@ -2974,6 +3208,29 @@ class AgentGraphOrchestrator:
             if artifact_name
             else None
         )
+        if (
+            guided is not None
+            and task_intent == "METADATA_LOAD"
+            and operation_code == "data-integrations"
+        ):
+            context = dict(guided.get("context") or {})
+            context["export_modes"] = ["Merge"]
+            fields = tuple(
+                {**field, "options": ["Merge"]}
+                if field.get("key") == "export_mode" else field
+                for field in guided.get("fields", ())
+            )
+            guided = {
+                **guided,
+                "description": (
+                    str(guided.get("description") or "")
+                    + " Confirm in Oracle that this integration targets "
+                    "metadata. This catalog does not verify its purpose; "
+                    "metadata loads must use Merge export mode."
+                ),
+                "fields": fields,
+                "context": context,
+            }
         input_source_text = (
             previous_user_text
             if self._is_artifact_confirmation_reply(latest_user_text)
@@ -3044,7 +3301,24 @@ class AgentGraphOrchestrator:
                     "runtime_prompt_mode": "Provide runtime prompt values",
                     "runtime_prompts": prefill,
                 }
-                guided = {**guided, "context": context}
+            else:
+                unnamed_value = self._unnamed_business_rule_rtp_value(
+                    input_source_text
+                )
+                if unnamed_value:
+                    context["prefill"] = {
+                        "runtime_prompt_mode": "Provide runtime prompt values",
+                    }
+                    guided = {
+                        **guided,
+                        "description": (
+                            str(guided.get("description") or "").rstrip()
+                            + f" You mentioned RTP value '{unnamed_value}', but "
+                            "I could not safely identify its prompt. Choose "
+                            "the correct RTP before approval."
+                        ),
+                    }
+            guided = {**guided, "context": context}
         elif guided is not None and operation_code == PIPELINE_SCHEDULE_CREATE:
             context = dict(guided.get("context") or {})
             context["prefill"] = {
@@ -3073,6 +3347,15 @@ class AgentGraphOrchestrator:
             )
             if raw_values is None:
                 return {**state, "approval_decision": "reject"}
+            if (
+                task_intent == "METADATA_LOAD"
+                and operation_code == "data-integrations"
+                and str(raw_values.get("export_mode") or "").casefold()
+                != "merge"
+            ):
+                raise AgentProviderError(
+                    "Metadata Data Integrations must use Merge export mode."
+                )
             input_values = self._gateway.normalize_guided_inputs(
                 str(proposal.get("target_code") or ""),
                 artifact_name,
@@ -3672,16 +3955,22 @@ class AgentGraphOrchestrator:
             return "MONTHLY"
         return "MONTHLY"
 
-    @staticmethod
+    @classmethod
     def _business_rule_rtp_prefill(
+        cls,
         user_text: str,
         definition: dict[str, Any],
     ) -> dict[str, str]:
-        """Extract only values explicitly paired with registered RTP names."""
+        """Prefill only explicit names or one unambiguous registered RTP."""
         text = " ".join(str(user_text or "").strip().split())
         raw_prompts = definition.get("prompts")
-        if not text or not isinstance(raw_prompts, list):
+        if not text:
             return {}
+        if not isinstance(raw_prompts, list):
+            return cls._explicit_unregistered_rtp_pairs(text)
+        rule_name = str(definition.get("rule_name") or "").strip()
+        if rule_name:
+            text = re.sub(re.escape(rule_name), " ", text, flags=re.IGNORECASE)
         result: dict[str, str] = {}
         for raw_prompt in raw_prompts:
             if not isinstance(raw_prompt, dict):
@@ -3698,9 +3987,10 @@ class AgentGraphOrchestrator:
             value: str | None = None
             for alias in sorted(aliases, key=len, reverse=True):
                 match = re.search(
-                    rf"\b{re.escape(alias)}\b\s*(?:=|:|\bis\b|\bto\b)\s*"
+                    rf"\b{re.escape(alias)}\b"
+                    r"(?:\s*(?:=|:)\s*|\s+(?:is|to|of|value)\s+|\s+)"
                     r"(?:\"([^\"]+)\"|'([^']+)'|([^,;]+?))"
-                    r"(?=\s+(?:and|then)\s+|[,;]|$)",
+                    r"(?=\s+(?:and|then|with|for)\s+|[,;]|[.!?]?$)",
                     text,
                     re.IGNORECASE,
                 )
@@ -3710,7 +4000,16 @@ class AgentGraphOrchestrator:
                         None,
                     )
                     break
-            if value is None and any(
+            year_prompts = sum(
+                1
+                for item in raw_prompts
+                if isinstance(item, dict)
+                and any(
+                    str(item.get(key) or "").strip().casefold() == "year"
+                    for key in ("name", "label", "dimension")
+                )
+            )
+            if value is None and year_prompts == 1 and any(
                 alias.casefold() == "year" for alias in aliases
             ):
                 year_match = re.search(r"\bFY\d{2,4}\b", text, re.IGNORECASE)
@@ -3719,6 +4018,52 @@ class AgentGraphOrchestrator:
             normalized_value = str(value or "").strip().strip("\"'").rstrip(".!?")
             if normalized_value and len(normalized_value) <= 500:
                 result[name] = normalized_value
+        if not result:
+            unnamed = cls._unnamed_business_rule_rtp_value(text)
+            visible = [
+                item for item in raw_prompts
+                if isinstance(item, dict)
+                and str(item.get("name") or "").strip()
+                and not item.get("hidden")
+            ]
+            if unnamed and len(visible) == 1:
+                result[str(visible[0]["name"]).strip()] = unnamed
+        return result
+
+    @staticmethod
+    def _unnamed_business_rule_rtp_value(user_text: str) -> str | None:
+        match = re.search(
+            r"\b(?:rtp|runtime\s+prompt)\s*(?:value\s*)?"
+            r"(?:=|:|\bis\b)?\s*"
+            r"(?:\"([^\"]{1,200})\"|'([^']{1,200})'|"
+            r"([A-Za-z0-9][A-Za-z0-9_#.+-]{0,199})"
+            r"(?![A-Za-z0-9_#.+-])(?!\s*[=:]))",
+            user_text,
+            re.IGNORECASE,
+        )
+        if match is None:
+            return None
+        value = next((part for part in match.groups() if part), "").strip().rstrip(".!?")
+        return value if value and value.casefold() not in {"value", "is"} else None
+
+    @staticmethod
+    def _explicit_unregistered_rtp_pairs(user_text: str) -> dict[str, str]:
+        """Use exact user-written name=value pairs when no registry exists."""
+        result: dict[str, str] = {}
+        for match in re.finditer(
+            r"\b([A-Za-z][A-Za-z0-9_]{0,79})\s*[=:]\s*"
+            r"(?:\"([^\"]+)\"|'([^']+)'|([^,;]+?))"
+            r"(?=\s+(?:and|then|with|for)\s+|[,;]|[.!?]?$)",
+            user_text,
+            re.IGNORECASE,
+        ):
+            name = match.group(1).strip()
+            if name.casefold() in {"rtp", "rule", "cube", "file", "application"}:
+                continue
+            value = next((part for part in match.groups()[1:] if part), "")
+            value = value.strip().rstrip(".!?")
+            if value and len(value) <= 500:
+                result[name] = value
         return result
 
     @staticmethod

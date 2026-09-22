@@ -98,6 +98,181 @@ def test_metadata_load_collects_dimension_then_file_preference() -> None:
     assert ready.phase is AgentTaskPhase.READY_FOR_PLAN
 
 
+def test_business_friendly_metadata_request_retains_intent_after_confirmation() -> None:
+    initial = AgentTaskInterpreter.interpret(
+        _messages("Load new product dimensions.")
+    )
+    confirmed = AgentTaskInterpreter.interpret(
+        _messages("Load new product dimensions.", "Yes, prepare.")
+    )
+    ready = AgentTaskInterpreter.interpret(
+        _messages(
+            "Load new product dimensions.",
+            "Yes, prepare.",
+            "Use the latest file.",
+        )
+    )
+
+    for result in (initial, confirmed):
+        assert result.intent is AgentTaskIntent.METADATA_LOAD
+        assert result.parameters["dimension"] == "Product"
+        assert result.phase is AgentTaskPhase.COLLECTING_INFORMATION
+        assert result.missing_parameters == ("file_reference",)
+        assert result.clarification_prompt == (
+            "Which metadata file should I use? You can also say to use "
+            "the latest one."
+        )
+
+    assert ready.intent is AgentTaskIntent.METADATA_LOAD
+    assert ready.parameters["dimension"] == "Product"
+    assert ready.parameters["file_preference"] == "latest"
+    assert ready.phase is AgentTaskPhase.READY_FOR_PLAN
+
+
+@pytest.mark.parametrize(
+    "reply",
+    ("yes prepare", "Yes, prepare.", "Okay, please proceed."),
+)
+def test_confirmation_punctuation_retains_prior_task(reply: str) -> None:
+    result = AgentTaskInterpreter.interpret(
+        _messages("Load new product dimensions.", reply)
+    )
+
+    assert result.intent is AgentTaskIntent.METADATA_LOAD
+    assert result.parameters["dimension"] == "Product"
+    assert result.missing_parameters == ("file_reference",)
+
+
+@pytest.mark.parametrize(
+    ("prompt", "member", "dimension"),
+    (
+        ("Add Orange Juice as a new product", "Orange Juice", "Product"),
+        ("Create a new account called Deferred Revenue", "Deferred Revenue", "Account"),
+        ("Add a new entity named West Region", "West Region", "Entity"),
+    ),
+)
+def test_new_dimension_member_requests_are_recognized_without_a_file(
+    prompt: str,
+    member: str,
+    dimension: str,
+) -> None:
+    result = AgentTaskInterpreter.interpret(_messages(prompt))
+
+    assert result.intent is AgentTaskIntent.METADATA_LOAD
+    assert result.parameters["requested_member"] == member
+    assert result.parameters["dimension"] == dimension
+    assert result.phase is AgentTaskPhase.COLLECTING_INFORMATION
+    assert result.missing_parameters == ("file_reference",)
+    assert "cannot create a single member directly" in str(
+        result.clarification_prompt
+    )
+
+
+def test_member_creation_keeps_context_across_codes_repetition_and_correction() -> None:
+    result = AgentTaskInterpreter.interpret(
+        _messages(
+            "Add Orange Juice as a new product",
+            "Product Dimension",
+            "Add Orange Juice as a new product",
+            "P_TP",
+            "P_TP is the name of a dimension member under Product",
+            "already told you",
+        )
+    )
+
+    assert result.intent is AgentTaskIntent.METADATA_LOAD
+    assert result.objective == "Add Orange Juice as a new product"
+    assert result.parameters["requested_member"] == "Orange Juice"
+    assert result.parameters["dimension"] == "Product"
+    assert result.parameters["parent_member"] == "P_TP"
+    assert result.missing_parameters == ("file_reference",)
+    assert "P_TP" in str(result.clarification_prompt)
+
+
+def test_short_opaque_answer_does_not_reset_an_unfinished_task() -> None:
+    result = AgentTaskInterpreter.interpret(
+        _messages("Add Orange Juice as a new product", "P_TP")
+    )
+
+    assert result.intent is AgentTaskIntent.METADATA_LOAD
+    assert result.parameters["requested_member"] == "Orange Juice"
+    assert result.parameters["possible_parent_member"] == "P_TP"
+    assert result.missing_parameters == ("file_reference",)
+    assert "Is P_TP its parent member?" in str(result.clarification_prompt)
+
+
+def test_user_can_confirm_opaque_parent_before_file_selection() -> None:
+    result = AgentTaskInterpreter.interpret(
+        _messages("Add Orange Juice as a new product", "P_TP", "Yes")
+    )
+
+    assert result.intent is AgentTaskIntent.METADATA_LOAD
+    assert result.parameters["parent_member"] == "P_TP"
+    assert "possible_parent_member" not in result.parameters
+    assert "Which metadata file" in str(result.clarification_prompt)
+
+
+def test_unrelated_plain_language_does_not_reuse_pending_metadata_task() -> None:
+    result = AgentTaskInterpreter.interpret(
+        _messages("Add Orange Juice as a new product", "Tell me about my role")
+    )
+
+    assert result.intent is AgentTaskIntent.UNKNOWN
+    assert result.parameters == {}
+
+
+def test_new_metadata_request_does_not_reuse_prior_tasks_file() -> None:
+    result = AgentTaskInterpreter.interpret(
+        _messages(
+            "Load Account metadata using old_accounts.csv",
+            "Add Orange Juice as a new product",
+        )
+    )
+
+    assert result.intent is AgentTaskIntent.METADATA_LOAD
+    assert result.parameters["requested_member"] == "Orange Juice"
+    assert result.parameters["dimension"] == "Product"
+    assert "file" not in result.parameters
+    assert result.missing_parameters == ("file_reference",)
+
+
+def test_repeated_request_after_another_task_starts_fresh() -> None:
+    result = AgentTaskInterpreter.interpret(
+        _messages(
+            "Add Orange Juice as a new product using old_products.csv",
+            "Run Aggregate Plan rule",
+            "Add Orange Juice as a new product",
+        )
+    )
+
+    assert result.intent is AgentTaskIntent.METADATA_LOAD
+    assert result.parameters["requested_member"] == "Orange Juice"
+    assert "file" not in result.parameters
+    assert result.missing_parameters == ("file_reference",)
+
+
+def test_adding_product_to_a_report_is_not_a_metadata_import() -> None:
+    result = AgentTaskInterpreter.interpret(
+        _messages("Add Product to the variance report")
+    )
+
+    assert result.intent is AgentTaskIntent.VARIANCE_REPORTING
+
+
+def test_member_creation_can_continue_to_file_upload_review() -> None:
+    result = AgentTaskInterpreter.interpret(
+        _messages(
+            "Add Orange Juice as a new product under P_TP",
+            "I'll upload it on the review screen",
+        )
+    )
+
+    assert result.intent is AgentTaskIntent.METADATA_LOAD
+    assert result.parameters["parent_member"] == "P_TP"
+    assert result.parameters["file_preference"] == "upload"
+    assert result.phase is AgentTaskPhase.READY_FOR_PLAN
+
+
 def test_relative_data_load_period_is_explicitly_retained() -> None:
     result = AgentTaskInterpreter.interpret(
         _messages("Load last month's actuals using the latest file."),
@@ -109,9 +284,89 @@ def test_relative_data_load_period_is_explicitly_retained() -> None:
     assert result.parameters["period"] == "Aug"
     assert result.parameters["period_reference"] == "previous_month"
     assert result.parameters["file_preference"] == "latest"
-    assert result.phase is AgentTaskPhase.COLLECTING_INFORMATION
-    assert result.missing_parameters == ("load_method",)
-    assert "Data Integration" in str(result.clarification_prompt)
+    assert result.phase is AgentTaskPhase.READY_FOR_PLAN
+    assert result.missing_parameters == ()
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    (
+        "Calculate product revenue",
+        "Run revenue calculation",
+        "Please recalculate product revenue",
+        "Compute gross margin",
+        "Execute the revenue calc for FY27",
+        "Can you calculate the forecast allocation?",
+    ),
+)
+def test_calculation_actions_route_to_governed_business_rules(
+    prompt: str,
+) -> None:
+    result = AgentTaskInterpreter.interpret(_messages(prompt))
+
+    assert result.intent is AgentTaskIntent.RUN_BUSINESS_RULE
+    assert result.phase is AgentTaskPhase.READY_FOR_PLAN
+    call = AgentGraphOrchestrator._deterministic_task_operation_call(
+        {
+            "task_context": result.to_payload(),
+            "allowed_tool_names": ["prepare_operation_action"],
+        }
+    )
+    assert call is not None
+    assert call.arguments["operation_code"] == "business-rules"
+
+
+def test_question_about_how_to_calculate_does_not_prepare_a_rule() -> None:
+    result = AgentTaskInterpreter.interpret(
+        _messages("How do I calculate product revenue?")
+    )
+
+    assert result.intent is AgentTaskIntent.HELP_EXPLAIN
+
+
+@pytest.mark.parametrize(
+    ("prompt", "start", "end"),
+    (
+        ("Load product units data from Jan to Mar for FY27", "Jan", "Mar"),
+        ("Load Actual data January through March FY27", "Jan", "Mar"),
+        ("Load Actual data Jan-27 to Mar-27 for FY27", "Jan", "Mar"),
+        ("Load Actual data between January and March for FY27", "Jan", "Mar"),
+    ),
+)
+def test_data_load_retains_both_months_of_a_requested_range(
+    prompt: str,
+    start: str,
+    end: str,
+) -> None:
+    result = AgentTaskInterpreter.interpret(_messages(prompt))
+
+    assert result.intent is AgentTaskIntent.DATA_LOAD
+    assert result.parameters["start_period"] == start
+    assert result.parameters["end_period"] == end
+    assert result.parameters["period"] == end
+    assert result.parameters["year"] == "FY27"
+    context = AgentGraphOrchestrator._task_guided_input_context(
+        {"task_context": result.to_payload()},
+        "data-integrations",
+    )
+    assert context["prefill"] == {
+        "year": "FY27",
+        "start_month": start,
+        "end_month": end,
+    }
+
+
+def test_data_load_range_followup_can_correct_one_endpoint() -> None:
+    result = AgentTaskInterpreter.interpret(
+        _messages(
+            "Load Actual data from Jan to Mar for FY27 using Actual.csv",
+            "Change the start month to Feb",
+        )
+    )
+    assert result.intent is AgentTaskIntent.DATA_LOAD
+    assert result.parameters["start_period"] == "Feb"
+    assert result.parameters["end_period"] == "Mar"
+    assert result.parameters["period"] == "Mar"
 
 
 @pytest.mark.parametrize(
@@ -167,7 +422,7 @@ def test_user_period_correction_updates_the_existing_task() -> None:
     assert result.intent is AgentTaskIntent.DATA_LOAD
     assert result.parameters["period"] == "Sep"
     assert result.parameters["file"] == "Actual_Aug.csv"
-    assert result.missing_parameters == ("load_method",)
+    assert result.missing_parameters == ()
 
 
 def test_forecast_seeding_progressively_collects_cutoff_period() -> None:
@@ -182,6 +437,38 @@ def test_forecast_seeding_progressively_collects_cutoff_period() -> None:
     assert "Through which month" in str(initial.clarification_prompt)
     assert ready.parameters["cutoff_period"] == "Aug"
     assert ready.phase is AgentTaskPhase.READY_FOR_PLAN
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    (
+        "Run forecast seeding",
+        "Seed the forecast",
+        "List rules available for forecast seed",
+        "Prepare me a forecast seed rule",
+        "Copy actuals to forecast",
+        "Move plan to forecast",
+    ),
+)
+def test_explicit_forecast_seeding_reaches_live_rule_discovery(
+    prompt: str,
+) -> None:
+    result = AgentTaskInterpreter.interpret(_messages(prompt))
+
+    assert result.intent is AgentTaskIntent.FORECAST_SEEDING
+    assert result.parameters["seed_requested"] is True
+    assert result.phase is AgentTaskPhase.READY_FOR_PLAN
+    assert result.missing_parameters == ()
+
+
+def test_forecast_seeding_retains_context_when_user_requests_another_rule() -> None:
+    result = AgentTaskInterpreter.interpret(
+        _messages("Run forecast seeding", "another rule")
+    )
+
+    assert result.intent is AgentTaskIntent.FORECAST_SEEDING
+    assert result.parameters["seed_requested"] is True
+    assert result.objective == "Run forecast seeding"
 
 
 def test_forecast_seeding_retains_cutoff_when_method_is_selected() -> None:
@@ -372,14 +659,22 @@ def test_exact_saved_metadata_job_keeps_existing_governed_route() -> None:
     assert result.phase is AgentTaskPhase.UNDERSTANDING_REQUEST
 
 
-def test_graph_uses_deterministic_progressive_clarification() -> None:
+def test_graph_discovers_load_routes_before_generic_metadata_inputs() -> None:
     task = AgentTaskInterpreter.interpret(_messages("Update metadata."))
 
     response = AgentGraphOrchestrator._deterministic_task_response(
         {"task_context": task.to_payload()}
     )
+    call = AgentGraphOrchestrator._deterministic_task_operation_call(
+        {
+            "task_context": task.to_payload(),
+            "allowed_tool_names": ["prepare_operation_action"],
+        }
+    )
 
-    assert response == "Sure. Which dimension do you want to update?"
+    assert response is None
+    assert call is not None
+    assert call.arguments["operation_code"] == "metadata-import"
 
 
 def test_ready_metadata_task_enters_existing_governed_preparation() -> None:
