@@ -7,13 +7,17 @@ import json
 import sys
 from collections import Counter
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
 from app.agent.graph import GRAPH_TOOL_NAMES
+from app.agent.context import AgentContextResolver
+from app.agent.entity_resolution import CatalogEntityResolver
 from app.agent.intent import AgentIntentRouter
+from app.agent.models import AgentMessage, AgentMessageRole
 from app.agent.rule_matching import recommend_artifacts
+from app.agent.task_state import AgentTaskInterpreter
 
 
 DEFAULT_SUITE_PATH = Path("evaluations/agent/release_v1.json")
@@ -176,8 +180,14 @@ def _evaluate_case(case: dict[str, Any]) -> AgentEvaluationCaseResult:
         )
     if kind == "intent_route":
         checks, failures, actual = _evaluate_intent_route(case_id, case)
+    elif kind == "task_understanding":
+        checks, failures, actual = _evaluate_task_understanding(case_id, case)
     elif kind == "artifact_ranking":
         checks, failures, actual = _evaluate_artifact_ranking(case_id, case)
+    elif kind == "canonical_context":
+        checks, failures, actual = _evaluate_canonical_context(case_id, case)
+    elif kind == "entity_resolution":
+        checks, failures, actual = _evaluate_entity_resolution(case_id, case)
     else:
         raise AgentEvaluationConfigurationError(
             f"Case {case_id} has unsupported kind: {kind}"
@@ -209,6 +219,12 @@ def _evaluate_intent_route(
         str(case.get("prompt") or ""),
         GRAPH_TOOL_NAMES,
         has_data_review_context=bool(case.get("has_data_review_context", False)),
+        has_execution_context=bool(case.get("has_execution_context", False)),
+        task_intent=str(case.get("task_intent") or "") or None,
+        canonical_capability=(
+            str(case.get("canonical_capability") or "") or None
+        ),
+        action_mode=str(case.get("action_mode") or "") or None,
     )
     actual_tools = frozenset(decision.tool_names)
     expected_intent = str(case.get("expected_intent") or "")
@@ -239,6 +255,96 @@ def _evaluate_intent_route(
     return checks, failures, {
         "intent": decision.intent.value,
         "tools": sorted(actual_tools),
+    }
+
+
+def _evaluate_task_understanding(
+    case_id: str,
+    case: dict[str, Any],
+) -> tuple[list[str], list[str], dict[str, Any]]:
+    """Evaluate deterministic task continuity without an LLM or Oracle."""
+    raw_turns = case.get("turns")
+    if raw_turns is None:
+        raw_turns = [case.get("prompt")]
+    if not isinstance(raw_turns, list) or not raw_turns or any(
+        not isinstance(item, str) or not item.strip() for item in raw_turns
+    ):
+        raise AgentEvaluationConfigurationError(
+            f"Case {case_id} requires a non-empty prompt or turns list."
+        )
+    raw_today = str(case.get("today") or "").strip()
+    try:
+        evaluation_date = date.fromisoformat(raw_today) if raw_today else None
+    except ValueError as exc:
+        raise AgentEvaluationConfigurationError(
+            f"Case {case_id} today must use YYYY-MM-DD."
+        ) from exc
+    messages = tuple(
+        AgentMessage(
+            message_id=index,
+            conversation_id=f"evaluation-{case_id}",
+            role=AgentMessageRole.USER,
+            content=turn,
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        for index, turn in enumerate(raw_turns, start=1)
+    )
+    result = AgentTaskInterpreter.interpret(messages, today=evaluation_date)
+    checks: list[str] = []
+    failures: list[str] = []
+
+    expected_intent = str(case.get("expected_task_intent") or "")
+    if result.intent.value == expected_intent:
+        checks.append(f"task_intent={expected_intent}")
+    else:
+        failures.append(
+            f"Expected task intent {expected_intent}, received {result.intent.value}."
+        )
+
+    expected_phase = str(case.get("expected_phase") or "")
+    if result.phase.value == expected_phase:
+        checks.append(f"task_phase={expected_phase}")
+    else:
+        failures.append(
+            f"Expected task phase {expected_phase}, received {result.phase.value}."
+        )
+
+    expected_parameters = case.get("expected_parameters", {})
+    if not isinstance(expected_parameters, dict):
+        raise AgentEvaluationConfigurationError(
+            f"Case {case_id} expected_parameters must be an object."
+        )
+    mismatched_parameters = {
+        name: {"expected": value, "actual": result.parameters.get(name)}
+        for name, value in expected_parameters.items()
+        if result.parameters.get(name) != value
+    }
+    if mismatched_parameters:
+        failures.append(
+            "Task parameters did not match: "
+            + json.dumps(mismatched_parameters, sort_keys=True)
+            + "."
+        )
+    elif expected_parameters:
+        checks.append("task parameters matched")
+
+    expected_missing = tuple(
+        str(item) for item in case.get("expected_missing_parameters", [])
+    )
+    if result.missing_parameters == expected_missing:
+        checks.append("missing parameters matched")
+    else:
+        failures.append(
+            "Expected missing parameters "
+            f"{list(expected_missing)}, received {list(result.missing_parameters)}."
+        )
+    return checks, failures, {
+        "task_intent": result.intent.value,
+        "phase": result.phase.value,
+        "confidence": result.confidence.value,
+        "parameters": result.parameters,
+        "missing_parameters": list(result.missing_parameters),
+        "clarification_prompt": result.clarification_prompt,
     }
 
 
@@ -292,6 +398,91 @@ def _evaluate_artifact_ranking(
     return checks, failures, {
         "matches": [match.as_payload() for match in matches],
     }
+
+
+def _evaluate_canonical_context(
+    case_id: str,
+    case: dict[str, Any],
+) -> tuple[list[str], list[str], dict[str, Any]]:
+    current = case.get("current")
+    prior = case.get("prior")
+    if not isinstance(current, dict) or (
+        prior is not None and not isinstance(prior, dict)
+    ):
+        raise AgentEvaluationConfigurationError(
+            f"Case {case_id} requires a current object and optional prior object."
+        )
+    result = AgentContextResolver.resolve(current, prior_context=prior)
+    actual = result.model_dump(mode="json")
+    checks: list[str] = []
+    failures: list[str] = []
+    expected_capability = str(case.get("expected_capability") or "")
+    if actual["canonical_capability"] == expected_capability:
+        checks.append(f"canonical_capability={expected_capability}")
+    else:
+        failures.append(
+            "Expected canonical capability "
+            f"{expected_capability}, received {actual['canonical_capability']}."
+        )
+    expected_parameters = case.get("expected_parameters", {})
+    if not isinstance(expected_parameters, dict):
+        raise AgentEvaluationConfigurationError(
+            f"Case {case_id} expected_parameters must be an object."
+        )
+    for name, value in expected_parameters.items():
+        if actual["parameters"].get(name) != value:
+            failures.append(
+                f"Expected parameter {name}={value!r}, received "
+                f"{actual['parameters'].get(name)!r}."
+            )
+    if not failures and expected_parameters:
+        checks.append("canonical parameters matched")
+    return checks, failures, actual
+
+
+def _evaluate_entity_resolution(
+    case_id: str,
+    case: dict[str, Any],
+) -> tuple[list[str], list[str], dict[str, Any]]:
+    raw_artifacts = case.get("artifacts")
+    if not isinstance(raw_artifacts, list):
+        raise AgentEvaluationConfigurationError(
+            f"Case {case_id} requires artifacts."
+        )
+    artifacts = tuple(
+        (str(item[0]), str(item[1]))
+        for item in raw_artifacts
+        if isinstance(item, list) and len(item) == 2
+    )
+    if len(artifacts) != len(raw_artifacts):
+        raise AgentEvaluationConfigurationError(
+            f"Case {case_id} artifacts must contain identifier/display-name pairs."
+        )
+    result = CatalogEntityResolver.resolve(
+        str(case.get("candidate") or ""),
+        artifacts,
+        catalog_available=bool(case.get("catalog_available", True)),
+    )
+    expected_status = str(case.get("expected_status") or "")
+    failures = []
+    checks = []
+    if result.status.value == expected_status:
+        checks.append(f"entity_status={expected_status}")
+    else:
+        failures.append(
+            f"Expected entity status {expected_status}, received "
+            f"{result.status.value}."
+        )
+    expected_canonical = case.get("expected_canonical_name")
+    if expected_canonical is not None:
+        if result.canonical_name == str(expected_canonical):
+            checks.append("canonical entity matched")
+        else:
+            failures.append(
+                f"Expected canonical entity {expected_canonical}, received "
+                f"{result.canonical_name}."
+            )
+    return checks, failures, result.as_payload()
 
 
 def _string_set(

@@ -665,13 +665,15 @@ execution_queue = Table(
     Column("heartbeat_at", UTC_TIMESTAMP),
     Column("completed_at", UTC_TIMESTAMP),
     Column("error_message", Text),
+    Column("cancellation_requested_at", UTC_TIMESTAMP),
+    Column("cancellation_requested_by", String(80)),
     CheckConstraint(
         "job_type IN ('OPERATION', 'PROCESS', 'STANDALONE_FLOW')",
         name="job_type",
     ),
     CheckConstraint(
         "status IN ('QUEUED', 'RUNNING', 'SUCCESS', 'FAILED', "
-        "'RECOVERY_REQUIRED')",
+        "'RECOVERY_REQUIRED', 'CANCELLED')",
         name="status",
     ),
     CheckConstraint("attempt_count >= 0", name="attempt_nonnegative"),
@@ -1321,6 +1323,9 @@ agent_action_decisions = Table(
     Column("failure_summary", Text),
     Column("decided_at", UTC_TIMESTAMP, nullable=False),
     Column("finalized_at", UTC_TIMESTAMP),
+    Column("completion_status", String(30)),
+    Column("completion_message_id", IDENTITY_BIGINT),
+    Column("completion_notified_at", UTC_TIMESTAMP),
     CheckConstraint(
         "decision IN ('APPROVE', 'REJECT')",
         name="decision",
@@ -1329,6 +1334,11 @@ agent_action_decisions = Table(
         "outcome_status IN ('PROCESSING', 'SUBMITTED', 'APPROVED', "
         "'REJECTED', 'FAILED')",
         name="outcome",
+    ),
+    CheckConstraint(
+        "completion_status IS NULL OR completion_status IN "
+        "('SUCCESS', 'FAILED', 'RECOVERY_REQUIRED', 'CANCELLED')",
+        name="completion_status",
     ),
 )
 Index(

@@ -179,6 +179,9 @@ class AgentActionDecision:
     failure_summary: str | None
     decided_at: datetime
     finalized_at: datetime | None
+    completion_status: str | None = None
+    completion_message_id: int | None = None
+    completion_notified_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -62,5 +62,11 @@ outputs/
 
 # Local project documentation and generated document artifacts
 docs/
+!docs/
+docs/*
+!docs/AGENT_EVALUATION.md
+!docs/AGENT_ARCHITECTURE_REVIEW.md
+!docs/DATABASE_ARCHITECTURE.md
+!docs/RELEASE_RUNBOOK.md
 *.docx
 *.pdf

@@ -6,11 +6,13 @@ from unittest.mock import Mock, call
 
 import pytest
 
+from app.application.operations import _data_integration_upload_target
 from app.clients.epm_client import EPMClient
 from app.models.data_integration import DataIntegrationPeriodRange
 from app.models.data_integration import DataIntegrationFileReference
 from app.services.data_integration_service import DataIntegrationService
-from app.utils.exceptions import DataIntegrationError
+from app.utils.exceptions import DataIntegrationError, OperationError
+from app.web.schemas import DataIntegrationRunRequest
 
 
 def three_period_range() -> DataIntegrationPeriodRange:
@@ -45,6 +47,52 @@ def test_existing_file_reference_preserves_oracle_location(
     expected: str,
 ) -> None:
     assert str(DataIntegrationFileReference.from_existing(value)) == expected
+
+
+@pytest.mark.parametrize(
+    ("target", "expected"),
+    [
+        (None, ("latest.csv", None, "#epminbox/latest.csv")),
+        (
+            "Configured.csv",
+            ("Configured.csv", None, "#epminbox/Configured.csv"),
+        ),
+        (
+            "#epminbox/Configured.csv",
+            ("Configured.csv", None, "#epminbox/Configured.csv"),
+        ),
+        (
+            "inbox/monthly/Configured.csv",
+            (
+                "Configured.csv",
+                "inbox/monthly",
+                "inbox/monthly/Configured.csv",
+            ),
+        ),
+    ],
+)
+def test_upload_target_resolves_oracle_location(target, expected) -> None:
+    assert _data_integration_upload_target("latest.csv", target) == expected
+
+
+def test_upload_target_rejects_epminbox_subfolders() -> None:
+    with pytest.raises(OperationError, match="root Applications Inbox"):
+        _data_integration_upload_target(
+            "latest.csv",
+            "#epminbox/monthly/latest.csv",
+        )
+
+
+def test_run_request_normalizes_bare_upload_target() -> None:
+    request = DataIntegrationRunRequest(
+        integration_name="Forecast Load",
+        start_period="Jan#FY27",
+        end_period="Mar#FY27",
+        upload_token="upload-token",
+        upload_target="Configured.csv",
+    )
+
+    assert request.upload_target == "#epminbox/Configured.csv"
 
 
 def test_period_range_builds_oracle_parameter_and_column_periods() -> None:

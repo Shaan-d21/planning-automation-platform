@@ -73,6 +73,9 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
   const messageViewport = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
   const keepConversationAtBottom = useRef(true);
+  const activeConversationRef = useRef<string | null>(null);
+  const sendRequest = useRef<AbortController | null>(null);
+  const conversationLoadSequence = useRef(0);
 
   useEffect(() => {
     let active = true;
@@ -87,6 +90,8 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
       .finally(() => active && setLoading(false));
     return () => { active = false; };
   }, []);
+
+  useEffect(() => () => sendRequest.current?.abort(), []);
 
   useEffect(() => {
     const viewport = messageViewport.current;
@@ -112,8 +117,31 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
     setConversations(response.conversations);
   }
 
+  async function refreshExecutionCompletion() {
+    if (!activeId) return;
+    try {
+      const response = await api.agentMessages(activeId);
+      setMessages(response.messages);
+      setDrafts(response.action_drafts);
+      setApproval(response.approval_request);
+      setClarification(response.clarification_request);
+      setInputRequest(response.input_request);
+      await refreshConversations();
+    } catch (reason) {
+      setError(errorMessage(reason));
+    }
+  }
+
   async function openConversation(conversationId: string) {
+    sendRequest.current?.abort();
+    sendRequest.current = null;
+    setSending(false);
+    setDeciding(null);
+    setSelecting(false);
+    setSavingInputs(false);
+    const loadSequence = ++conversationLoadSequence.current;
     keepConversationAtBottom.current = true;
+    activeConversationRef.current = conversationId;
     setActiveId(conversationId);
     setLoadingMessages(true);
     setError(null);
@@ -122,6 +150,10 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
     setReviewContext(null);
     try {
       const response = await api.agentMessages(conversationId);
+      if (
+        loadSequence !== conversationLoadSequence.current
+        || activeConversationRef.current !== conversationId
+      ) return;
       setMessages(response.messages);
       setDrafts(response.action_drafts);
       setApproval(response.approval_request);
@@ -131,9 +163,15 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
       setApprovedExecution(null);
       setApprovedSchedule(null);
     } catch (reason) {
-      setError(errorMessage(reason));
+      if (
+        loadSequence === conversationLoadSequence.current
+        && activeConversationRef.current === conversationId
+      ) setError(errorMessage(reason));
     } finally {
-      setLoadingMessages(false);
+      if (
+        loadSequence === conversationLoadSequence.current
+        && activeConversationRef.current === conversationId
+      ) setLoadingMessages(false);
     }
   }
 
@@ -143,6 +181,13 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
     try {
       const response = await api.createAgentConversation(csrfToken);
       setConversations((current) => [response.conversation, ...current]);
+      sendRequest.current?.abort();
+      sendRequest.current = null;
+      setSending(false);
+      setDeciding(null);
+      setSelecting(false);
+      setSavingInputs(false);
+      activeConversationRef.current = response.conversation.conversation_id;
       setActiveId(response.conversation.conversation_id);
       setMessages([]);
       setDrafts([]);
@@ -173,6 +218,7 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
       setConversations(remaining);
       if (remaining.length) await openConversation(remaining[0].conversation_id);
       else {
+        activeConversationRef.current = null;
         setActiveId(null);
         setMessages([]);
         setDrafts([]);
@@ -218,11 +264,22 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
     };
     setMessages((current) => [...current, optimistic]);
     setContent("");
+    const controller = new AbortController();
+    sendRequest.current = controller;
     try {
-      const response = await api.sendAgentMessage(conversationId, prompt, csrfToken);
+      const response = await api.sendAgentMessage(
+        conversationId,
+        prompt,
+        csrfToken,
+        controller.signal
+      );
+      if (
+        controller.signal.aborted
+        || activeConversationRef.current !== conversationId
+      ) return;
       setMessages((current) => [...current, response.message]);
       rememberReviewActivity(response.message, response.tool_activity);
-      if (response.tool_activity.some((item) => ["review_data_slice", "review_saved_data_view", "compare_data_slices"].includes(item.name) && item.status === "SUCCESS")) setReviewContext(null);
+      if (response.tool_activity.some((item) => ["review_data_slice", "review_saved_data_view", "review_saved_variance", "compare_data_slices"].includes(item.name) && item.status === "SUCCESS")) setReviewContext(null);
       setDrafts((current) => [...current, ...response.action_drafts]);
       setApproval(response.approval_request);
       setClarification(response.clarification_request);
@@ -230,6 +287,8 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
       setToolActivity(response.tool_activity);
       await refreshConversations();
     } catch (reason) {
+      if (controller.signal.aborted || isAbortError(reason)) return;
+      if (activeConversationRef.current !== conversationId) return;
       setError(errorMessage(reason));
       const response = await api.agentMessages(conversationId).catch(() => null);
       if (response) {
@@ -240,23 +299,30 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
         setInputRequest(response.input_request);
       }
     } finally {
-      setSending(false);
+      if (sendRequest.current === controller) {
+        sendRequest.current = null;
+        setSending(false);
+      }
     }
   }
 
   async function resolveApproval(decision: "approve" | "reject") {
     if (!activeId || !approval || deciding) return;
+    const conversationId = activeId;
+    const pendingApproval = approval;
     setApprovedExecution(null);
     setApprovedSchedule(null);
     setDeciding(decision);
     setError(null);
+    if (decision === "reject") setApproval(null);
     try {
       const response = await api.resolveAgentApproval(
-        activeId,
-        approval.request_id,
+        conversationId,
+        pendingApproval.request_id,
         decision,
         csrfToken
       );
+      if (activeConversationRef.current !== conversationId) return;
       setMessages((current) => [...current, response.message]);
       rememberReviewActivity(response.message, response.tool_activity);
       setDrafts((current) => [...current, ...response.action_drafts]);
@@ -268,8 +334,9 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
       setApprovedSchedule(response.schedule ?? null);
       await refreshConversations();
     } catch (reason) {
+      if (activeConversationRef.current !== conversationId) return;
       setError(errorMessage(reason));
-      const response = await api.agentMessages(activeId).catch(() => null);
+      const response = await api.agentMessages(conversationId).catch(() => null);
       if (response) {
         setMessages(response.messages);
         setDrafts(response.action_drafts);
@@ -284,16 +351,20 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
 
   async function resolveClarification(value: string | null) {
     if (!activeId || !clarification || selecting) return;
+    const conversationId = activeId;
+    const pendingClarification = clarification;
     setApprovedExecution(null);
     setSelecting(true);
     setError(null);
+    if (value === null) setClarification(null);
     try {
       const response = await api.resolveAgentClarification(
-        activeId,
-        clarification.request_id,
+        conversationId,
+        pendingClarification.request_id,
         value,
         csrfToken
       );
+      if (activeConversationRef.current !== conversationId) return;
       setMessages((current) => [...current, response.message]);
       rememberReviewActivity(response.message, response.tool_activity);
       setDrafts((current) => [...current, ...response.action_drafts]);
@@ -303,8 +374,9 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
       setInputRequest(response.input_request);
       await refreshConversations();
     } catch (reason) {
+      if (activeConversationRef.current !== conversationId) return;
       setError(errorMessage(reason));
-      const response = await api.agentMessages(activeId).catch(() => null);
+      const response = await api.agentMessages(conversationId).catch(() => null);
       if (response) {
         setMessages(response.messages);
         setDrafts(response.action_drafts);
@@ -369,16 +441,20 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
 
   async function resolveInput(values: Record<string, unknown> | null) {
     if (!activeId || !inputRequest || savingInputs) return;
+    const conversationId = activeId;
+    const pendingInput = inputRequest;
     setApprovedExecution(null);
     setSavingInputs(true);
     setError(null);
+    if (values === null) setInputRequest(null);
     try {
       const response = await api.resolveAgentInput(
-        activeId,
-        inputRequest.request_id,
+        conversationId,
+        pendingInput.request_id,
         values,
         csrfToken
       );
+      if (activeConversationRef.current !== conversationId) return;
       setMessages((current) => [...current, response.message]);
       rememberReviewActivity(response.message, response.tool_activity);
       setDrafts((current) => [...current, ...response.action_drafts]);
@@ -388,8 +464,9 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
       setInputRequest(response.input_request);
       await refreshConversations();
     } catch (reason) {
+      if (activeConversationRef.current !== conversationId) return;
       setError(errorMessage(reason));
-      const response = await api.agentMessages(activeId).catch(() => null);
+      const response = await api.agentMessages(conversationId).catch(() => null);
       if (response) {
         setMessages(response.messages);
         setDrafts(response.action_drafts);
@@ -426,7 +503,9 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
         "list_cube_dimensions",
         "search_dimension_members",
         "list_data_explorer_views",
+        "list_variance_views",
         "review_saved_data_view",
+        "review_saved_variance",
         "review_data_slice",
         "compare_data_slices",
         "plan_multi_step_request"
@@ -473,7 +552,7 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
           {clarification && <ClarificationCard clarification={clarification} busy={selecting} onSubmit={resolveClarification} onSynchronize={synchronizeClarificationArtifacts} onRegister={registerClarificationArtifact} />}
           {inputRequest && <GuidedInputCard request={inputRequest} busy={savingInputs} csrfToken={csrfToken} onSubmit={resolveInput} />}
           {approval && <ApprovalCard approval={approval} deciding={deciding} onDecision={resolveApproval} />}
-          {approvedExecution && <AgentExecutionCard approved={approvedExecution} csrfToken={csrfToken} onRecoveryStarted={setApprovedExecution} onDismiss={() => setApprovedExecution(null)} />}
+          {approvedExecution && <AgentExecutionCard approved={approvedExecution} csrfToken={csrfToken} onRecoveryStarted={setApprovedExecution} onTerminal={refreshExecutionCompletion} onDismiss={() => setApprovedExecution(null)} />}
           {approvedSchedule && <AgentScheduleResultCard schedule={approvedSchedule} onDismiss={() => setApprovedSchedule(null)} />}
           {sending && <article className="assistant-message assistant-message--assistant is-thinking"><span className="assistant-avatar"><Icon name="assistant" /></span><div><span className="eyebrow">EPM Assistant</span><p><span className="spinner" /> Inspecting the permitted platform context…</p></div></article>}
           <div ref={messageEnd} />
@@ -524,6 +603,11 @@ interface AgentSavedViewsResult {
     row_dimensions: string[];
     column_dimensions: string[];
   }>;
+  purpose?: "variance";
+  comparison?: string;
+  period?: string;
+  year?: string;
+  threshold?: number;
 }
 
 interface AgentComparisonResult {
@@ -538,6 +622,14 @@ interface AgentComparisonResult {
     matched_cells: number;
     mismatches: DataComparisonMismatch[];
     tolerance: number | string;
+  };
+  saved_view?: { name: string; title: string };
+  variance_context?: {
+    comparison: string;
+    period: string;
+    year?: string;
+    threshold: number;
+    pov_overrides?: Record<string, string>;
   };
 }
 
@@ -560,7 +652,7 @@ function AgentDataReviewCard({ activity, csrfToken, onPrompt, onPrepare, busy }:
   if (activity.name === "review_saved_data_view" && activity.status === "FAILED") {
     return <AgentSavedViewFailureCard activity={activity} onPrompt={onPrompt} />;
   }
-  if (activity.name === "list_data_explorer_views" && isAgentSavedViews(activity.result)) {
+  if (["list_data_explorer_views", "list_variance_views"].includes(activity.name) && isAgentSavedViews(activity.result)) {
     return <AgentSavedViewChoiceCard result={activity.result} busy={busy} onSelect={onPrepare} />;
   }
   if (["list_planning_cubes", "list_cube_dimensions", "search_dimension_members"].includes(activity.name) && activity.result) {
@@ -569,8 +661,8 @@ function AgentDataReviewCard({ activity, csrfToken, onPrompt, onPrepare, busy }:
   if (["review_data_slice", "review_saved_data_view"].includes(activity.name) && isAgentGridReview(activity.result)) {
     return <AgentGridReviewCard review={activity.result} csrfToken={csrfToken} onPrompt={onPrompt} />;
   }
-  if (activity.name === "compare_data_slices" && isAgentComparison(activity.result)) {
-    return <AgentComparisonCard comparison={activity.result} csrfToken={csrfToken} onPrompt={onPrompt} />;
+  if (["compare_data_slices", "review_saved_variance"].includes(activity.name) && isAgentComparison(activity.result)) {
+    return <AgentComparisonCard comparison={activity.result} csrfToken={csrfToken} onPrompt={onPrompt} onRefine={onPrepare} busy={busy} />;
   }
   return null;
 }
@@ -583,10 +675,12 @@ function AgentSavedViewChoiceCard({ result, busy, onSelect }: {
   function openDataExplorer() {
     window.location.hash = "#data-review";
   }
+  const variance = result.purpose === "variance";
+  const varianceLabel = [result.comparison, result.period, result.year].filter(Boolean).join(" · ");
 
   return <article className="assistant-data-choice assistant-saved-views" aria-label="Saved Data Explorer views">
-    <header><span className="assistant-guided-input__icon"><Icon name="reports" /></span><div><span className="eyebrow">Reusable live layouts</span><h3>{result.views.length ? "Choose a saved Data Explorer view" : "No saved views yet"}</h3><p>{result.views.length ? "Each choice reuses its validated layout and retrieves current values from Oracle. No financial values are stored in the view." : "Start a fresh layout in Data Explorer, then save it if you want to reuse the same intersection later."}</p></div></header>
-    {result.views.length > 0 && <div className="assistant-data-choice__options">{result.views.map((view) => <button type="button" disabled={busy} onClick={() => onSelect(`Use saved Data Explorer view ${view.name} and load its current Oracle data.`)} key={view.name}><Icon name="reports" /><span><strong>{view.title || view.name}</strong><small>{view.cube} · Rows: {view.row_dimensions.join(", ")} · Columns: {view.column_dimensions.join(", ")}</small></span><Icon name="arrow" /></button>)}</div>}
+    <header><span className="assistant-guided-input__icon"><Icon name="reports" /></span><div><span className="eyebrow">{variance ? "Validated variance scope" : "Reusable live layouts"}</span><h3>{result.views.length ? variance ? "Choose the layout to analyze" : "Choose a saved Data Explorer view" : "No saved views yet"}</h3><p>{result.views.length ? variance ? `The selected layout controls accounts, entities, and other scope. I will compare ${varianceLabel || "the requested scenarios"} using current Oracle values.` : "Each choice reuses its validated layout and retrieves current values from Oracle. No financial values are stored in the view." : "Start a fresh layout in Data Explorer, then save it if you want to reuse the same intersection later."}</p></div></header>
+    {result.views.length > 0 && <div className="assistant-data-choice__options">{result.views.map((view) => <button type="button" disabled={busy} onClick={() => onSelect(variance ? `Use saved Data Explorer view \`${view.name}\` for the variance review.` : `Use saved Data Explorer view ${view.name} and load its current Oracle data.`)} key={view.name}><Icon name="reports" /><span><strong>{view.title || view.name}</strong><small>{view.cube} · Rows: {view.row_dimensions.join(", ")} · Columns: {view.column_dimensions.join(", ")}</small></span><Icon name="arrow" /></button>)}</div>}
     {result.truncated && <p className="assistant-data-review__notice"><Icon name="alert" /> Showing {result.count} of {result.total_count} saved views. Open Data Explorer to search the complete list.</p>}
     <footer><button type="button" className="button button--secondary" onClick={openDataExplorer}>{result.views.length ? "Start a fresh view" : "Open Data Explorer"} <Icon name="arrow" /></button></footer>
   </article>;
@@ -663,8 +757,8 @@ function AgentMultiStepPlanCard({ plan, busy, onPrepare }: {
       <section className="assistant-multi-plan__pipeline"><header><div><span className="eyebrow">Live Oracle definition</span><h4>{pipeline.display_name} <small>{pipeline.code}</small></h4></div><span>{Math.round(plan.confidence * 100)}% match</span></header><div>{pipeline.stages.length ? pipeline.stages.map((stage, index) => <div key={`${stage.name}-${index}`}><span>{index + 1}</span><div><strong>{stage.display_name}</strong><small>{stage.job_count} configured job{stage.job_count === 1 ? "" : "s"}{stage.runs_in_parallel ? " · Parallel" : ""}</small></div></div>) : <p>Oracle returned no visible stage labels. The governed preflight will verify the definition again.</p>}</div></section>
       <div className="assistant-multi-plan__facts"><span><small>Runtime variables</small><strong>{pipeline.variables.length}</strong></span><span><small>File requirements</small><strong>{pipeline.file_requirements.length}</strong></span><span><small>Registered candidates checked</small><strong>{plan.candidate_count}</strong></span></div>
       <p className="assistant-multi-plan__guard"><Icon name="check" /> Oracle owns these stages. The platform will not recreate or execute them individually.</p>
-    </> : <p className="assistant-multi-plan__guard is-warning"><Icon name="alert" /> Nothing can run from this plan. Configure the lifecycle in Oracle Pipeline, or identify its exact registered Pipeline code.</p>}
-    <footer>{pipeline ? <><button type="button" className="button button--secondary" disabled={busy} onClick={() => onPrepare(standalonePrompt)}>Configure standalone flow</button><button type="button" className="button button--primary" disabled={busy} onClick={() => onPrepare(preparationPrompt)}>{busy ? <><span className="spinner" /> Preparing…</> : <>Review Pipeline inputs <Icon name="arrow" /></>}</button></> : standaloneDraft ? <button type="button" className="button button--primary" disabled={busy} onClick={() => onPrepare(standalonePrompt)}>{busy ? <><span className="spinner" /> Configuring…</> : <>Configure flow inputs <Icon name="arrow" /></>}</button> : <><button type="button" className="button button--secondary" disabled={busy} onClick={() => onPrepare(standalonePrompt)}>Configure standalone flow</button><button type="button" className="button button--quiet" disabled={busy} onClick={() => onPrepare(preparationPrompt)}>Review registered Pipelines</button></>}</footer>
+    </> : <p className="assistant-multi-plan__guard is-warning"><Icon name="alert" /> No complete Oracle Pipeline match was proven. Review registered Pipelines, or explicitly continue with a governed standalone flow whose steps will be configured and approved individually.</p>}
+    <footer>{pipeline ? <><button type="button" className="button button--secondary" disabled={busy} onClick={() => onPrepare(standalonePrompt)}>Use standalone flow</button><button type="button" className="button button--primary" disabled={busy} onClick={() => onPrepare(preparationPrompt)}>{busy ? <><span className="spinner" /> Preparing…</> : <>Review Pipeline inputs <Icon name="arrow" /></>}</button></> : standaloneDraft ? <button type="button" className="button button--primary" disabled={busy} onClick={() => onPrepare(standalonePrompt)}>{busy ? <><span className="spinner" /> Configuring…</> : <>Configure flow inputs <Icon name="arrow" /></>}</button> : <><button type="button" className="button button--secondary" disabled={busy} onClick={() => onPrepare(standalonePrompt)}>Continue with standalone flow</button><button type="button" className="button button--quiet" disabled={busy} onClick={() => onPrepare(preparationPrompt)}>Review registered Pipelines</button></>}</footer>
   </article>;
 }
 
@@ -860,15 +954,43 @@ function AgentGridReviewCard({ review, csrfToken, onPrompt }: {
   </article>;
 }
 
-function AgentComparisonCard({ comparison, csrfToken, onPrompt }: {
+function AgentComparisonCard({ comparison, csrfToken, onPrompt, onRefine, busy }: {
   comparison: AgentComparisonResult;
   csrfToken: string;
   onPrompt: (prompt: string) => void;
+  onRefine: (prompt: string) => void;
+  busy: boolean;
 }) {
   const [exporting, setExporting] = useState(false);
+  const [refining, setRefining] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const mismatches = comparison.result.mismatches ?? [];
   const mismatchCount = Math.max(0, comparison.result.compared_cells - comparison.result.matched_cells);
+  const variance = comparison.variance_context;
+  const sourcePov = comparison.source_request.pov ?? {};
+  const targetPov = comparison.target_request.pov ?? {};
+  const povDimensions = Array.from(new Set([...Object.keys(sourcePov), ...Object.keys(targetPov)]));
+  const editableDimensions = povDimensions.filter((dimension) => !["scenario", "period", "year"].includes(dimension.toLowerCase()) && sourcePov[dimension] === targetPov[dimension]);
+  const [povValues, setPovValues] = useState<Record<string, string>>(() => Object.fromEntries(editableDimensions.map((dimension) => [dimension, sourcePov[dimension] ?? ""])));
+
+  function applyRefinement() {
+    if (!variance || !comparison.saved_view?.name) {
+      onPrompt("Refine the previous source-target comparison by changing ");
+      return;
+    }
+    const invalid = editableDimensions.find((dimension) => !String(povValues[dimension] ?? "").trim() || String(povValues[dimension]).includes("`"));
+    if (invalid) {
+      setError(`Enter a valid member for ${invalid}. Backticks are not supported in this refinement form.`);
+      return;
+    }
+    const overrides = editableDimensions.map((dimension) => `${dimension}=\`${String(povValues[dimension]).trim()}\``).join("; ");
+    if (!overrides) {
+      setError("This saved layout has no editable common POV dimensions. Change its layout in Data Explorer first.");
+      return;
+    }
+    setError(null);
+    onRefine(`Refine variance comparison using saved Data Explorer view \`${comparison.saved_view.name}\`. Keep ${variance.comparison} for ${variance.period}${variance.year ? ` ${variance.year}` : ""} with threshold ${variance.threshold}. POV overrides: ${overrides}.`);
+  }
 
   async function exportExcel() {
     setExporting(true);
@@ -881,7 +1003,7 @@ function AgentComparisonCard({ comparison, csrfToken, onPrompt }: {
         max_mismatches: Math.min(500, Math.max(100, mismatches.length)),
         include_cells: false
       }, csrfToken);
-      downloadAgentBlob(blob, `${safeAgentFilename(comparison.source_cube)}-to-${safeAgentFilename(comparison.target_cube)}.xlsx`);
+      downloadAgentBlob(blob, variance ? `${safeAgentFilename(variance.comparison)}-${safeAgentFilename(variance.period)}-variance.xlsx` : `${safeAgentFilename(comparison.source_cube)}-to-${safeAgentFilename(comparison.target_cube)}.xlsx`);
     } catch (reason) {
       setError(errorMessage(reason));
     } finally {
@@ -890,11 +1012,13 @@ function AgentComparisonCard({ comparison, csrfToken, onPrompt }: {
   }
 
   return <article className="assistant-data-review assistant-data-comparison" aria-label="Planning source target comparison">
-    <header><div><span className="eyebrow">Live reconciliation</span><h3>{comparison.source_cube} compared with {comparison.target_cube}</h3><p>Source and target were read from Oracle using the reviewed intersections.</p></div><span className={`assistant-comparison-status${mismatchCount ? " has-warning" : " is-match"}`}>{mismatchCount ? "Review required" : "All matched"}</span></header>
+    <header><div><span className="eyebrow">{variance ? "Live variance analysis" : "Live reconciliation"}</span><h3>{variance ? `${variance.comparison} · ${variance.period}${variance.year ? ` · ${variance.year}` : ""}` : `${comparison.source_cube} compared with ${comparison.target_cube}`}</h3><p>{variance ? `Current Oracle values were compared using the saved ${comparison.saved_view?.title || comparison.saved_view?.name || "Data Explorer"} layout. Differences at or below ${formatAgentValue(variance.threshold)} are treated as matching.` : "Source and target were read from Oracle using the reviewed intersections."}</p></div><span className={`assistant-comparison-status${mismatchCount ? " has-warning" : " is-match"}`}>{mismatchCount ? "Review required" : "All matched"}</span></header>
+    {povDimensions.length > 0 && <section className="assistant-comparison-pov" aria-label="Comparison POV"><div className="assistant-comparison-pov__heading"><div><strong>Comparison POV</strong><p>These members define the current source and target intersection.</p></div>{variance && comparison.saved_view && <button type="button" className="button button--secondary" disabled={busy} onClick={() => setRefining((value) => !value)}>{refining ? "Close refinement" : "Change POV"}</button>}</div><div className="assistant-comparison-pov__table"><span className="is-heading">Dimension</span><span className="is-heading">Source</span><span className="is-heading">Target</span>{povDimensions.map((dimension) => <Fragment key={dimension}><strong>{dimension}</strong><span>{sourcePov[dimension] || "—"}</span><span>{targetPov[dimension] || "—"}</span></Fragment>)}</div></section>}
+    {refining && variance && comparison.saved_view && <section className="assistant-comparison-refine" aria-label="Refine comparison POV"><header><strong>Change common POV members</strong><p>Scenario, period, and year remain controlled by the comparison above.</p></header>{editableDimensions.length ? <div className="assistant-comparison-refine__fields">{editableDimensions.map((dimension) => <label key={dimension}><span>{dimension}</span><input aria-label={`POV ${dimension}`} value={povValues[dimension] ?? ""} disabled={busy} onChange={(event) => setPovValues((current) => ({ ...current, [dimension]: event.target.value }))} /></label>)}</div> : <p className="assistant-data-review__notice"><Icon name="alert" /> This layout has no additional common POV dimensions to edit.</p>}<footer><button type="button" className="button button--secondary" disabled={busy} onClick={() => setRefining(false)}>Cancel</button><button type="button" className="button button--primary" disabled={busy || !editableDimensions.length} onClick={applyRefinement}>{busy ? "Applying..." : "Apply refinement"}</button></footer></section>}
     <div className="assistant-data-review__metrics"><span><small>Compared</small><strong>{comparison.result.compared_cells.toLocaleString()}</strong></span><span><small>Matched</small><strong>{comparison.result.matched_cells.toLocaleString()}</strong></span><span className={mismatchCount ? "has-warning" : ""}><small>Different</small><strong>{mismatchCount.toLocaleString()}</strong></span><span><small>Tolerance</small><strong>{formatAgentValue(comparison.result.tolerance)}</strong></span></div>
     {mismatches.length ? <div className="assistant-data-review__table"><table><thead><tr><th>Row intersection</th><th>Column intersection</th><th>Source</th><th>Target</th><th>Difference</th></tr></thead><tbody>{mismatches.slice(0, 100).map((item, index) => <tr key={`${item.row_headers.join("|")}-${item.column_headers.join("|")}-${index}`}><th>{item.row_headers.join(" · ")}</th><th>{item.column_headers.join(" · ")}</th><td>{formatAgentValue(item.source_value)}</td><td>{formatAgentValue(item.target_value)}</td><td className="is-difference">{formatAgentValue(item.difference)}</td></tr>)}</tbody></table></div> : <div className="assistant-data-review__matched"><Icon name="check" /><div><strong>No differences found</strong><p>Every compared cell matched within the selected tolerance.</p></div></div>}
     {error && <div className="assistant-draft__error"><Icon name="alert" />{error}</div>}
-    <footer><button type="button" className="button button--secondary" onClick={() => onPrompt("Refine the previous source-target comparison by changing ")}>Refine comparison</button><button type="button" className="button button--primary" disabled={exporting} onClick={() => void exportExcel()}>{exporting ? <><span className="spinner" /> Creating Excel...</> : <><Icon name="reports" /> Export comparison</>}</button></footer>
+    <footer><button type="button" className="button button--secondary" disabled={busy} onClick={() => variance && comparison.saved_view ? setRefining(true) : onPrompt("Refine the previous source-target comparison by changing ")}>Refine comparison</button><button type="button" className="button button--primary" disabled={exporting} onClick={() => void exportExcel()}>{exporting ? <><span className="spinner" /> Creating Excel...</> : <><Icon name="reports" /> Export comparison</>}</button></footer>
   </article>;
 }
 
@@ -929,10 +1053,11 @@ function ClarificationCard({ clarification, busy, onSubmit, onSynchronize, onReg
   const visibleOptions = selected && currentOptions.has(selected) && !matchingOptions.includes(selected)
     ? [selected, ...matchingOptions]
     : matchingOptions;
+  const loadChoice = clarification.operation_code === "load-options";
   return <article className="assistant-clarification" aria-label="Choose an Oracle artifact">
-    <header><span className="assistant-clarification__icon"><Icon name="assistant" /></span><div><span className="eyebrow">One choice needed</span><h3>{recommendations.length ? "Matches found for your task" : recovery && !clarification.options.length ? "No registered match was found" : clarification.prompt}</h3><p>{recommendations.length ? `I compared your request with ${clarification.options.length} current Oracle ${clarification.display_name}. Select a recommendation or choose from the complete list.` : recovery && !clarification.options.length ? "Synchronize the current environment or register an exact Oracle identifier to continue." : "These options were retrieved for the connected Planning application."}</p></div></header>
-    {recommendations.length > 0 && <section className="assistant-rule-matches" aria-label={`Recommended ${clarification.display_name}`}><div className="assistant-rule-matches__heading"><strong>Recommended matches</strong><small>Suggestions are based on matching words in your task and Oracle artifact names.</small></div><div>{recommendations.map((item) => <button type="button" className={selected === item.name ? "is-selected" : ""} disabled={busy} onClick={() => { setSearch(""); setSelected(item.name); }} key={item.name}><span><strong>{item.display_name || optionLabels[item.name] || item.name}</strong>{(item.display_name || optionLabels[item.name]) && (item.display_name || optionLabels[item.name]) !== item.name && <em className="artifact-code">{item.name}</em>}<small>{item.reason}</small></span><em className={item.confidence === "Strong match" ? "is-strong" : "is-possible"}>{item.confidence}</em></button>)}</div></section>}
-    {clarification.options.length > 0 && <section className="assistant-all-artifacts"><div><strong>Current registered {clarification.display_name}</strong><small>Only artifacts valid for the connected Planning environment are shown.</small></div>{clarification.options.length > 12 && <label><span>Search artifacts</span><input type="search" value={search} disabled={busy} onChange={(event) => setSearch(event.target.value)} placeholder={`Search current ${clarification.display_name}`} /></label>}<label><span>{clarification.display_name} artifact</span><select aria-label={`${clarification.display_name} artifact`} value={selected} disabled={busy} onChange={(event) => setSelected(event.target.value)}><option value="">Select from {visibleOptions.length} available option{visibleOptions.length === 1 ? "" : "s"}</option>{visibleOptions.map((option) => <option value={option} key={option}>{optionLabels[option] && optionLabels[option] !== option ? `${optionLabels[option]} · ${option}` : option}</option>)}</select></label></section>}
+    <header><span className="assistant-clarification__icon"><Icon name="assistant" /></span><div><span className="eyebrow">One choice needed</span><h3>{loadChoice ? "Choose a load route" : recommendations.length ? "Matches found for your task" : recovery && !clarification.options.length ? "No registered match was found" : clarification.prompt}</h3><p>{loadChoice ? clarification.prompt : recommendations.length ? `I compared your request with ${clarification.options.length} current Oracle ${clarification.display_name}. Select a recommendation or choose from the complete list.` : recovery && !clarification.options.length ? "Synchronize the current environment or register an exact Oracle identifier to continue." : "These options were retrieved for the connected Planning application."}</p></div></header>
+    {recommendations.length > 0 && <section className="assistant-rule-matches" aria-label={`Recommended ${clarification.display_name}`}><div className="assistant-rule-matches__heading"><strong>Recommended matches</strong><small>Suggestions are based on matching words in your task and Oracle artifact names.</small></div><div>{recommendations.map((item) => <button type="button" className={selected === item.name ? "is-selected" : ""} disabled={busy} onClick={() => { setSearch(""); setSelected(item.name); }} key={item.name}><span><strong>{item.display_name || optionLabels[item.name] || item.name}</strong>{!loadChoice && (item.display_name || optionLabels[item.name]) && (item.display_name || optionLabels[item.name]) !== item.name && <em className="artifact-code">{item.name}</em>}<small>{item.reason}</small></span><em className={item.confidence === "Strong match" ? "is-strong" : "is-possible"}>{item.confidence}</em></button>)}</div></section>}
+    {clarification.options.length > 0 && <section className="assistant-all-artifacts"><div><strong>Current registered {clarification.display_name}</strong><small>Only artifacts valid for the connected Planning environment are shown.</small></div>{clarification.options.length > 12 && <label><span>Search artifacts</span><input type="search" value={search} disabled={busy} onChange={(event) => setSearch(event.target.value)} placeholder={`Search current ${clarification.display_name}`} /></label>}<label><span>{loadChoice ? "Load route and artifact" : `${clarification.display_name} artifact`}</span><select aria-label={loadChoice ? "Load route and artifact" : `${clarification.display_name} artifact`} value={selected} disabled={busy} onChange={(event) => setSelected(event.target.value)}><option value="">Select from {visibleOptions.length} available option{visibleOptions.length === 1 ? "" : "s"}</option>{visibleOptions.map((option) => <option value={option} key={option}>{loadChoice ? optionLabels[option] || option : optionLabels[option] && optionLabels[option] !== option ? `${optionLabels[option]} · ${option}` : option}</option>)}</select></label></section>}
     {recovery && <section className="assistant-catalog-recovery">
       <div className="assistant-catalog-recovery__heading"><div><strong>Can't find the right artifact?</strong><small>First synchronize what Oracle can safely expose. If it is still missing, use its exact identifier.</small></div>{recovery.can_manage !== false && <button type="button" className="button button--secondary" disabled={busy} onClick={async () => setSynchronized(await onSynchronize())}>{busy ? <span className="spinner" /> : <Icon name="refresh" />} Synchronize with Oracle</button>}</div>
       {synchronized && <p className="assistant-catalog-recovery__success"><Icon name="check" /> Catalog synchronized. Review the refreshed matches and list above.</p>}
@@ -1036,8 +1161,9 @@ function DataImportGuidedInputCard({ request, busy, csrfToken, onSubmit }: {
   csrfToken: string;
   onSubmit: (values: Record<string, unknown> | null) => Promise<void>;
 }) {
-  const context = request.context as { allowed_extensions?: string[] };
+  const context = request.context as { allowed_extensions?: string[]; task_context?: Record<string, string> };
   const extensions = context.allowed_extensions ?? [".csv", ".txt", ".zip"];
+  const taskSummary = Object.values(context.task_context ?? {}).filter(Boolean).join(" · ");
   const [fileSource, setFileSource] = useState<AgentIntegrationFileSource>("configured");
   const [file, setFile] = useState<File | null>(null);
   const [inboxReference, setInboxReference] = useState("");
@@ -1080,6 +1206,7 @@ function DataImportGuidedInputCard({ request, busy, csrfToken, onSubmit }: {
   return <article className="assistant-guided-input assistant-pipeline-input" aria-label="Planning Data Import run inputs">
     <header><span className="assistant-guided-input__icon"><Icon name="data" /></span><div><span className="eyebrow">Guided Planning Data Import</span><h3>{request.title}</h3><p>{request.description}</p></div></header>
     <div className="assistant-guided-input__artifact"><small>Saved Import Data job</small><strong>{request.artifact_name}</strong></div>
+    {taskSummary && <div className="assistant-guided-input__artifact"><small>Business context retained</small><strong>{taskSummary}</strong></div>}
     <section className="assistant-pipeline-input__section"><header><div><strong>Data source</strong><p>Use the job's configured file, select a compatible file already in Oracle, or upload a replacement.</p></div></header><div className="file-source-choice" role="radiogroup" aria-label="Planning Data Import file source">
       <label className={fileSource === "configured" ? "is-selected" : ""}><input type="radio" name="agent-data-import-source" checked={fileSource === "configured"} disabled={disabled} onChange={() => { setFileSource("configured"); setFile(null); setInboxReference(""); }} /><Icon name="settings" /><span><strong>Use configured file</strong><small>Use the filename saved in the Oracle job.</small></span></label>
       <label className={fileSource === "inbox" ? "is-selected" : ""}><input type="radio" name="agent-data-import-source" checked={fileSource === "inbox"} disabled={disabled} onChange={() => { setFileSource("inbox"); setFile(null); }} /><Icon name="automation" /><span><strong>Choose from Oracle Inbox</strong><small>Select a current compatible file.</small></span></label>
@@ -1101,9 +1228,10 @@ function MetadataImportGuidedInputCard({ request, busy, csrfToken, onSubmit }: {
   csrfToken: string;
   onSubmit: (values: Record<string, unknown> | null) => Promise<void>;
 }) {
-  const context = request.context as { allowed_extensions?: string[]; refresh_jobs?: string[] };
+  const context = request.context as { allowed_extensions?: string[]; refresh_jobs?: string[]; task_context?: Record<string, string> };
   const extensions = context.allowed_extensions ?? [".csv", ".zip"];
   const refreshJobs = context.refresh_jobs ?? [];
+  const taskSummary = Object.values(context.task_context ?? {}).filter(Boolean).join(" · ");
   const [fileSource, setFileSource] = useState<AgentIntegrationFileSource>("upload");
   const [file, setFile] = useState<File | null>(null);
   const [inboxReference, setInboxReference] = useState("");
@@ -1156,6 +1284,7 @@ function MetadataImportGuidedInputCard({ request, busy, csrfToken, onSubmit }: {
   return <article className="assistant-guided-input assistant-pipeline-input" aria-label="Metadata Import run inputs">
     <header><span className="assistant-guided-input__icon"><Icon name="tasks" /></span><div><span className="eyebrow">Guided Metadata Import</span><h3>{request.title}</h3><p>{request.description}</p></div></header>
     <div className="assistant-guided-input__artifact"><small>Saved Import Metadata job</small><strong>{request.artifact_name}</strong></div>
+    {taskSummary && <div className="assistant-guided-input__artifact"><small>Business context retained</small><strong>{taskSummary}</strong></div>}
     <section className="assistant-pipeline-input__section"><header><div><strong>Metadata source</strong><p>Use files configured in the saved job, choose a compatible live Inbox file, or upload the current hierarchy file.</p></div></header><div className="file-source-choice" role="radiogroup" aria-label="Metadata Import file source">
       <label className={fileSource === "configured" ? "is-selected" : ""}><input type="radio" name="agent-metadata-import-source" checked={fileSource === "configured"} disabled={disabled} onChange={() => { setFileSource("configured"); setFile(null); setInboxReference(""); }} /><Icon name="settings" /><span><strong>Use configured job files</strong><small>No runtime filename override.</small></span></label>
       <label className={fileSource === "inbox" ? "is-selected" : ""}><input type="radio" name="agent-metadata-import-source" checked={fileSource === "inbox"} disabled={disabled} onChange={() => { setFileSource("inbox"); setFile(null); }} /><Icon name="automation" /><span><strong>Choose from Oracle Inbox</strong><small>Select a current compatible file.</small></span></label>
@@ -1181,14 +1310,19 @@ function DataIntegrationGuidedInputCard({ request, busy, csrfToken, onSubmit }: 
   csrfToken: string;
   onSubmit: (values: Record<string, unknown> | null) => Promise<void>;
 }) {
-  const context = request.context as { import_modes?: string[]; export_modes?: string[]; allowed_extensions?: string[] };
+  const context = request.context as { import_modes?: string[]; export_modes?: string[]; allowed_extensions?: string[]; prefill?: { year?: string; start_month?: string; end_month?: string }; task_context?: Record<string, string> };
   const importModes = context.import_modes ?? ["Replace", "Append", "Map and Validate", "No Import"];
   const exportModes = context.export_modes ?? ["Merge", "Replace", "Accumulate", "Subtract", "No Export", "Check"];
   const extensions = context.allowed_extensions ?? [".csv", ".txt", ".zip", ".dat"];
+  const prefill = context.prefill ?? {};
+  const prefilledYear = AGENT_YEARS.includes(prefill.year ?? "") ? prefill.year ?? "" : "";
+  const prefilledStart = AGENT_MONTHS.includes(prefill.start_month ?? "") ? prefill.start_month ?? "" : "";
+  const prefilledEnd = AGENT_MONTHS.includes(prefill.end_month ?? "") ? prefill.end_month ?? "" : "";
+  const taskSummary = Object.values(context.task_context ?? {}).filter(Boolean).join(" · ");
   const [periodMode, setPeriodMode] = useState<AgentIntegrationPeriodMode>("mapped");
-  const [year, setYear] = useState("");
-  const [startMonth, setStartMonth] = useState("");
-  const [endMonth, setEndMonth] = useState("");
+  const [year, setYear] = useState(prefilledYear);
+  const [startMonth, setStartMonth] = useState(prefilledStart);
+  const [endMonth, setEndMonth] = useState(prefilledEnd);
   const [exactStart, setExactStart] = useState("");
   const [exactEnd, setExactEnd] = useState("");
   const [importMode, setImportMode] = useState(importModes[0] ?? "Replace");
@@ -1199,7 +1333,7 @@ function DataIntegrationGuidedInputCard({ request, busy, csrfToken, onSubmit }: 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
-    setPeriodMode("mapped"); setYear(""); setStartMonth(""); setEndMonth("");
+    setPeriodMode("mapped"); setYear(prefilledYear); setStartMonth(prefilledStart); setEndMonth(prefilledEnd);
     setExactStart(""); setExactEnd(""); setImportMode(importModes[0] ?? "Replace");
     setExportMode(exportModes[0] ?? "Merge"); setFileSource("configured");
     setFile(null); setInboxReference(""); setSubmitting(false); setError(null);
@@ -1242,6 +1376,7 @@ function DataIntegrationGuidedInputCard({ request, busy, csrfToken, onSubmit }: 
   return <article className="assistant-guided-input assistant-pipeline-input" aria-label="Data Integration run inputs">
     <header><span className="assistant-guided-input__icon"><Icon name="data" /></span><div><span className="eyebrow">Guided Data Integration setup</span><h3>{request.title}</h3><p>{request.description}</p></div></header>
     <div className="assistant-guided-input__artifact"><small>Selected Data Integration</small><strong>{request.artifact_name}</strong></div>
+    {taskSummary && <div className="assistant-guided-input__artifact"><small>Business context retained</small><strong>{taskSummary}</strong></div>}
     <section className="assistant-pipeline-input__section"><header><div><strong>Period range</strong><p>Use dropdowns for standard mappings, or exact names only when your Oracle configuration is different.</p></div></header><div className="assistant-pipeline-input__variables">
       <label className="runner-field"><span>Period naming *</span><select aria-label="Agent Data Integration period naming" value={periodMode} disabled={disabled} onChange={(event) => setPeriodMode(event.target.value as AgentIntegrationPeriodMode)}><option value="mapped">Mapped periods (Jan-27)</option><option value="planning">Planning members (Jan#FY27)</option><option value="exact">Advanced: exact Oracle names</option></select></label>
       {periodMode !== "exact" ? <><label className="runner-field"><span>Planning year *</span><select aria-label="Agent Data Integration planning year" value={year} disabled={disabled} onChange={(event) => setYear(event.target.value)}><option value="">Select year</option>{AGENT_YEARS.map((item) => <option key={item}>{item}</option>)}</select></label><label className="runner-field"><span>Start month *</span><select aria-label="Agent Data Integration start month" value={startMonth} disabled={disabled} onChange={(event) => setStartMonth(event.target.value)}><option value="">Select month</option>{AGENT_MONTHS.map((item) => <option key={item}>{item}</option>)}</select></label><label className="runner-field"><span>End month *</span><select aria-label="Agent Data Integration end month" value={endMonth} disabled={disabled} onChange={(event) => setEndMonth(event.target.value)}><option value="">Select month</option>{AGENT_MONTHS.map((item) => <option key={item}>{item}</option>)}</select></label></> : <><label className="runner-field"><span>Exact start period *</span><input aria-label="Agent Data Integration exact start period" value={exactStart} disabled={disabled} onChange={(event) => setExactStart(event.target.value)} placeholder="Jan-27" /></label><label className="runner-field"><span>Exact end period *</span><input aria-label="Agent Data Integration exact end period" value={exactEnd} disabled={disabled} onChange={(event) => setExactEnd(event.target.value)} placeholder="Mar-27" /></label></>}
@@ -1266,6 +1401,7 @@ interface AgentPipelineContext {
   file_requirements: PipelineFilePreview[];
   stages: PipelineStagePreview[];
   prefill?: { frequency?: ScheduleFrequency };
+  task_context?: Record<string, string>;
 }
 
 const AGENT_SCHEDULE_TIMEZONES = [
@@ -1364,6 +1500,7 @@ function PipelineGuidedInputCard({ request, busy, csrfToken, onSubmit }: {
   const variables = context.variables ?? [];
   const requirements = context.file_requirements ?? [];
   const stages = context.stages ?? [];
+  const taskSummary = Object.values(context.task_context ?? {}).filter(Boolean).join(" · ");
   const [values, setValues] = useState<Record<string, string>>({});
   const [files, setFiles] = useState<Record<string, AgentPipelineFileChoice>>({});
   const [submitting, setSubmitting] = useState(false);
@@ -1425,6 +1562,7 @@ function PipelineGuidedInputCard({ request, busy, csrfToken, onSubmit }: {
   return <article className="assistant-guided-input assistant-pipeline-input" aria-label="Oracle Pipeline run inputs">
     <header><span className="assistant-guided-input__icon"><Icon name="automation" /></span><div><span className="eyebrow">Live Oracle Pipeline setup</span><h3>{request.title}</h3><p>{request.description}</p></div></header>
     <div className="assistant-guided-input__artifact"><small>Selected Pipeline</small><strong>{context.display_name || request.artifact_name} · {context.code || request.artifact_name}</strong></div>
+    {taskSummary && <div className="assistant-guided-input__artifact"><small>Forecast context retained</small><strong>{taskSummary}</strong></div>}
     <section className="assistant-pipeline-input__stages"><header><strong>Stages configured in Oracle</strong><span>{stages.length} stage{stages.length === 1 ? "" : "s"}</span></header>{stages.length ? <ol>{stages.map((stage, index) => <li key={`${stage.name}-${index}`}><span>{index + 1}</span><div><strong>{stage.display_name}</strong><small>{stage.job_count} job{stage.job_count === 1 ? "" : "s"}{stage.runs_in_parallel ? " · Parallel" : ""}</small></div></li>)}</ol> : <p>No stage summary was returned, but Oracle will still own the Pipeline execution.</p>}</section>
     {variables.length > 0 && <section className="assistant-pipeline-input__section"><header><div><strong>Runtime values</strong><p>Oracle defaults are prefilled. Standard year and period values use dropdowns.</p></div></header><div className="assistant-pipeline-input__variables">{variables.map((variable) => <AgentPipelineVariable key={variable.name} variable={variable} value={values[variable.name] ?? ""} disabled={disabled} onChange={(value) => setValues((current) => ({ ...current, [variable.name]: value }))} />)}</div></section>}
     {requirements.length > 0 && <section className="assistant-pipeline-input__section"><header><div><strong>Files required by Pipeline stages</strong><p>Use the Oracle configured file, choose from the live Inbox, or upload a replacement.</p></div></header><div className="assistant-pipeline-input__files">{requirements.map((requirement) => <AgentPipelineFile key={requirement.key} requirement={requirement} choice={files[requirement.key]} disabled={disabled} onChange={(update) => updateFile(requirement.key, update)} />)}</div></section>}
@@ -1470,6 +1608,11 @@ function BusinessRuleGuidedInputCard({ request, busy, onSubmit }: {
   const prefilledPrompts = (
     prefill.runtime_prompts && typeof prefill.runtime_prompts === "object"
   ) ? prefill.runtime_prompts as Record<string, unknown> : {};
+  const taskSummary = Object.values(
+    requestContext.task_context && typeof requestContext.task_context === "object"
+      ? requestContext.task_context as Record<string, string>
+      : {}
+  ).filter(Boolean).join(" · ");
   const [mode, setMode] = useState("");
   const [pairs, setPairs] = useState<GuidedPair[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -1477,11 +1620,17 @@ function BusinessRuleGuidedInputCard({ request, busy, onSubmit }: {
   useEffect(() => {
     nextId.current = 1;
     setMode(String(prefill.runtime_prompt_mode || ""));
-    setPairs(registeredPrompts.map((prompt) => ({
-      id: nextId.current++,
-      name: prompt.name,
-      value: String(prefilledPrompts[prompt.name] || "")
-    })));
+    setPairs(hasRegistry
+      ? registeredPrompts.map((prompt) => ({
+          id: nextId.current++,
+          name: prompt.name,
+          value: String(prefilledPrompts[prompt.name] || "")
+        }))
+      : Object.entries(prefilledPrompts).map(([name, value]) => ({
+          id: nextId.current++,
+          name,
+          value: String(value ?? "")
+        })));
     setError(null);
   }, [request.request_id]);
   const usesOverrides = mode === "Provide runtime prompt values";
@@ -1532,6 +1681,7 @@ function BusinessRuleGuidedInputCard({ request, busy, onSubmit }: {
   return <article className="assistant-guided-input" aria-label="Business Rule runtime prompts">
     <header><span className="assistant-guided-input__icon"><Icon name="settings" /></span><div><span className="eyebrow">Guided Business Rule setup</span><h3>{request.title}</h3><p>{request.description}</p></div></header>
     <div className="assistant-guided-input__artifact"><small>Selected Business Rule</small><strong>{request.artifact_name}</strong></div>
+    {taskSummary && <div className="assistant-guided-input__artifact"><small>Forecast context retained</small><strong>{taskSummary}</strong></div>}
     {hasRegistry && <FeedbackBanner tone="success" title="Runtime prompts synchronized" message={`${registeredPrompts.length} prompt${registeredPrompts.length === 1 ? "" : "s"} loaded from the platform RTP registry. Names are locked to the Calc Manager definition.`} />}
     <label className="assistant-guided-input__mode"><span>Runtime prompt source *</span><select value={mode} disabled={busy} onChange={(event) => { setMode(event.target.value); setError(null); }}><option value="">Select how to continue</option><option value="Use Calculation Manager defaults">Use Calculation Manager defaults</option><option value="Provide runtime prompt values">Provide runtime prompt values</option></select><small>Defaults require no typing and use the values deployed with the rule.</small></label>
     {usesOverrides && <section className="assistant-guided-input__prompts"><header><div><strong>{hasRegistry ? "Registered runtime prompts" : "Runtime prompt overrides"}</strong><p>{hasRegistry ? "Enter required values and only the optional overrides needed for this run." : "No synchronized definition is available. Enter only exact names configured for this rule."}</p></div>{!hasRegistry && <button type="button" className="button button--quiet" disabled={busy} onClick={addPair}>+ Add prompt</button>}</header>{pairs.length ? <div>{pairs.map((pair) => { const definition = registeredPrompts.find((prompt) => prompt.name.toLowerCase() === pair.name.toLowerCase()); return <div className="assistant-guided-input__pair" key={pair.id}><label><span>{definition?.label || "Exact RTP name"}{definition?.required && !definition.has_default ? " *" : ""}</span><input value={pair.name} readOnly={hasRegistry} disabled={busy} onChange={(event) => updatePair(pair.id, "name", event.target.value)} />{definition && <small>{definition.dimension ? `${definition.value_type} / ${definition.dimension}` : definition.value_type}</small>}</label><label><span>Value</span><input value={pair.value} disabled={busy} placeholder={definition?.has_default ? `Oracle default: ${definition.default_value}` : "Enter a value"} onChange={(event) => updatePair(pair.id, "value", event.target.value)} /></label>{!hasRegistry && <button type="button" aria-label="Remove runtime prompt" disabled={busy} onClick={() => setPairs((current) => current.filter((item) => item.id !== pair.id))}><Icon name="close" /></button>}</div>; })}</div> : hasRegistry ? <div className="assistant-guided-input__empty"><Icon name="check" /><span><strong>This rule has no registered RTPs</strong><small>Continue using Calculation Manager defaults.</small></span></div> : <button type="button" className="assistant-guided-input__empty" disabled={busy} onClick={addPair}><Icon name="settings" /><span><strong>Add the first runtime prompt</strong><small>Name and value are validated before the draft is created.</small></span></button>}</section>}
@@ -1696,24 +1846,43 @@ function AgentScheduleResultCard({ schedule, onDismiss }: {
   </article>;
 }
 
-export function AgentExecutionCard({ approved, csrfToken, onRecoveryStarted, onDismiss }: {
+export function AgentExecutionCard({ approved, csrfToken, onRecoveryStarted, onTerminal, onDismiss }: {
   approved: AgentApprovedExecution;
   csrfToken: string;
   onRecoveryStarted: (execution: AgentApprovedExecution) => void;
+  onTerminal?: () => void | Promise<void>;
   onDismiss: () => void;
 }) {
   const { execution, monitorError } = useOperationMonitor(approved.execution_id);
   const [recoveryPlan, setRecoveryPlan] = useState<StandaloneFlowRecoveryPlan | null>(null);
   const [reviewingRecovery, setReviewingRecovery] = useState(false);
   const [recoveryError, setRecoveryError] = useState<string | null>(null);
+  const [confirmStop, setConfirmStop] = useState(false);
+  const [stopping, setStopping] = useState(false);
+  const [stopMessage, setStopMessage] = useState<string | null>(null);
+  const [stopError, setStopError] = useState<string | null>(null);
+  const completionReported = useRef(false);
   const status = execution?.status ?? approved.status;
   const terminal = execution?.terminal ?? false;
   const success = status === "SUCCESS";
+  const cancelled = status === "CANCELLED";
   const failed = ["FAILED", "RECOVERY_REQUIRED"].includes(status);
   const operationName = approved.operation_code === "standalone-flow" ? "Standalone Planning Flow" : approved.operation_code === "user-variables" ? "User Variable change" : approved.operation_code === "substitution-variables" ? "Substitution Variable change" : approved.operation_code === "cube-refresh" ? "Cube Refresh" : approved.operation_code === "pipelines" ? "Pipeline" : approved.operation_code === "data-integrations" ? "Data Integration" : approved.operation_code === "metadata-import" ? "Metadata Import" : approved.operation_code === "data-import" ? "Planning Data Import" : approved.operation_code === "data-maps" ? "Data Map" : "Business Rule";
   const flow = execution?.flow_progress ?? null;
   const currentStep = flow?.current_step;
   const canRecover = approved.operation_code === "standalone-flow" && status === "FAILED";
+  const cancellationRequested = Boolean(execution?.cancellation_requested_at || stopMessage);
+  const canStop = approved.operation_code === "standalone-flow" && !terminal && !cancellationRequested;
+
+  useEffect(() => {
+    completionReported.current = false;
+  }, [approved.execution_id]);
+
+  useEffect(() => {
+    if (!terminal || completionReported.current) return;
+    completionReported.current = true;
+    void onTerminal?.();
+  }, [terminal, onTerminal]);
 
   async function reviewRecovery() {
     setReviewingRecovery(true);
@@ -1727,21 +1896,37 @@ export function AgentExecutionCard({ approved, csrfToken, onRecoveryStarted, onD
       setReviewingRecovery(false);
     }
   }
-  const message = monitorError
-    || (success
-      ? `${operationName} completed successfully.`
-      : failed
-        ? execution?.error_message || `${operationName} execution failed.`
-        : currentStep
-          ? `Step ${currentStep.sequence} of ${flow.total_steps}: ${currentStep.display_name} is ${currentStep.status === "RUNNING" ? "running" : "waiting to start"}.`
-          : `${operationName} is queued or running in Oracle.`);
-  return <article className={`assistant-agent-execution${flow ? " is-flow" : ""}${success ? " is-success" : failed ? " is-failed" : " is-active"}`} aria-label={`Approved ${operationName} execution`}>
-    <span className="assistant-agent-execution__icon">{success ? <Icon name="check" /> : failed ? <Icon name="alert" /> : <span className="spinner spinner--dark" />}</span>
+  async function stopFlow() {
+    setStopping(true);
+    setStopError(null);
+    try {
+      const response = await api.stopStandaloneFlow(approved.execution_id, csrfToken);
+      setStopMessage(response.message);
+      setConfirmStop(false);
+    } catch (reason) {
+      setStopError(errorMessage(reason));
+    } finally {
+      setStopping(false);
+    }
+  }
+  let message = monitorError;
+  if (!message) {
+    if (cancelled) message = execution?.error_message || "The standalone flow was stopped safely.";
+    else if (success) message = `${operationName} completed successfully.`;
+    else if (failed) message = execution?.error_message || `${operationName} execution failed.`;
+    else if (cancellationRequested) message = stopMessage || "A safe stop was requested. The current Oracle step will finish before the flow stops.";
+    else if (currentStep) message = `Step ${currentStep.sequence} of ${flow.total_steps}: ${currentStep.display_name} is ${currentStep.status === "RUNNING" ? "running" : "waiting to start"}.`;
+    else message = `${operationName} is queued or running in Oracle.`;
+  }
+  return <article className={`assistant-agent-execution${flow ? " is-flow" : ""}${success ? " is-success" : failed ? " is-failed" : cancelled ? " is-cancelled" : " is-active"}`} aria-label={`Approved ${operationName} execution`}>
+    <span className="assistant-agent-execution__icon">{success ? <Icon name="check" /> : failed || cancelled ? <Icon name="alert" /> : <span className="spinner spinner--dark" />}</span>
     <div><span className="eyebrow">Approved Oracle execution</span><h3>{approved.target_name}</h3><p>{message}</p><small>Execution {approved.execution_id.slice(0, 8)} · {friendlyName(status)}</small></div>
-    <footer>{canRecover && <button type="button" className="button button--primary" disabled={reviewingRecovery} onClick={() => void reviewRecovery()}>{reviewingRecovery ? <><span className="spinner" /> Reviewing…</> : <>Review recovery <Icon name="arrow" /></>}</button>}<a className="button button--secondary" href={`/?execution_id=${encodeURIComponent(approved.execution_id)}#jobs`}>{terminal ? "View evidence" : "Open live status"} <Icon name="arrow" /></a><button type="button" className="icon-button" aria-label="Dismiss execution status" title="Dismiss" onClick={onDismiss}><Icon name="close" /></button></footer>
+    <footer>{canStop && <button type="button" className="button button--secondary" onClick={() => setConfirmStop(true)}>Stop after current step</button>}{canRecover && <button type="button" className="button button--primary" disabled={reviewingRecovery} onClick={() => void reviewRecovery()}>{reviewingRecovery ? <><span className="spinner" /> Reviewing…</> : <>Review recovery <Icon name="arrow" /></>}</button>}<a className="button button--secondary" href={`/?execution_id=${encodeURIComponent(approved.execution_id)}#jobs`}>{terminal ? "View evidence" : "Open live status"} <Icon name="arrow" /></a><button type="button" className="icon-button" aria-label="Dismiss execution status" title="Dismiss" onClick={onDismiss}><Icon name="close" /></button></footer>
     {recoveryError && <div className="assistant-agent-execution__recovery-error"><Icon name="alert" />{recoveryError}</div>}
+    {stopError && !confirmStop && <div className="assistant-agent-execution__recovery-error"><Icon name="alert" />{stopError}</div>}
     {flow && <StandaloneFlowTimeline flow={flow} />}
     {recoveryPlan && <StandaloneFlowRecoveryDialog plan={recoveryPlan} csrfToken={csrfToken} onClose={() => setRecoveryPlan(null)} onStarted={(accepted) => { setRecoveryPlan(null); onRecoveryStarted({ execution_id: accepted.execution_id, operation_code: "standalone-flow", target_name: `Recovery - ${recoveryPlan.flow_name}`, status: "QUEUED" }); }} />}
+    {confirmStop && <ConfirmationDialog title="Stop this standalone flow?" description="The platform will prevent all remaining steps from starting." warning="An Oracle job that is already running will not be interrupted. It will finish first, and the flow will stop before the next step." confirmLabel="Stop after current step" tone="danger" busy={stopping} error={stopError} onConfirm={stopFlow} onClose={() => { if (!stopping) { setConfirmStop(false); setStopError(null); } }} />}
   </article>;
 }
 
@@ -2022,5 +2207,8 @@ function downloadAgentBlob(blob: Blob, filename: string) {
   anchor.click();
   anchor.remove();
   URL.revokeObjectURL(url);
+}
+function isAbortError(reason: unknown) {
+  return reason instanceof DOMException && reason.name === "AbortError";
 }
 function errorMessage(reason: unknown) { return reason instanceof Error ? reason.message : "The EPM Assistant request could not be completed."; }

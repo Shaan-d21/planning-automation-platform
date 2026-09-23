@@ -58,6 +58,7 @@ class StepAgentProvider(Protocol):
         system_instruction: str,
         tools: Sequence[AgentToolDefinition],
         provider_exchange: Sequence[dict[str, Any]],
+        required_tool_name: str | None = None,
     ) -> AgentProviderTurn:
         """Generate exactly one model response without executing tools."""
 

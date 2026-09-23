@@ -60,6 +60,7 @@ import type {
   OperationExecution,
   StandaloneFlowRecoveryAccepted,
   StandaloneFlowRecoveryResponse,
+  StandaloneFlowStopResponse,
   DataReviewCubesResponse,
   DataReviewDimensionsResponse,
   DataReviewMembersResponse,
@@ -287,10 +288,15 @@ export const api = {
     request<AgentMessagesResponse>(
       `/api/agent/conversations/${encodeURIComponent(conversationId)}/messages`
     ),
-  sendAgentMessage: (conversationId: string, content: string, csrfToken: string) =>
+  sendAgentMessage: (
+    conversationId: string,
+    content: string,
+    csrfToken: string,
+    signal?: AbortSignal
+  ) =>
     request<AgentSendResponse>(
       `/api/agent/conversations/${encodeURIComponent(conversationId)}/messages`,
-      { method: "POST", body: JSON.stringify({ content }) },
+      { method: "POST", body: JSON.stringify({ content }), signal },
       csrfToken
     ),
   resolveAgentApproval: (
@@ -586,6 +592,12 @@ export const api = {
     ),
   operationRun: (executionId: string) =>
       request<OperationExecution>(`/api/operations/runs/${encodeURIComponent(executionId)}`),
+    stopStandaloneFlow: (executionId: string, csrfToken: string) =>
+      request<StandaloneFlowStopResponse>(
+        `/api/operations/runs/${encodeURIComponent(executionId)}/stop`,
+        { method: "POST" },
+        csrfToken
+      ),
     standaloneFlowRecovery: (executionId: string) =>
       request<StandaloneFlowRecoveryResponse>(`/api/operations/runs/${encodeURIComponent(executionId)}/recovery`),
     retryStandaloneFlow: (

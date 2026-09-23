@@ -51,7 +51,7 @@ from app.models.automation_schedule import (
     AutomationScheduleInput,
     AutomationTargetType,
 )
-from app.models.oracle_artifact import OracleEnvironment
+from app.models.oracle_artifact import OracleArtifactType, OracleEnvironment
 from app.services.business_rule_rtp_registry import BusinessRuleRTPRegistryService
 from app.services.data_integration_service import DataIntegrationService
 from app.services.data_map_service import DataMapService
@@ -113,7 +113,9 @@ class AgentCapabilityGateway:
             "list_cube_dimensions": self._cube_dimensions,
             "search_dimension_members": self._dimension_members,
             "list_data_explorer_views": self._data_explorer_views,
+            "list_variance_views": self._variance_views,
             "review_saved_data_view": self._review_saved_data_view,
+            "review_saved_variance": self._review_saved_variance,
             "review_data_slice": self._review_data_slice,
             "compare_data_slices": self._compare_data_slices,
             "list_operation_artifacts": self._operation_artifacts,
@@ -322,6 +324,59 @@ class AgentCapabilityGateway:
                 },
             ),
             AgentToolDefinition(
+                name="list_variance_views",
+                description=(
+                    "List saved Data Explorer layouts that can be used as a "
+                    "validated shape for a live variance comparison. The "
+                    "layouts contain no stored financial values."
+                ),
+                parameters_schema={
+                    "type": "object",
+                    "properties": {
+                        "comparison": {"type": "string"},
+                        "period": {"type": "string"},
+                        "year": {"type": "string"},
+                        "threshold": {"type": "number", "minimum": 0},
+                    },
+                    "required": ["comparison", "period"],
+                    "additionalProperties": False,
+                },
+            ),
+            AgentToolDefinition(
+                name="review_saved_variance",
+                description=(
+                    "Compare two live Oracle scenarios using one exact saved "
+                    "Data Explorer layout. Scenario, Period, optional Year, "
+                    "and explicitly supplied POV members may be replaced; the "
+                    "saved row and column scope remains unchanged."
+                ),
+                parameters_schema={
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "comparison": {"type": "string"},
+                        "period": {"type": "string"},
+                        "year": {"type": "string"},
+                        "threshold": {"type": "number", "minimum": 0},
+                        "pov_overrides": {
+                            "type": "object",
+                            "description": (
+                                "Optional exact dimension-to-member changes for "
+                                "POV dimensions already present in the saved view."
+                            ),
+                            "additionalProperties": {"type": "string"},
+                        },
+                        "max_mismatches": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 500,
+                        },
+                    },
+                    "required": ["name", "comparison", "period"],
+                    "additionalProperties": False,
+                },
+            ),
+            AgentToolDefinition(
                 name="review_data_slice",
                 description=(
                     "Read a live ad-hoc Planning cube slice. Every cube "
@@ -516,6 +571,21 @@ class AgentCapabilityGateway:
                 "limit",
             },
             "review_saved_data_view": {"name"},
+            "list_variance_views": {
+                "comparison",
+                "period",
+                "year",
+                "threshold",
+            },
+            "review_saved_variance": {
+                "name",
+                "comparison",
+                "period",
+                "year",
+                "threshold",
+                "pov_overrides",
+                "max_mismatches",
+            },
             "review_data_slice": {"cube", "pov", "rows", "columns"},
             "compare_data_slices": {
                 "source",
@@ -981,6 +1051,59 @@ class AgentCapabilityGateway:
             ],
         }
 
+    def _variance_views(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """List reusable layouts while retaining the requested comparison."""
+        comparison = self._variance_comparison(
+            self._required_text(arguments, "comparison", "Variance comparison")
+        )
+        period = self._required_text(arguments, "period", "Variance period")
+        year = str(arguments.get("year") or "").strip()
+        threshold = self._variance_threshold(arguments.get("threshold", 0))
+        required_dimensions = {"scenario", "period"}
+        if year:
+            required_dimensions.add("year")
+        compatible = [
+            view
+            for view in self._compatible_data_explorer_views()
+            if required_dimensions.issubset(
+                {
+                    *(dimension.casefold() for dimension, _member in view.default_pov),
+                    *(dimension.casefold() for dimension, _members in view.rows),
+                    *(dimension.casefold() for dimension, _members in view.columns),
+                }
+            )
+        ]
+        maximum_views = 50
+        returned = compatible[:maximum_views]
+        return {
+            "count": len(returned),
+            "total_count": len(compatible),
+            "truncated": len(returned) < len(compatible),
+            "views": [
+                {
+                    "name": item.name,
+                    "title": item.title,
+                    "cube": item.cube,
+                    "pov": [
+                        {"dimension": dimension, "member": member}
+                        for dimension, member in item.default_pov
+                    ],
+                    "row_dimensions": [
+                        dimension for dimension, _members in item.rows
+                    ],
+                    "column_dimensions": [
+                        dimension for dimension, _members in item.columns
+                    ],
+                }
+                for item in returned
+            ],
+            "purpose": "variance",
+            "comparison": f"{comparison[0]} vs {comparison[1]}",
+            "period": period,
+            "year": year,
+            "threshold": threshold,
+        }
+
     def _review_saved_data_view(
         self,
         arguments: dict[str, Any],
@@ -993,6 +1116,213 @@ class AgentCapabilityGateway:
             **self._agent_grid(review, selection),
             "saved_view": {"name": view.name, "title": view.title},
         }
+
+    def _review_saved_variance(
+        self,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Run a live scenario comparison from a server-owned saved layout."""
+        name = self._required_text(arguments, "name", "Saved Data Explorer view")
+        source_scenario, target_scenario = self._variance_comparison(
+            self._required_text(arguments, "comparison", "Variance comparison")
+        )
+        period = self._required_text(arguments, "period", "Variance period")
+        year = str(arguments.get("year") or "").strip()
+        tolerance = self._variance_threshold(arguments.get("threshold", 0))
+        pov_overrides = self._variance_pov_overrides(
+            arguments.get("pov_overrides")
+        )
+        try:
+            max_mismatches = int(arguments.get("max_mismatches", 100))
+        except (TypeError, ValueError) as exc:
+            raise AgentCapabilityError(
+                "Maximum variance rows must be an integer."
+            ) from exc
+        if not 1 <= max_mismatches <= 500:
+            raise AgentCapabilityError(
+                "Maximum variance rows must be between 1 and 500."
+            )
+        view, base = self._saved_data_view_selection(name)
+        base = self._apply_variance_pov_overrides(base, pov_overrides)
+        source = self._variance_selection(
+            base,
+            scenario=source_scenario,
+            period=period,
+            year=year,
+        )
+        target = self._variance_selection(
+            base,
+            scenario=target_scenario,
+            period=period,
+            year=year,
+        )
+        comparison = self._data_review.compare_slices(
+            source,
+            target,
+            tolerance=tolerance,
+            max_mismatches=max_mismatches,
+            include_cells=False,
+        )
+        return {
+            **asdict(comparison),
+            "source_request": self._selection_payload(source),
+            "target_request": self._selection_payload(target),
+            "saved_view": {"name": view.name, "title": view.title},
+            "variance_context": {
+                "comparison": f"{source_scenario} vs {target_scenario}",
+                "period": period,
+                "year": year,
+                "threshold": tolerance,
+                "pov_overrides": pov_overrides,
+            },
+        }
+
+    @staticmethod
+    def _variance_pov_overrides(value: Any) -> dict[str, str]:
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            raise AgentCapabilityError("Variance POV overrides must be an object.")
+        if len(value) > 30:
+            raise AgentCapabilityError(
+                "At most 30 variance POV values can be changed."
+            )
+        protected = {"scenario", "period", "year"}
+        normalized: dict[str, str] = {}
+        for raw_dimension, raw_member in value.items():
+            dimension = str(raw_dimension or "").strip()
+            member = str(raw_member or "").strip()
+            if not dimension or not member:
+                raise AgentCapabilityError(
+                    "Every variance POV override needs a dimension and member."
+                )
+            if dimension.casefold() in protected:
+                raise AgentCapabilityError(
+                    f"Change {dimension} using the comparison, period, or year "
+                    "controls rather than a POV override."
+                )
+            normalized[dimension] = member
+        return normalized
+
+    @staticmethod
+    def _apply_variance_pov_overrides(
+        selection: DataReviewSliceSelection,
+        overrides: dict[str, str],
+    ) -> DataReviewSliceSelection:
+        if not overrides:
+            return selection
+        pov = dict(selection.pov)
+        indexed = {dimension.casefold(): dimension for dimension in pov}
+        for requested_dimension, member in overrides.items():
+            existing = indexed.get(requested_dimension.casefold())
+            if existing is None:
+                raise AgentCapabilityError(
+                    "The selected saved view does not contain "
+                    f"{requested_dimension} in its POV."
+                )
+            pov[existing] = member
+        return DataReviewSliceSelection(
+            cube=selection.cube,
+            pov=pov,
+            rows=selection.rows,
+            columns=selection.columns,
+        )
+
+    @staticmethod
+    def _variance_comparison(value: str) -> tuple[str, str]:
+        match = re.fullmatch(
+            r"\s*(Actual|Forecast|Budget)\s+(?:vs\.?|versus)\s+"
+            r"(Actual|Forecast|Budget)\s*",
+            value,
+            re.IGNORECASE,
+        )
+        if match is None or match.group(1).casefold() == match.group(2).casefold():
+            raise AgentCapabilityError(
+                "Choose two different scenarios, such as Actual vs Budget "
+                "or Actual vs Forecast."
+            )
+        return match.group(1).title(), match.group(2).title()
+
+    @staticmethod
+    def _variance_threshold(value: Any) -> float:
+        try:
+            threshold = float(value or 0)
+        except (TypeError, ValueError) as exc:
+            raise AgentCapabilityError("Variance threshold must be numeric.") from exc
+        if threshold < 0:
+            raise AgentCapabilityError("Variance threshold cannot be negative.")
+        return threshold
+
+    @classmethod
+    def _variance_selection(
+        cls,
+        selection: DataReviewSliceSelection,
+        *,
+        scenario: str,
+        period: str,
+        year: str,
+    ) -> DataReviewSliceSelection:
+        updated = cls._replace_slice_dimension(
+            selection,
+            "Scenario",
+            (scenario,),
+            required=True,
+        )
+        updated = cls._replace_slice_dimension(
+            updated,
+            "Period",
+            (period,),
+            required=True,
+        )
+        if year:
+            updated = cls._replace_slice_dimension(
+                updated,
+                "Year",
+                (year,),
+                required=False,
+            )
+        return updated
+
+    @staticmethod
+    def _replace_slice_dimension(
+        selection: DataReviewSliceSelection,
+        dimension: str,
+        members: tuple[str, ...],
+        *,
+        required: bool,
+    ) -> DataReviewSliceSelection:
+        key = dimension.casefold()
+        found = False
+        pov = dict(selection.pov)
+        for current in tuple(pov):
+            if current.casefold() == key:
+                pov[current] = members[0]
+                found = True
+        rows: list[DataReviewAxisSelection] = []
+        for item in selection.rows:
+            if item.dimension.casefold() == key:
+                rows.append(DataReviewAxisSelection(item.dimension, members))
+                found = True
+            else:
+                rows.append(item)
+        columns: list[DataReviewAxisSelection] = []
+        for item in selection.columns:
+            if item.dimension.casefold() == key:
+                columns.append(DataReviewAxisSelection(item.dimension, members))
+                found = True
+            else:
+                columns.append(item)
+        if required and not found:
+            raise AgentCapabilityError(
+                f"Saved view '{selection.cube}' does not contain the "
+                f"{dimension} dimension. Choose a compatible saved view."
+            )
+        return DataReviewSliceSelection(
+            cube=selection.cube,
+            pov=pov,
+            rows=tuple(rows),
+            columns=tuple(columns),
+        )
 
     def saved_data_view_selection_payload(self, name: str) -> dict[str, Any]:
         """Return a saved view's validated slice for safe conversation resume."""
@@ -1304,6 +1634,34 @@ class AgentCapabilityGateway:
         }
         job_type = job_types.get(normalized)
         if job_type is not None:
+            artifact_types = {
+                "RULES": OracleArtifactType.BUSINESS_RULE,
+                "PLAN_TYPE_MAP": OracleArtifactType.DATA_MAP,
+                "IMPORT_METADATA": OracleArtifactType.METADATA_IMPORT_JOB,
+                "IMPORT_DATA": OracleArtifactType.DATA_IMPORT_JOB,
+                "CUBE_REFRESH": OracleArtifactType.CUBE_REFRESH_JOB,
+            }
+            registered = getattr(
+                self._operation_catalog,
+                "registered_artifacts",
+                None,
+            )
+            if callable(registered):
+                registered_items = registered(artifact_types[job_type])
+                cached = (
+                    tuple(
+                        item
+                        for item in registered_items
+                        if item.is_verified
+                    )
+                    if isinstance(registered_items, (list, tuple))
+                    else ()
+                )
+                if cached:
+                    return tuple(
+                        (item.oracle_identifier, item.display_name)
+                        for item in cached
+                    )
             return tuple(
                 (name, name)
                 for name in self._operation_catalog.discover_job_names(
@@ -1321,7 +1679,18 @@ class AgentCapabilityGateway:
             )
         if normalized == "data-integrations":
             return tuple(
-                (item.name, item.name)
+                (
+                    item.name,
+                    str(
+                        getattr(item, "display_label", None)
+                        or (
+                            f"{item.name} - {item.description}"
+                            if getattr(item, "description", None)
+                            else None
+                        )
+                        or item.name
+                    ).strip(),
+                )
                 for item in catalog.data_integrations
             )
         return ()
@@ -2177,6 +2546,16 @@ class AgentCapabilityGateway:
             normalized = SubstitutionVariableApplicationService.normalize_input(
                 operation_input
             )
+            self._substitution_variables.validate_value_compatibility(
+                variable_name=normalized.name,
+                current_value=(
+                    None
+                    if normalized.action is SubstitutionVariableAction.CREATE
+                    else normalized.expected_current_value
+                ),
+                proposed_value=normalized.value,
+                scope=normalized.scope,
+            )
         except EPMError as exc:
             raise AgentCapabilityError(str(exc)) from exc
         return {
@@ -2244,6 +2623,11 @@ class AgentCapabilityGateway:
                 definition.name,
                 definition.dimension,
                 new_member,
+            )
+            self._user_variables.validate_value_compatibility(
+                variable_name=definition.name,
+                dimension=definition.dimension,
+                member=new_member,
             )
         except EPMError as exc:
             raise AgentCapabilityError(str(exc)) from exc

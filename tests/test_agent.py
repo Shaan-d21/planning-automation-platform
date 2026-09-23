@@ -288,7 +288,10 @@ class _SavedViewReportWorkspace:
                 name="revenue-forecast",
                 title="Revenue Forecast",
                 cube="Plan1",
-                default_pov=(("Scenario", "Forecast"),),
+                default_pov=(
+                    ("Scenario", "Forecast"),
+                    ("Product", "BaseData"),
+                ),
                 rows=(("Account", ("Revenue",)),),
                 columns=(("Period", ("Jan",)),),
             ),
@@ -301,7 +304,56 @@ class _SavedViewReportWorkspace:
         )
 
 
+class _VarianceDataReview:
+    def __init__(self, expected_product: str = "BaseData") -> None:
+        self.expected_product = expected_product
+
+    def compare_slices(
+        self,
+        source,
+        target,
+        *,
+        tolerance,
+        max_mismatches,
+        include_cells,
+    ):
+        assert source.cube == target.cube == "Plan1"
+        assert source.pov["Scenario"] == "Actual"
+        assert target.pov["Scenario"] == "Budget"
+        assert source.pov["Product"] == self.expected_product
+        assert target.pov["Product"] == self.expected_product
+        assert source.columns[0].dimension == "Period"
+        assert source.columns[0].members == ("Sep",)
+        assert target.columns[0].members == ("Sep",)
+        assert tolerance == 1000
+        assert max_mismatches == 100
+        assert include_cells is False
+        return DataReviewComparison(
+            source_cube="Plan1",
+            target_cube="Plan1",
+            result=DataValidationResult(
+                source_form="Actual Sep",
+                target_form="Budget Sep",
+                compared_cells=2,
+                matched_cells=1,
+                mismatches=(
+                    DataMismatch(
+                        row_headers=("Revenue",),
+                        column_headers=("Sep",),
+                        source_value=5000,
+                        target_value=3500,
+                        difference=1500,
+                    ),
+                ),
+                tolerance=1000,
+            ),
+        )
+
+
 class _SubstitutionVariables:
+    def validate_value_compatibility(self, **_kwargs):
+        return None
+
     def discover(self):
         return SubstitutionVariableCatalog(
             variables=(
@@ -320,6 +372,15 @@ class _OperationCatalog:
     def discover_job_names(self, *, job_type):
         assert job_type == "RULES"
         return ("Revenue Forecast",)
+
+
+class _NamedRuleCatalog:
+    def __init__(self, *names: str) -> None:
+        self._names = names
+
+    def discover_job_names(self, *, job_type):
+        assert job_type == "RULES"
+        return self._names
 
 
 class _DataMapCatalog:
@@ -506,6 +567,92 @@ class _MetadataImportCatalog:
         raise AssertionError(f"Unexpected job type: {job_type}")
 
 
+class _DualLoadCatalog:
+    def discover_job_names(self, *, job_type):
+        return {
+            "IMPORT_DATA": (
+                "Import Actuals",
+                "Import Forecast",
+                "Import Product Units",
+            ),
+            "IMPORT_METADATA": ("Import Products", "Import Entities"),
+            "CUBE_REFRESH": (),
+        }.get(job_type, ())
+
+    def discover_registered(self):
+        integrations = tuple(
+            type("Integration", (), {"name": name})()
+            for name in (
+                "Actual_Load",
+                "Product_Metadata",
+                "Product_Volume_Load",
+                "Entity_Metadata",
+                "Workforce_Load",
+            )
+        )
+        return type(
+            "Catalog",
+            (),
+            {"pipelines": (), "data_integrations": integrations},
+        )()
+
+
+def test_data_integration_catalog_exposes_description_for_agent_matching(
+    tmp_path: Path,
+) -> None:
+    class DescribedCatalog:
+        def discover_registered(self):
+            integration = SimpleNamespace(
+                name="LOAD_001",
+                description="Product volume and unit data",
+            )
+            return SimpleNamespace(
+                pipelines=(), data_integrations=(integration,)
+            )
+
+    gateway = AgentCapabilityGateway(
+        _settings(tmp_path),
+        control_center=_ControlCenter(),
+        data_review=_DataReview(),
+        operation_catalog=DescribedCatalog(),
+    )
+
+    assert gateway.artifact_catalog("data-integrations") == (
+        ("LOAD_001", "LOAD_001 - Product volume and unit data"),
+    )
+
+
+def test_agent_job_catalog_uses_verified_cache_before_live_oracle(
+    tmp_path: Path,
+) -> None:
+    class CachedCatalog:
+        def registered_artifacts(self, artifact_type):
+            assert str(artifact_type) == "DATA_IMPORT_JOB"
+            return (
+                SimpleNamespace(
+                    oracle_identifier="Import Product Units",
+                    display_name="Import Product Units",
+                    is_verified=True,
+                ),
+            )
+
+        def discover_job_names(self, *, job_type):
+            raise AssertionError(
+                f"Live Oracle discovery was not expected for {job_type}."
+            )
+
+    gateway = AgentCapabilityGateway(
+        _settings(tmp_path),
+        control_center=_ControlCenter(),
+        data_review=_DataReview(),
+        operation_catalog=CachedCatalog(),
+    )
+
+    assert gateway.artifact_catalog("data-import") == (
+        ("Import Product Units", "Import Product Units"),
+    )
+
+
 class _CubeRefreshCatalog:
     def discover_job_names(self, *, job_type):
         assert job_type == "CUBE_REFRESH"
@@ -584,6 +731,210 @@ class _InputCancellationGraph:
     def resume_input(self, *, values, **_):
         self.values = values
         return AgentProviderResult(text="Preparation cancelled.")
+
+
+def test_chat_can_fill_one_registered_numeric_rtp_without_approval() -> None:
+    recorded = []
+    service = SimpleNamespace(
+        _repository=SimpleNamespace(add_message=lambda **kwargs: recorded.append(kwargs)),
+        resolve_input=lambda **kwargs: kwargs,
+    )
+    request = AgentInputRequest(
+        request_id="rtp-input-1",
+        operation_code="business-rules",
+        display_name="Business Rules",
+        artifact_name="Apply Growth",
+        title="Runtime prompts",
+        description="Enter the RTP",
+        fields=(),
+        context={
+            "rtp_definition": {
+                "prompts": [{"name": "GrowthPct", "hidden": False}]
+            }
+        },
+    )
+
+    result = AgentApplicationService._continue_pending_chat_reply(
+        service,
+        conversation_id="conversation-1",
+        user=_user(),
+        prompt="10 percent",
+        clarification=None,
+        input_request=request,
+    )
+
+    assert result["values"] == {
+        "runtime_prompt_mode": "Provide runtime prompt values",
+        "runtime_prompts": {"GrowthPct": "10"},
+    }
+    assert len(recorded) == 1
+
+
+def test_chat_does_not_guess_which_of_multiple_rtps_a_number_means() -> None:
+    service = SimpleNamespace(
+        _repository=SimpleNamespace(add_message=lambda **_kwargs: pytest.fail("unexpected write")),
+    )
+    request = AgentInputRequest(
+        request_id="rtp-input-2",
+        operation_code="business-rules",
+        display_name="Business Rules",
+        artifact_name="Apply Growth",
+        title="Runtime prompts",
+        description="Enter the RTPs",
+        fields=(),
+        context={
+            "rtp_definition": {
+                "prompts": [
+                    {"name": "GrowthPct", "hidden": False},
+                    {"name": "Year", "hidden": False},
+                ]
+            }
+        },
+    )
+
+    assert AgentApplicationService._continue_pending_chat_reply(
+        service,
+        conversation_id="conversation-1",
+        user=_user(),
+        prompt="10",
+        clarification=None,
+        input_request=request,
+    ) is None
+
+
+def test_chat_can_fill_one_simple_required_pending_field() -> None:
+    request = AgentInputRequest(
+        request_id="variable-input-1",
+        operation_code="substitution-variables",
+        display_name="Substitution Variables",
+        artifact_name="CurYr",
+        title="Enter the new value",
+        description="Update one value",
+        fields=(
+            {
+                "key": "new_value",
+                "label": "New value",
+                "kind": "text",
+                "required": True,
+                "options": [],
+            },
+        ),
+        context={"scope": "ALL", "variable_name": "CurYr"},
+    )
+
+    assert AgentApplicationService._single_pending_field_values(
+        request, "FY28"
+    ) == {"new_value": "FY28"}
+
+
+def test_chat_does_not_guess_between_multiple_or_file_pending_fields() -> None:
+    multiple = AgentInputRequest(
+        request_id="integration-input-1",
+        operation_code="data-integrations",
+        display_name="Data Integrations",
+        artifact_name="Actual Load",
+        title="Inputs",
+        description="Enter inputs",
+        fields=(
+            {"key": "start_period", "kind": "text", "required": True},
+            {"key": "end_period", "kind": "text", "required": True},
+        ),
+    )
+    file_request = AgentInputRequest(
+        request_id="data-input-1",
+        operation_code="data-import",
+        display_name="Planning Data Import",
+        artifact_name="Import Actuals",
+        title="File",
+        description="Choose a file",
+        fields=(
+            {"key": "source_file", "kind": "file_reference", "required": True},
+        ),
+    )
+
+    assert AgentApplicationService._single_pending_field_values(
+        multiple, "Jan-27"
+    ) is None
+    assert AgentApplicationService._single_pending_field_values(
+        file_request, "Actual.csv"
+    ) is None
+
+
+def test_chat_can_cancel_pending_choice_and_switch_to_new_task(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    AccessControlService(settings.workflow_database_file).bootstrap_administrator(
+        username="admin",
+        display_name="Administrator",
+        email=None,
+        password="Strong password 123!",
+    )
+    repository = SQLiteAgentRepository(settings.workflow_database_file)
+    user = _user(Permission.OPERATION_EXECUTE)
+    conversation = repository.create_conversation(
+        user_id=user.user_id,
+        provider="fake",
+        model="fake-model",
+    )
+
+    class SwitchingGraph:
+        pending = AgentClarificationRequest(
+            request_id="choice-1",
+            operation_code="business-rules",
+            display_name="Business Rules",
+            prompt="Choose a rule",
+            options=("Rule A", "Rule B"),
+        )
+        selected = "not-resumed"
+
+        def pending_approval(self, **_kwargs):
+            return None
+
+        def pending_clarification(self, **_kwargs):
+            return self.pending
+
+        def pending_input(self, **_kwargs):
+            return None
+
+        def resume_clarification(self, *, value, **_kwargs):
+            self.selected = value
+            self.pending = None
+            return AgentProviderResult(text="Previous task cancelled.")
+
+        def current_task_context(self, **_kwargs):
+            return None
+
+        def invoke(self, **_kwargs):
+            return AgentProviderResult(text="I will review the new task.")
+
+    graph = SwitchingGraph()
+    service = AgentApplicationService(
+        settings,
+        gateway=AgentCapabilityGateway(
+            settings,
+            control_center=_ControlCenter(),
+            data_review=_DataReview(),
+        ),
+        repository=repository,
+        graph_orchestrator=graph,
+    )
+
+    result = service.send_message(
+        conversation_id=conversation.conversation_id,
+        user=user,
+        content="actually cancel this and refresh Plan1",
+    )
+
+    assert graph.selected is None
+    assert result["message"].content == "I will review the new task."
+    assert [message.content for message in repository.list_messages(
+        conversation.conversation_id, user.user_id
+    )] == [
+        "Previous task cancelled.",
+        "refresh Plan1",
+        "I will review the new task.",
+    ]
 
 
 class _ReportWorkspace:
@@ -983,6 +1334,24 @@ class _OperationManager:
         )
 
 
+class _ActiveFlowOperationManager:
+    def __init__(self) -> None:
+        self.stop_requests: list[tuple[str, str]] = []
+
+    def get(self, execution_id: str):
+        if execution_id != "active-flow-1":
+            return None
+        return SimpleNamespace(status=SimpleNamespace(value="RUNNING"))
+
+    def request_flow_stop(self, execution_id: str, *, requested_by: str):
+        self.stop_requests.append((execution_id, requested_by))
+        return SimpleNamespace(
+            execution_id=execution_id,
+            target_name="September Close",
+            status=SimpleNamespace(value="RUNNING"),
+        )
+
+
 def test_agent_service_persists_provider_neutral_conversation(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     access = AccessControlService(settings.workflow_database_file)
@@ -1017,6 +1386,69 @@ def test_agent_service_persists_provider_neutral_conversation(tmp_path: Path) ->
     assert [item.role.value for item in messages] == ["user", "assistant"]
     assert result["message"].content.startswith("The configured operations")
     assert service.list_conversations(user)[0].title == "What can I run?"
+
+
+def test_agent_safe_stop_targets_latest_active_standalone_flow(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    AccessControlService(settings.workflow_database_file).bootstrap_administrator(
+        username="admin",
+        display_name="Administrator",
+        email=None,
+        password="Strong password 123!",
+    )
+    repository = SQLiteAgentRepository(settings.workflow_database_file)
+    user = _user()
+    conversation = repository.create_conversation(
+        user_id=user.user_id,
+        provider="gemini",
+        model="test-model",
+    )
+    repository.reserve_action_decision(
+        request_id="run-active-flow",
+        conversation_id=conversation.conversation_id,
+        user_id=user.user_id,
+        username=user.username,
+        operation_code="standalone-flow",
+        artifact_name="September Close",
+        decision="APPROVE",
+        payload_checksum="a" * 64,
+        payload_snapshot={"name": "September Close"},
+    )
+    repository.finalize_action_decision(
+        request_id="run-active-flow",
+        user_id=user.user_id,
+        conversation_id=conversation.conversation_id,
+        outcome_status="SUBMITTED",
+        execution_id="active-flow-1",
+    )
+    manager = _ActiveFlowOperationManager()
+    service = AgentApplicationService(
+        settings,
+        gateway=AgentCapabilityGateway(
+            settings,
+            control_center=_ControlCenter(),
+            data_review=_DataReview(),
+        ),
+        repository=repository,
+        operation_manager=manager,
+    )
+
+    result = service.send_message(
+        conversation_id=conversation.conversation_id,
+        user=user,
+        content="Stop after this step.",
+    )
+
+    assert manager.stop_requests == [("active-flow-1", "planner")]
+    assert result["execution"] == {
+        "execution_id": "active-flow-1",
+        "operation_code": "standalone-flow",
+        "target_name": "September Close",
+        "status": "RUNNING",
+    }
+    assert "no later flow step will start" in result["message"].content
 
 
 def test_agent_conversations_are_scoped_to_their_owner(tmp_path: Path) -> None:
@@ -1135,10 +1567,39 @@ def test_agent_service_restores_saved_data_explorer_view_as_exact_context(
         "tool": "review_saved_data_view",
         "selection": {
             "cube": "Plan1",
-            "pov": {"Scenario": "Forecast"},
+            "pov": {"Scenario": "Forecast", "Product": "BaseData"},
             "rows": [{"dimension": "Account", "members": ["Revenue"]}],
             "columns": [{"dimension": "Period", "members": ["Jan"]}],
         },
+    }
+
+    variance_arguments = {
+        "name": "revenue-forecast",
+        "comparison": "Actual vs Budget",
+        "period": "Sep",
+        "year": "FY26",
+        "threshold": 500,
+        "pov_overrides": {"Product": "Snacks"},
+    }
+    repository.record_tool_activity(
+        conversation_id=conversation.conversation_id,
+        user_id=1,
+        activities=(
+            AgentToolActivity(
+                name="review_saved_variance",
+                arguments=variance_arguments,
+                status="SUCCESS",
+                summary="Variance compared.",
+            ),
+        ),
+    )
+
+    assert service.get_data_review_context(
+        conversation.conversation_id,
+        _user(Permission.DATA_REVIEW),
+    ) == {
+        "tool": "review_saved_variance",
+        "selection": variance_arguments,
     }
 
 
@@ -1335,7 +1796,7 @@ def test_agent_data_explorer_saved_view_uses_server_side_layout(
     }
     assert reviewed["request"] == {
         "cube": "Plan1",
-        "pov": {"Scenario": "Forecast"},
+        "pov": {"Scenario": "Forecast", "Product": "BaseData"},
         "rows": [{"dimension": "Account", "members": ["Revenue"]}],
         "columns": [{"dimension": "Period", "members": ["Jan"]}],
     }
@@ -1347,6 +1808,54 @@ def test_agent_data_explorer_saved_view_uses_server_side_layout(
                 arguments={"name": "missing"},
             )
         )
+
+
+def test_agent_variance_review_reuses_saved_layout_and_live_values(
+    tmp_path: Path,
+) -> None:
+    gateway = AgentCapabilityGateway(
+        _settings(tmp_path),
+        control_center=_ControlCenter(),
+        data_review=_VarianceDataReview(expected_product="Snacks"),
+        report_workspace=_SavedViewReportWorkspace(),
+    )
+
+    catalog = gateway.execute(
+        AgentToolCall(
+            name="list_variance_views",
+            arguments={
+                "comparison": "Actual vs Budget",
+                "period": "Sep",
+                "threshold": 1000,
+            },
+        )
+    )
+    compared = gateway.execute(
+        AgentToolCall(
+            name="review_saved_variance",
+            arguments={
+                "name": "revenue-forecast",
+                "comparison": "Actual vs Budget",
+                "period": "Sep",
+                "threshold": 1000,
+                "pov_overrides": {"Product": "Snacks"},
+            },
+        )
+    )
+
+    assert catalog["purpose"] == "variance"
+    assert catalog["comparison"] == "Actual vs Budget"
+    assert catalog["views"][0]["name"] == "revenue-forecast"
+    assert compared["saved_view"]["name"] == "revenue-forecast"
+    assert compared["variance_context"] == {
+        "comparison": "Actual vs Budget",
+        "period": "Sep",
+        "year": "",
+        "threshold": 1000.0,
+        "pov_overrides": {"Product": "Snacks"},
+    }
+    assert compared["result"]["compared_cells"] == 2
+    assert compared["result"]["matched_cells"] == 1
 
 
 def test_agent_service_persists_action_draft_for_conversation(
@@ -1388,6 +1897,506 @@ def test_agent_service_persists_action_draft_for_conversation(
     assert persisted == result["action_drafts"]
     assert persisted[0].artifact_name == "Revenue Forecast"
     assert persisted[0].message_id == result["message"].message_id
+
+
+def test_metadata_dimension_request_discovers_both_load_routes(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    access = AccessControlService(settings.workflow_database_file)
+    account = access.bootstrap_administrator(
+        username="admin",
+        display_name="Administrator",
+        email=None,
+        password="Strong password 123!",
+    )
+    repository = SQLiteAgentRepository(settings.workflow_database_file)
+    service = AgentApplicationService(
+        settings,
+        gateway=AgentCapabilityGateway(
+            settings,
+            control_center=_ControlCenter(),
+            data_review=_DataReview(),
+            operation_catalog=_DualLoadCatalog(),
+        ),
+        repository=repository,
+        provider_factory=_NeverCalledProvider,
+    )
+    user = replace(
+        _user(Permission.OPERATION_EXECUTE),
+        user_id=account.user_id,
+    )
+    conversation = service.create_conversation(user)
+
+    initial = service.send_message(
+        conversation_id=conversation.conversation_id,
+        user=user,
+        content="Load new product dimensions.",
+    )
+    choice = initial["clarification_request"]
+    assert choice is not None
+    assert choice.operation_code == "load-options"
+    assert "metadata-import::Import Products" in choice.options
+    assert "data-integrations::Product_Metadata" in choice.options
+    assert initial["input_request"] is None
+    assert initial["approval_request"] is None
+
+
+def test_new_product_member_dialogue_keeps_context_without_model_reasking(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    access = AccessControlService(settings.workflow_database_file)
+    account = access.bootstrap_administrator(
+        username="admin",
+        display_name="Administrator",
+        email=None,
+        password="Strong password 123!",
+    )
+    service = AgentApplicationService(
+        settings,
+        gateway=AgentCapabilityGateway(
+            settings,
+            control_center=_ControlCenter(),
+            data_review=_DataReview(),
+        ),
+        repository=SQLiteAgentRepository(settings.workflow_database_file),
+        provider_factory=_NeverCalledProvider,
+    )
+    user = replace(_user(Permission.OPERATION_EXECUTE), user_id=account.user_id)
+    conversation = service.create_conversation(user)
+
+    for prompt in (
+        "Add Orange Juice as a new product",
+        "Product Dimension",
+        "P_TP",
+        "P_TP is the name of a dimension member under Product",
+        "already told you",
+    ):
+        result = service.send_message(
+            conversation_id=conversation.conversation_id,
+            user=user,
+            content=prompt,
+        )
+        assert "Metadata Import" in result["message"].content
+        assert (
+            "Which metadata file" in result["message"].content
+            or "Is P_TP its parent member?" in result["message"].content
+        )
+        assert "what task" not in result["message"].content.casefold()
+        assert result["approval_request"] is None
+
+    assert "P_TP" in result["message"].content
+
+
+@pytest.mark.parametrize(
+    ("prompt", "expected_job", "integration_name"),
+    (
+        (
+            "Load data",
+            "data-import::Import Actuals",
+            "data-integrations::Actual_Load",
+        ),
+        (
+            "Load January FY27 Actual data using Actual_Jan.csv",
+            "data-import::Import Actuals",
+            "data-integrations::Actual_Load",
+        ),
+        (
+            "Load product units data from Jan to Mar for FY27",
+            "data-import::Import Product Units",
+            "data-integrations::Product_Volume_Load",
+        ),
+        (
+            "Load Product Price",
+            "data-import::Import Product Units",
+            "data-integrations::Product_Volume_Load",
+        ),
+        (
+            "Load metadata",
+            "metadata-import::Import Products",
+            "data-integrations::Product_Metadata",
+        ),
+        (
+            "Load Product metadata using Product.csv",
+            "metadata-import::Import Products",
+            "data-integrations::Product_Metadata",
+        ),
+    ),
+)
+def test_agent_compares_integration_and_saved_job_before_a_load(
+    tmp_path: Path,
+    prompt: str,
+    expected_job: str,
+    integration_name: str,
+) -> None:
+    settings = _settings(tmp_path)
+    access = AccessControlService(settings.workflow_database_file)
+    account = access.bootstrap_administrator(
+        username="admin",
+        display_name="Administrator",
+        email=None,
+        password="Strong password 123!",
+    )
+    service = AgentApplicationService(
+        settings,
+        gateway=AgentCapabilityGateway(
+            settings,
+            control_center=_ControlCenter(),
+            data_review=_DataReview(),
+            operation_catalog=_DualLoadCatalog(),
+        ),
+        repository=SQLiteAgentRepository(settings.workflow_database_file),
+        provider_factory=_NeverCalledProvider,
+    )
+    user = replace(_user(Permission.OPERATION_EXECUTE), user_id=account.user_id)
+    conversation = service.create_conversation(user)
+
+    result = service.send_message(
+        conversation_id=conversation.conversation_id,
+        user=user,
+        content=prompt,
+    )
+
+    choice = result["clarification_request"]
+    assert choice is not None
+    assert choice.operation_code == "load-options"
+    assert expected_job in choice.options
+    assert integration_name in choice.options
+    assert result["approval_request"] is None
+    if "metadata" in prompt.casefold():
+        assert "purpose inferred" in choice.option_labels[integration_name]
+    if "product units" in prompt.casefold():
+        assert set(choice.options) == {
+            "data-import::Import Product Units",
+            "data-integrations::Product_Volume_Load",
+        }
+    if "product metadata" in prompt.casefold():
+        assert set(choice.options) == {
+            "metadata-import::Import Products",
+            "data-integrations::Product_Metadata",
+        }
+
+    selected = service.resolve_clarification(
+        conversation_id=conversation.conversation_id,
+        user=user,
+        request_id=choice.request_id,
+        value=integration_name,
+    )
+
+    guided = selected["input_request"]
+    assert guided is not None
+    assert guided.operation_code == "data-integrations"
+    assert guided.artifact_name == integration_name.partition("::")[2]
+    if "Jan to Mar" in prompt:
+        assert guided.context["prefill"] == {
+            "year": "FY27",
+            "start_month": "Jan",
+            "end_month": "Mar",
+        }
+    if "metadata" in prompt.casefold():
+        assert guided.context["export_modes"] == ["Merge"]
+        assert "purpose" in guided.description
+
+    job_conversation = service.create_conversation(user)
+    job_result = service.send_message(
+        conversation_id=job_conversation.conversation_id,
+        user=user,
+        content=prompt,
+    )
+    job_choice = job_result["clarification_request"]
+    assert job_choice is not None
+    selected_job = service.resolve_clarification(
+        conversation_id=job_conversation.conversation_id,
+        user=user,
+        request_id=job_choice.request_id,
+        value=expected_job,
+    )
+    job_input = selected_job["input_request"]
+    assert job_input is not None
+    assert job_input.operation_code == expected_job.partition("::")[0]
+    assert job_input.artifact_name == expected_job.partition("::")[2]
+
+
+def test_agent_can_cancel_a_data_load_route_choice(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    access = AccessControlService(settings.workflow_database_file)
+    account = access.bootstrap_administrator(
+        username="admin",
+        display_name="Administrator",
+        email=None,
+        password="Strong password 123!",
+    )
+    service = AgentApplicationService(
+        settings,
+        gateway=AgentCapabilityGateway(
+            settings,
+            control_center=_ControlCenter(),
+            data_review=_DataReview(),
+            operation_catalog=_DualLoadCatalog(),
+        ),
+        repository=SQLiteAgentRepository(settings.workflow_database_file),
+        provider_factory=_NeverCalledProvider,
+    )
+    user = replace(_user(Permission.OPERATION_EXECUTE), user_id=account.user_id)
+    conversation = service.create_conversation(user)
+
+    initial = service.send_message(
+        conversation_id=conversation.conversation_id,
+        user=user,
+        content="Load Product Price",
+    )
+    choice = initial["clarification_request"]
+    assert choice is not None
+
+    cancelled = service.resolve_clarification(
+        conversation_id=conversation.conversation_id,
+        user=user,
+        request_id=choice.request_id,
+        value=None,
+    )
+
+    assert cancelled["clarification_request"] is None
+    assert cancelled["input_request"] is None
+    assert cancelled["approval_request"] is None
+    assert "cancelled" in cancelled["message"].content.casefold()
+    assert service.get_pending_clarification(
+        conversation.conversation_id,
+        user,
+    ) is None
+
+
+def test_new_customer_dimension_never_lists_native_data_import_jobs(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    access = AccessControlService(settings.workflow_database_file)
+    account = access.bootstrap_administrator(
+        username="admin",
+        display_name="Administrator",
+        email=None,
+        password="Strong password 123!",
+    )
+    service = AgentApplicationService(
+        settings,
+        gateway=AgentCapabilityGateway(
+            settings,
+            control_center=_ControlCenter(),
+            data_review=_DataReview(),
+            operation_catalog=_DualLoadCatalog(),
+        ),
+        repository=SQLiteAgentRepository(settings.workflow_database_file),
+        provider_factory=_NeverCalledProvider,
+    )
+    user = replace(_user(Permission.OPERATION_EXECUTE), user_id=account.user_id)
+    conversation = service.create_conversation(user)
+
+    result = service.send_message(
+        conversation_id=conversation.conversation_id,
+        user=user,
+        content="Load new Department",
+    )
+
+    choice = result["clarification_request"]
+    assert choice is not None
+    assert choice.operation_code == "load-options"
+    assert any(item.startswith("metadata-import::") for item in choice.options)
+    assert not any(item.startswith("data-import::") for item in choice.options)
+    assert not any(
+        "Product_Volume_Load" in item or "Actual_Load" in item
+        for item in choice.options
+    )
+
+
+def test_load_route_selection_overrides_artifact_named_in_prompt(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    access = AccessControlService(settings.workflow_database_file)
+    account = access.bootstrap_administrator(
+        username="admin",
+        display_name="Administrator",
+        email=None,
+        password="Strong password 123!",
+    )
+    service = AgentApplicationService(
+        settings,
+        gateway=AgentCapabilityGateway(
+            settings,
+            control_center=_ControlCenter(),
+            data_review=_DataReview(),
+            operation_catalog=_DualLoadCatalog(),
+        ),
+        repository=SQLiteAgentRepository(settings.workflow_database_file),
+        provider_factory=_NeverCalledProvider,
+    )
+    user = replace(_user(Permission.OPERATION_EXECUTE), user_id=account.user_id)
+    conversation = service.create_conversation(user)
+    result = service.send_message(
+        conversation_id=conversation.conversation_id,
+        user=user,
+        content="Load data",
+    )
+    choice = result["clarification_request"]
+    assert choice is not None
+    assert "data-import::Import Forecast" in choice.options
+
+    selected = service.resolve_clarification(
+        conversation_id=conversation.conversation_id,
+        user=user,
+        request_id=choice.request_id,
+        value="data-import::Import Forecast",
+    )
+    guided = selected["input_request"]
+    assert guided is not None
+    assert guided.operation_code == "data-import"
+    assert guided.artifact_name == "Import Forecast"
+
+
+def test_agent_does_not_prepare_a_load_when_both_catalogs_are_empty(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    access = AccessControlService(settings.workflow_database_file)
+    account = access.bootstrap_administrator(
+        username="admin",
+        display_name="Administrator",
+        email=None,
+        password="Strong password 123!",
+    )
+    service = AgentApplicationService(
+        settings,
+        gateway=AgentCapabilityGateway(
+            settings,
+            control_center=_ControlCenter(),
+            data_review=_DataReview(),
+        ),
+        repository=SQLiteAgentRepository(settings.workflow_database_file),
+        provider_factory=_NeverCalledProvider,
+    )
+    user = replace(_user(Permission.OPERATION_EXECUTE), user_id=account.user_id)
+    conversation = service.create_conversation(user)
+
+    result = service.send_message(
+        conversation_id=conversation.conversation_id,
+        user=user,
+        content="Load Product metadata using Product.csv",
+    )
+
+    assert result["clarification_request"] is None
+    assert result["approval_request"] is None
+    assert "No operation was prepared" in result["message"].content
+
+
+def test_agent_shows_compatible_load_catalog_when_names_are_opaque(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    access = AccessControlService(settings.workflow_database_file)
+    account = access.bootstrap_administrator(
+        username="admin",
+        display_name="Administrator",
+        email=None,
+        password="Strong password 123!",
+    )
+    service = AgentApplicationService(
+        settings,
+        gateway=AgentCapabilityGateway(
+            settings,
+            control_center=_ControlCenter(),
+            data_review=_DataReview(),
+            operation_catalog=_DualLoadCatalog(),
+        ),
+        repository=SQLiteAgentRepository(settings.workflow_database_file),
+        provider_factory=_NeverCalledProvider,
+    )
+    user = replace(_user(Permission.OPERATION_EXECUTE), user_id=account.user_id)
+    conversation = service.create_conversation(user)
+
+    result = service.send_message(
+        conversation_id=conversation.conversation_id,
+        user=user,
+        content="Load margin data",
+    )
+
+    choice = result["clarification_request"]
+    assert choice is not None
+    assert choice.options
+    assert any(item.startswith("data-import::") for item in choice.options)
+    assert any(
+        item.startswith("data-integrations::") for item in choice.options
+    )
+    assert "could not prove a name or description match" in choice.prompt
+
+
+def test_agent_reports_authenticated_users_own_role_and_permissions(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    access = AccessControlService(settings.workflow_database_file)
+    account = access.bootstrap_administrator(
+        username="planner",
+        display_name="Finance Planner",
+        email=None,
+        password="Strong password 123!",
+    )
+    repository = SQLiteAgentRepository(settings.workflow_database_file)
+    service = AgentApplicationService(
+        settings,
+        gateway=AgentCapabilityGateway(
+            settings,
+            control_center=_ControlCenter(),
+            data_review=_DataReview(),
+        ),
+        repository=repository,
+        provider_factory=_NeverCalledProvider,
+    )
+    user = replace(
+        _user(Permission.OPERATION_EXECUTE, Permission.DATA_REVIEW),
+        user_id=account.user_id,
+        username="planner",
+        display_name="Finance Planner",
+    )
+    conversation = service.create_conversation(user)
+
+    permissions = service.send_message(
+        conversation_id=conversation.conversation_id,
+        user=user,
+        content="Hello, can you describe my allowed permisions?",
+    )
+    role = service.send_message(
+        conversation_id=conversation.conversation_id,
+        user=user,
+        content="What is my role?",
+    )
+
+    for response in (permissions, role):
+        content = response["message"].content
+        assert "Finance Planner (`planner`)" in content
+        assert "Platform role:** Power User" in content
+        assert "operation.execute" in content
+        assert "data.review" in content
+        assert "governed operational assistant" not in content.casefold()
+        assert response["tool_activity"][0].name == "get_current_user_access"
+        assert response["tool_activity"][0].result["username"] == "planner"
+
+
+def test_personal_access_detection_does_not_confuse_assistant_identity() -> None:
+    assert AgentApplicationService._is_current_user_access_request(
+        "Tell me my permissions, not yours."
+    )
+    assert AgentApplicationService._is_current_user_access_request(
+        "What permissions do I have?"
+    )
+    assert not AgentApplicationService._is_current_user_access_request(
+        "What is your role?"
+    )
+    assert not AgentApplicationService._is_current_user_access_request(
+        "List the platform operations."
+    )
+    assert not AgentApplicationService._is_current_user_access_request(
+        "What can I run?"
+    )
 
 
 def test_explicit_agent_approval_queues_rule_without_redundant_draft(
@@ -1527,6 +2536,229 @@ def test_business_rule_request_runs_full_governed_flow_without_model_tool_choice
     assert operation_input.rule_name == "Revenue Forecast"
     assert operation_input.runtime_prompts == {"Year": "FY27"}
     assert actor.trigger_source is TriggerSource.AI_AGENT
+
+
+@pytest.mark.parametrize(
+    ("prompt", "rule_name"),
+    (
+        ("Run Aggregate Plan rule.", "Aggregate Plan"),
+        (
+            "run clear facilities allocation rule",
+            "Clear Facilities Allocation",
+        ),
+    ),
+)
+def test_named_rule_request_does_not_require_business_rule_wording(
+    tmp_path: Path,
+    prompt: str,
+    rule_name: str,
+) -> None:
+    settings = _settings(tmp_path)
+    access = AccessControlService(settings.workflow_database_file)
+    account = access.bootstrap_administrator(
+        username="admin",
+        display_name="Administrator",
+        email=None,
+        password="Strong password 123!",
+    )
+    repository = SQLiteAgentRepository(settings.workflow_database_file)
+    service = AgentApplicationService(
+        settings,
+        gateway=AgentCapabilityGateway(
+            settings,
+            control_center=_ControlCenter(),
+            data_review=_DataReview(),
+            operation_catalog=_NamedRuleCatalog(rule_name),
+        ),
+        repository=repository,
+        provider_factory=_NeverCalledProvider,
+        operation_manager=_OperationManager(),
+    )
+    user = replace(
+        _user(Permission.OPERATION_EXECUTE),
+        user_id=account.user_id,
+    )
+    conversation = service.create_conversation(user)
+
+    prepared = service.send_message(
+        conversation_id=conversation.conversation_id,
+        user=user,
+        content=prompt,
+    )
+
+    assert prepared["input_request"] is not None
+    assert prepared["input_request"].artifact_name == rule_name
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    (
+        "Calculate product revenue",
+        "Run revenue calculation",
+        "Please compute product revenue",
+    ),
+)
+def test_calculation_request_discovers_live_business_rules_without_model(
+    tmp_path: Path,
+    prompt: str,
+) -> None:
+    settings = _settings(tmp_path)
+    access = AccessControlService(settings.workflow_database_file)
+    account = access.bootstrap_administrator(
+        username="admin",
+        display_name="Administrator",
+        email=None,
+        password="Strong password 123!",
+    )
+    service = AgentApplicationService(
+        settings,
+        gateway=AgentCapabilityGateway(
+            settings,
+            control_center=_ControlCenter(),
+            data_review=_DataReview(),
+            operation_catalog=_NamedRuleCatalog(
+                "Product Revenue Rule", "Gross Margin Calc"
+            ),
+        ),
+        repository=SQLiteAgentRepository(settings.workflow_database_file),
+        provider_factory=_NeverCalledProvider,
+    )
+    user = replace(_user(Permission.OPERATION_EXECUTE), user_id=account.user_id)
+    conversation = service.create_conversation(user)
+
+    prepared = service.send_message(
+        conversation_id=conversation.conversation_id,
+        user=user,
+        content=prompt,
+    )
+
+    choice = prepared["clarification_request"]
+    assert choice is not None
+    assert choice.operation_code == "business-rules"
+    assert set(choice.options) == {"Product Revenue Rule", "Gross Margin Calc"}
+    assert prepared["approval_request"] is None
+
+    selected = service.resolve_clarification(
+        conversation_id=conversation.conversation_id,
+        user=user,
+        request_id=choice.request_id,
+        value="Product Revenue Rule",
+    )
+    assert selected["input_request"] is not None
+    assert selected["input_request"].artifact_name == "Product Revenue Rule"
+
+
+def test_forecast_seed_followup_keeps_task_and_lists_current_rules(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    access = AccessControlService(settings.workflow_database_file)
+    account = access.bootstrap_administrator(
+        username="admin",
+        display_name="Administrator",
+        email=None,
+        password="Strong password 123!",
+    )
+    repository = SQLiteAgentRepository(settings.workflow_database_file)
+    service = AgentApplicationService(
+        settings,
+        gateway=AgentCapabilityGateway(
+            settings,
+            control_center=_ControlCenter(),
+            data_review=_DataReview(),
+            operation_catalog=_NamedRuleCatalog(
+                "Actual to Forecast", "Plan to Forecast", "Aggregate Forecast"
+            ),
+        ),
+        repository=repository,
+        provider_factory=_NeverCalledProvider,
+    )
+    user = replace(_user(Permission.OPERATION_EXECUTE), user_id=account.user_id)
+    conversation = service.create_conversation(user)
+    repository.add_message(
+        conversation_id=conversation.conversation_id,
+        user_id=user.user_id,
+        role=AgentMessageRole.USER,
+        content="run forecast seeding",
+    )
+    repository.add_message(
+        conversation_id=conversation.conversation_id,
+        user_id=user.user_id,
+        role=AgentMessageRole.ASSISTANT,
+        content="Which Business Rule would you like?",
+    )
+
+    result = service.send_message(
+        conversation_id=conversation.conversation_id,
+        user=user,
+        content="another rule",
+    )
+
+    choice = result["clarification_request"]
+    assert choice is not None
+    assert choice.operation_code == "business-rules"
+    assert set(choice.options) == {
+        "Actual to Forecast", "Plan to Forecast", "Aggregate Forecast"
+    }
+    assert result["approval_request"] is None
+
+
+def test_business_rule_confirmation_retains_original_rule_request(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    access = AccessControlService(settings.workflow_database_file)
+    account = access.bootstrap_administrator(
+        username="admin",
+        display_name="Administrator",
+        email=None,
+        password="Strong password 123!",
+    )
+    repository = SQLiteAgentRepository(settings.workflow_database_file)
+    service = AgentApplicationService(
+        settings,
+        gateway=AgentCapabilityGateway(
+            settings,
+            control_center=_ControlCenter(),
+            data_review=_DataReview(),
+            operation_catalog=_NamedRuleCatalog("Aggregate Plan"),
+        ),
+        repository=repository,
+        provider_factory=_NeverCalledProvider,
+        operation_manager=_OperationManager(),
+    )
+    user = replace(
+        _user(Permission.OPERATION_EXECUTE),
+        user_id=account.user_id,
+    )
+    conversation = service.create_conversation(user)
+    for role, content in (
+        (AgentMessageRole.USER, "run aggregate plan rule"),
+        (
+            AgentMessageRole.ASSISTANT,
+            "Would you like me to prepare the Aggregate Plan rule?",
+        ),
+        (AgentMessageRole.USER, "yes"),
+        (
+            AgentMessageRole.ASSISTANT,
+            "Would you like me to prepare it now?",
+        ),
+    ):
+        repository.add_message(
+            conversation_id=conversation.conversation_id,
+            user_id=user.user_id,
+            role=role,
+            content=content,
+        )
+
+    prepared = service.send_message(
+        conversation_id=conversation.conversation_id,
+        user=user,
+        content="yes prepare now",
+    )
+
+    assert prepared["input_request"] is not None
+    assert prepared["input_request"].artifact_name == "Aggregate Plan"
 
 
 def test_standalone_flow_runs_after_one_complete_approval(
@@ -2802,6 +4034,59 @@ def test_gemini_adapter_supports_current_json_schema_field() -> None:
     assert declaration.values["parameters_json_schema"] == (
         tool.parameters_schema
     )
+
+
+def test_gemini_can_require_one_structured_interpretation_tool() -> None:
+    class Value:
+        def __init__(self, **values) -> None:
+            self.values = values
+
+    class Models:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def generate_content(self, **values):
+            self.calls.append(values)
+            return SimpleNamespace(
+                function_calls=(), candidates=(), text="Recorded."
+            )
+
+    models = Models()
+    fake_types = SimpleNamespace(
+        FunctionDeclaration=Value,
+        GenerateContentConfig=Value,
+        Tool=Value,
+        ToolConfig=Value,
+        FunctionCallingConfig=Value,
+        AutomaticFunctionCallingConfig=Value,
+    )
+    provider = GeminiAgentProvider(
+        api_key="test-key",
+        model="test-model",
+        client=SimpleNamespace(models=models),
+        types_module=fake_types,
+    )
+    tool = AgentToolDefinition(
+        name="record_task_interpretation",
+        description="Record structured task semantics.",
+        parameters_schema={"type": "object", "properties": {}},
+    )
+
+    provider.generate(
+        messages=(),
+        system_instruction="Return structured semantics only.",
+        tools=(tool,),
+        provider_exchange=(),
+        required_tool_name="record_task_interpretation",
+    )
+
+    config = models.calls[0]["config"]
+    tool_config = config.values["tool_config"]
+    function_config = tool_config.values["function_calling_config"]
+    assert function_config.values == {
+        "mode": "ANY",
+        "allowed_function_names": ["record_task_interpretation"],
+    }
 
 
 def test_gemini_function_result_is_returned_as_a_user_turn() -> None:

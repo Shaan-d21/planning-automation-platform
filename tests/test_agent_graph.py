@@ -10,6 +10,7 @@ import pytest
 from app.agent.capabilities import AgentCapabilityGateway
 from app.agent.checkpoints import AgentCheckpointStore
 from app.agent.graph import AgentGraphOrchestrator, GRAPH_TOOL_NAMES
+from app.agent.task_state import AgentTaskInterpreter
 from app.agent.models import (
     AgentMessage,
     AgentMessageRole,
@@ -23,13 +24,18 @@ from app.application.operations import (
     PipelineVariablePreview,
 )
 from app.application.reports import ReportCatalogItem
-from app.application.data_review import DataReviewGrid
+from app.application.data_review import DataReviewComparison, DataReviewGrid
 from app.application.substitution_variables import SubstitutionVariableCatalog
 from app.application.user_variables import UserVariableCatalog
 from app.config.settings import Settings
 from app.models.substitution_variable import SubstitutionVariable
 from app.models.environment import DimensionInfo
-from app.models.data_validation import FormGrid, FormGridRow
+from app.models.data_validation import (
+    DataMismatch,
+    DataValidationResult,
+    FormGrid,
+    FormGridRow,
+)
 from app.models.workflow import (
     WorkflowRun,
     WorkflowStatus,
@@ -37,7 +43,12 @@ from app.models.workflow import (
     WorkflowStepStatus,
 )
 from app.models.user_variable import UserVariableDefinition, UserVariableValue
-from app.utils.exceptions import AgentProviderError
+from app.utils.exceptions import (
+    AgentCapabilityError,
+    AgentProviderError,
+    SubstitutionVariableError,
+    UserVariableError,
+)
 
 
 class _ControlCenter:
@@ -139,14 +150,61 @@ class _ReportWorkspace:
                 name="revenue-forecast",
                 title="Revenue Forecast",
                 cube="Plan2",
-                default_pov=(("Scenario", "Actual"), ("Year", "FY24")),
+                default_pov=(
+                    ("Scenario", "Actual"),
+                    ("Year", "FY24"),
+                    ("Product", "BaseData"),
+                ),
                 rows=(("Account", ("Revenue",)),),
                 columns=(("Period", ("Jan", "Feb")),),
             ),
         )
 
 
+class _VarianceDataReview(_DataReview):
+    def compare_slices(
+        self,
+        source,
+        target,
+        *,
+        tolerance,
+        max_mismatches,
+        include_cells,
+    ):
+        assert source.pov["Scenario"] == "Actual"
+        assert target.pov["Scenario"] == "Budget"
+        assert source.pov["Year"] == target.pov["Year"] == "FY26"
+        assert source.pov["Product"] == target.pov["Product"] == "Snacks"
+        assert source.columns[0].members == target.columns[0].members == ("Sep",)
+        assert tolerance == 500
+        assert max_mismatches == 100
+        assert include_cells is False
+        return DataReviewComparison(
+            source_cube="Plan2",
+            target_cube="Plan2",
+            result=DataValidationResult(
+                source_form="Actual Sep",
+                target_form="Budget Sep",
+                compared_cells=3,
+                matched_cells=2,
+                mismatches=(
+                    DataMismatch(
+                        row_headers=("Revenue",),
+                        column_headers=("Sep",),
+                        source_value=2000,
+                        target_value=1000,
+                        difference=1000,
+                    ),
+                ),
+                tolerance=500,
+            ),
+        )
+
+
 class _SubstitutionVariables:
+    def validate_value_compatibility(self, **_kwargs):
+        return None
+
     def discover(self):
         return SubstitutionVariableCatalog(
             variables=(
@@ -162,6 +220,9 @@ class _SubstitutionVariables:
 
 
 class _DuplicateSubstitutionVariables:
+    def validate_value_compatibility(self, **_kwargs):
+        return None
+
     def discover(self):
         return SubstitutionVariableCatalog(
             variables=(
@@ -173,7 +234,24 @@ class _DuplicateSubstitutionVariables:
         )
 
 
+class _PeriodSubstitutionVariables:
+    def validate_value_compatibility(self, **_kwargs):
+        return None
+
+    def discover(self):
+        return SubstitutionVariableCatalog(
+            variables=(
+                SubstitutionVariable("CurMth", "Feb", "ALL"),
+            ),
+            plan_types=(),
+            scopes=("ALL",),
+        )
+
+
 class _EmptyScopeSubstitutionVariables:
+    def validate_value_compatibility(self, **_kwargs):
+        return None
+
     def discover(self):
         return SubstitutionVariableCatalog(
             variables=(),
@@ -183,6 +261,9 @@ class _EmptyScopeSubstitutionVariables:
 
 
 class _UserVariables:
+    def validate_value_compatibility(self, **_kwargs):
+        return None
+
     def discover(self, user_name: str):
         return UserVariableCatalog(
             user_name=user_name,
@@ -197,6 +278,49 @@ class _UserVariables:
                     member="Sales West",
                 ),
             ),
+        )
+
+
+class _RejectingSubstitutionVariables:
+    def discover(self):
+        return SubstitutionVariableCatalog(
+            variables=(
+                SubstitutionVariable("CurrentScenario", "Actual", "ALL"),
+            ),
+            plan_types=(),
+            scopes=("ALL",),
+        )
+
+    def validate_value_compatibility(self, **_kwargs):
+        raise SubstitutionVariableError(
+            "'FY28' is not an exact live member of dimension 'Scenario'. "
+            "No change was submitted."
+        )
+
+
+class _TypedScenarioSubstitutionVariables:
+    def discover(self):
+        return SubstitutionVariableCatalog(
+            variables=(
+                SubstitutionVariable("CurrentScenario", "Actual", "ALL"),
+            ),
+            plan_types=(),
+            scopes=("ALL",),
+        )
+
+    def validate_value_compatibility(self, **kwargs):
+        if kwargs.get("proposed_value") not in {"Actual", "Budget", "Forecast"}:
+            raise SubstitutionVariableError(
+                "Substitution variable 'CurrentScenario' expects a scenario "
+                "value, but 'FY28' looks like a year. No change was submitted."
+            )
+
+
+class _RejectingUserVariables(_UserVariables):
+    def validate_value_compatibility(self, **_kwargs):
+        raise UserVariableError(
+            "'FY28' is not an exact live member of dimension 'Entity'. "
+            "No change was submitted."
         )
 
 
@@ -240,6 +364,61 @@ class _StandaloneFlowOperationCatalog:
 
     def discover_registered(self):
         return type("Catalog", (), {"pipelines": (), "data_integrations": ()})()
+
+
+class _CompleteStandaloneFlowOperationCatalog:
+    def discover_job_names(self, *, job_type):
+        return {
+            "RULES": ("Calculate Forecast",),
+            "PLAN_TYPE_MAP": ("Forecast to Reporting",),
+        }.get(job_type, ())
+
+    def discover_registered(self):
+        integration = type("Integration", (), {"name": "Revenue Load"})()
+        return type(
+            "Catalog",
+            (),
+            {"pipelines": (), "data_integrations": (integration,)},
+        )()
+
+
+class _ForecastSeedingOperationCatalog:
+    def discover_job_names(self, *, job_type):
+        if job_type == "RULES":
+            return ("Seed Forecast",)
+        return ()
+
+    def discover_registered(self):
+        pipeline = type(
+            "Pipeline",
+            (),
+            {"code": "FCST_SEED", "name": "Forecast Seeding"},
+        )()
+        integration = type(
+            "Integration",
+            (),
+            {"name": "Forecast Seed Load"},
+        )()
+        return type(
+            "Catalog",
+            (),
+            {
+                "pipelines": (pipeline,),
+                "data_integrations": (integration,),
+            },
+        )()
+
+
+class _ForecastSeedRuleCatalog(_ForecastSeedingOperationCatalog):
+    def discover_job_names(self, *, job_type):
+        if job_type == "RULES":
+            return (
+                "Actual to Forecast",
+                "Plan to Forecast",
+                "Create Forecast",
+                "Aggregate Forecast",
+            )
+        return ()
 
 
 class _RepeatedRuleFlowOperationCatalog:
@@ -412,6 +591,30 @@ class _PipelineOperationCatalog:
                     runs_in_parallel=False,
                 ),
             ),
+        )
+
+
+class _SalesProcessCatalog:
+    def discover_registered(self):
+        pipeline = type(
+            "Pipeline",
+            (),
+            {"code": "SALES_PIPELINE", "name": "Sales Process"},
+        )()
+        return type(
+            "Catalog",
+            (),
+            {"pipelines": (pipeline,), "data_integrations": ()},
+        )()
+
+    def preflight_pipeline(self, pipeline_code):
+        assert pipeline_code == "SALES_PIPELINE"
+        return PipelineOperationPreview(
+            code="SALES_PIPELINE",
+            display_name="Sales Process",
+            variables=(),
+            file_requirements=(),
+            stages=(),
         )
 
 
@@ -837,6 +1040,7 @@ def test_graph_inspects_latest_record_counts_without_model_tool_choice(
             _message("How many records were read, processed, and rejected?"),
         ),
         allowed_tool_names=("get_execution_evidence",),
+        authorized_execution_ids=("evidence-run-1",),
     )
 
     assert "**25 records read**" in result.text
@@ -860,6 +1064,96 @@ def test_graph_inspects_latest_failed_run_without_model_tool_choice(
         user_id=7,
         messages=(_message("Why did the latest job fail?"),),
         allowed_tool_names=("get_execution_evidence",),
+        authorized_execution_ids=("evidence-run-1",),
+    )
+
+    assert "Invalid Entity member" in result.text
+    assert result.tool_activity[0].arguments == {
+        "selector": "latest_failed"
+    }
+
+
+def test_status_followup_uses_only_conversation_owned_execution(
+    tmp_path: Path,
+) -> None:
+    graph = _orchestrator(
+        tmp_path,
+        _NeverCalledProvider(),
+        control_center=_ExecutionEvidenceControlCenter(),
+    )
+
+    result = graph.invoke(
+        conversation_id="owned-execution",
+        user_id=7,
+        messages=(_message("Is it done?"),),
+        allowed_tool_names=("get_execution_evidence",),
+        authorized_execution_ids=("evidence-run-1",),
+    )
+
+    assert "**Status:** FAILED" in result.text
+    assert "evidence-run-1" in result.text
+    assert result.tool_activity[0].arguments == {"selector": "latest"}
+
+
+def test_execution_id_from_another_conversation_is_not_disclosed(
+    tmp_path: Path,
+) -> None:
+    graph = _orchestrator(
+        tmp_path,
+        _NeverCalledProvider(),
+        control_center=_ExecutionEvidenceControlCenter(),
+    )
+
+    result = graph.invoke(
+        conversation_id="other-execution",
+        user_id=8,
+        messages=(_message("Show execution id evidence-run-1"),),
+        allowed_tool_names=("get_execution_evidence",),
+        authorized_execution_ids=(),
+    )
+
+    assert "not associated with this conversation" in result.text
+    assert "Invalid Entity member" not in result.text
+
+
+def test_retry_followup_does_not_resubmit_oracle_job(tmp_path: Path) -> None:
+    graph = _orchestrator(
+        tmp_path,
+        _NeverCalledProvider(),
+        control_center=_ExecutionEvidenceControlCenter(),
+    )
+
+    result = graph.invoke(
+        conversation_id="retry-execution",
+        user_id=7,
+        messages=(_message("try again"),),
+        allowed_tool_names=("get_execution_evidence",),
+        authorized_execution_ids=("evidence-run-1",),
+    )
+
+    assert "retry has **not** started" in result.text
+    assert "Invalid Entity member" in result.text
+    assert all(
+        activity.name == "get_execution_evidence"
+        for activity in result.tool_activity
+    )
+
+
+def test_short_why_followup_inspects_last_failed_conversation_run(
+    tmp_path: Path,
+) -> None:
+    graph = _orchestrator(
+        tmp_path,
+        _NeverCalledProvider(),
+        control_center=_ExecutionEvidenceControlCenter(),
+    )
+
+    result = graph.invoke(
+        conversation_id="short-why-execution",
+        user_id=7,
+        messages=(_message("why?"),),
+        allowed_tool_names=("get_execution_evidence",),
+        authorized_execution_ids=("evidence-run-1",),
     )
 
     assert "Invalid Entity member" in result.text
@@ -2339,6 +2633,193 @@ def test_graph_prepares_exact_live_cube_refresh_for_one_approval(
     assert "application" in result.approval_request.effect.casefold()
 
 
+def test_graph_refresh_planning_cube_uses_saved_application_job_not_cube(
+    tmp_path: Path,
+) -> None:
+    graph = _orchestrator(
+        tmp_path,
+        _NeverCalledProvider(),
+        operation_catalog=_CubeRefreshOperationCatalog(),
+    )
+
+    result = graph.invoke(
+        conversation_id="conversation-refresh-planning-cube",
+        user_id=7,
+        messages=(_message("Refresh the planning cube"),),
+    )
+
+    assert result.clarification_request is not None
+    assert result.clarification_request.operation_code == "cube-refresh"
+    assert result.clarification_request.options == (
+        "Refresh_Cube", "RefreshDatabase"
+    )
+    assert "application-wide" in result.clarification_request.prompt
+    assert "Plan1" not in result.clarification_request.options
+
+
+def test_cube_refresh_followup_yes_recovers_after_misleading_model_answer(
+    tmp_path: Path,
+) -> None:
+    graph = _orchestrator(
+        tmp_path,
+        _NeverCalledProvider(),
+        operation_catalog=_CubeRefreshOperationCatalog(),
+    )
+    messages = (
+        _message("Refresh the planning cube"),
+        AgentMessage(
+            message_id=2,
+            conversation_id="conversation-1",
+            role=AgentMessageRole.ASSISTANT,
+            content="Which cube would you like to refresh?",
+            created_at=datetime.now(UTC),
+        ),
+        _message("plan1"),
+        AgentMessage(
+            message_id=4,
+            conversation_id="conversation-1",
+            role=AgentMessageRole.ASSISTANT,
+            content="I prepared a reviewable refresh proposal for Plan1. Confirm?",
+            created_at=datetime.now(UTC),
+        ),
+        _message("yes"),
+    )
+
+    result = graph.invoke(
+        conversation_id="conversation-refresh-followup",
+        user_id=7,
+        messages=messages,
+    )
+
+    assert result.clarification_request is not None
+    assert result.clarification_request.operation_code == "cube-refresh"
+    assert set(result.clarification_request.options) == {
+        "Refresh_Cube", "RefreshDatabase"
+    }
+
+
+def test_named_sales_process_prepares_live_oracle_pipeline(
+    tmp_path: Path,
+) -> None:
+    graph = _orchestrator(
+        tmp_path,
+        _NeverCalledProvider(),
+        operation_catalog=_SalesProcessCatalog(),
+    )
+
+    result = graph.invoke(
+        conversation_id="conversation-sales-process",
+        user_id=7,
+        messages=(_message("Run the sales process"),),
+    )
+
+    assert result.clarification_request is None
+    assert result.input_request is not None
+    assert result.input_request.operation_code == "pipelines"
+    assert result.input_request.artifact_name == "SALES_PIPELINE"
+
+
+def test_planning_year_change_prefills_one_live_current_year_variable(
+    tmp_path: Path,
+) -> None:
+    graph = _orchestrator(
+        tmp_path,
+        _NeverCalledProvider(),
+        substitution_variables=_SubstitutionVariables(),
+    )
+
+    result = graph.invoke(
+        conversation_id="conversation-planning-year-change",
+        user_id=7,
+        messages=(_message("Change the planning year to FY28."),),
+    )
+
+    assert result.clarification_request is None
+    assert result.input_request is not None
+    assert result.input_request.operation_code == "substitution-variables"
+    assert result.input_request.artifact_name == "CurYr"
+    assert result.input_request.context["prefill"] == {"new_value": "FY28"}
+
+
+def test_current_period_change_prefills_live_current_month_variable(
+    tmp_path: Path,
+) -> None:
+    graph = _orchestrator(
+        tmp_path,
+        _NeverCalledProvider(),
+        substitution_variables=_PeriodSubstitutionVariables(),
+    )
+
+    result = graph.invoke(
+        conversation_id="conversation-current-period-change",
+        user_id=7,
+        messages=(_message("Set the current period to Mar"),),
+    )
+
+    assert result.input_request is not None
+    assert result.input_request.artifact_name == "CurMth"
+    assert result.input_request.context["prefill"] == {"new_value": "Mar"}
+
+
+def test_planning_year_change_does_not_guess_between_scoped_variables(
+    tmp_path: Path,
+) -> None:
+    graph = _orchestrator(
+        tmp_path,
+        _NeverCalledProvider(),
+        substitution_variables=_DuplicateSubstitutionVariables(),
+    )
+
+    result = graph.invoke(
+        conversation_id="conversation-year-scoped-choice",
+        user_id=7,
+        messages=(_message("Change the planning year to FY28"),),
+    )
+
+    assert result.clarification_request is not None
+    assert set(result.clarification_request.options) == {
+        "ALL.CurYr", "Plan1.CurYr"
+    }
+
+
+def test_generic_year_change_asks_variable_type_and_retains_value(
+    tmp_path: Path,
+) -> None:
+    graph = _orchestrator(
+        tmp_path,
+        _NeverCalledProvider(),
+        substitution_variables=_SubstitutionVariables(),
+    )
+    first = graph.invoke(
+        conversation_id="conversation-generic-year-change",
+        user_id=7,
+        messages=(_message("Change year to FY28"),),
+    )
+
+    assert "substitution variable" in first.text
+    assert "user variable" in first.text
+    assert first.input_request is None
+    second = graph.invoke(
+        conversation_id="conversation-generic-year-choice",
+        user_id=7,
+        messages=(
+            _message("Change year to FY28"),
+            _message("substitution variable"),
+        ),
+    )
+
+    assert second.clarification_request is not None
+    assert second.clarification_request.operation_code == "substitution-variables"
+    selected = graph.resume_clarification(
+        conversation_id="conversation-generic-year-choice",
+        user_id=7,
+        request_id=second.clarification_request.request_id,
+        value="CurYr",
+    )
+    assert selected.input_request is not None
+    assert selected.input_request.context["prefill"] == {"new_value": "FY28"}
+
+
 def test_graph_collects_live_substitution_variable_update_for_one_approval(
     tmp_path: Path,
 ) -> None:
@@ -2487,6 +2968,154 @@ def test_application_scope_remains_valid_when_plan_types_are_unavailable(
 
     assert normalized["scope"] == "ALL"
     assert normalized["variable_name"] == "FcstYr"
+
+
+def test_substitution_variable_review_rejects_cross_dimension_value(
+    tmp_path: Path,
+) -> None:
+    gateway = AgentCapabilityGateway(
+        _settings(tmp_path),
+        control_center=_ControlCenter(),
+        data_review=_DataReview(),
+        substitution_variables=_RejectingSubstitutionVariables(),
+    )
+
+    with pytest.raises(
+        AgentCapabilityError,
+        match="not an exact live member of dimension 'Scenario'",
+    ):
+        gateway.normalize_guided_inputs(
+            "substitution-variables",
+            "CurrentScenario",
+            {"new_value": "FY28"},
+        )
+
+
+def test_invalid_variable_input_returns_exact_safe_feedback(
+    tmp_path: Path,
+) -> None:
+    graph = _orchestrator(
+        tmp_path,
+        _StepProvider(
+            requested_tool="prepare_operation_action",
+            arguments={
+                "operation_code": "substitution-variables",
+                "objective": "Change the current scenario to FY28.",
+                "artifact_name": "CurrentScenario",
+            },
+        ),
+        substitution_variables=_RejectingSubstitutionVariables(),
+    )
+    paused = graph.invoke(
+        conversation_id="conversation-invalid-variable-type",
+        user_id=7,
+        messages=(
+            _message("Set the CurrentScenario substitution variable to FY28."),
+        ),
+    )
+
+    assert paused.input_request is not None
+    with pytest.raises(
+        AgentProviderError,
+        match="not an exact live member of dimension 'Scenario'",
+    ):
+        graph.resume_input(
+            conversation_id="conversation-invalid-variable-type",
+            user_id=7,
+            request_id=paused.input_request.request_id,
+            values={"new_value": "FY28"},
+        )
+    retry = graph.pending_input(
+        conversation_id="conversation-invalid-variable-type",
+        user_id=7,
+    )
+    assert retry is not None
+    assert retry.request_id == paused.input_request.request_id
+
+
+def test_invalid_variable_input_can_be_corrected_on_the_same_card(
+    tmp_path: Path,
+) -> None:
+    graph = _orchestrator(
+        tmp_path,
+        _StepProvider(
+            requested_tool="prepare_operation_action",
+            arguments={
+                "operation_code": "substitution-variables",
+                "objective": "Change the current scenario.",
+                "artifact_name": "CurrentScenario",
+            },
+        ),
+        substitution_variables=_TypedScenarioSubstitutionVariables(),
+    )
+    conversation_id = "conversation-correct-variable-type"
+    paused = graph.invoke(
+        conversation_id=conversation_id,
+        user_id=7,
+        messages=(_message("Change CurrentScenario."),),
+    )
+    assert paused.input_request is not None
+
+    with pytest.raises(AgentProviderError, match="expects a scenario"):
+        graph.resume_input(
+            conversation_id=conversation_id,
+            user_id=7,
+            request_id=paused.input_request.request_id,
+            values={"new_value": "FY28"},
+        )
+
+    corrected = graph.resume_input(
+        conversation_id=conversation_id,
+        user_id=7,
+        request_id=paused.input_request.request_id,
+        values={"new_value": "Budget"},
+    )
+
+    assert corrected.approval_request is not None
+    assert corrected.approval_request.input_values["new_value"] == "Budget"
+
+
+def test_invalid_variable_input_can_be_cancelled_on_the_same_card(
+    tmp_path: Path,
+) -> None:
+    graph = _orchestrator(
+        tmp_path,
+        _StepProvider(
+            requested_tool="prepare_operation_action",
+            arguments={
+                "operation_code": "substitution-variables",
+                "objective": "Change the current scenario.",
+                "artifact_name": "CurrentScenario",
+            },
+        ),
+        substitution_variables=_TypedScenarioSubstitutionVariables(),
+    )
+    conversation_id = "conversation-cancel-invalid-variable-type"
+    paused = graph.invoke(
+        conversation_id=conversation_id,
+        user_id=7,
+        messages=(_message("Change CurrentScenario."),),
+    )
+    assert paused.input_request is not None
+
+    with pytest.raises(AgentProviderError, match="expects a scenario"):
+        graph.resume_input(
+            conversation_id=conversation_id,
+            user_id=7,
+            request_id=paused.input_request.request_id,
+            values={"new_value": "FY28"},
+        )
+
+    cancelled = graph.resume_input(
+        conversation_id=conversation_id,
+        user_id=7,
+        request_id=paused.input_request.request_id,
+        values=None,
+    )
+
+    assert cancelled.input_request is None
+    assert cancelled.approval_request is None
+    assert cancelled.tool_activity[0].status == "CANCELLED"
 
 
 def test_graph_can_cancel_substitution_variable_input(
@@ -2702,6 +3331,18 @@ def test_graph_configures_and_approves_executable_standalone_flow(
                 "Pipeline for these operations: Business Rules -> Data Maps."
             ),
         ),
+        task_context={
+            "intent": "MONTH_CLOSE",
+            "phase": "READY_FOR_PLAN",
+            "confidence": "HIGH_CONFIDENCE",
+            "parameters": {
+                "period": "Sep",
+                "activities": ["Business Rules", "Data Maps"],
+            },
+            "missing_parameters": [],
+            "clarification_prompt": None,
+            "objective": "Start September month close",
+        },
     )
 
     assert first.clarification_request is None, first.clarification_request
@@ -2757,6 +3398,260 @@ def test_graph_configures_and_approves_executable_standalone_flow(
     assert completed.tool_activity[0].result["standalone_flow"]["status"] == (
         "READY_FOR_APPROVAL"
     )
+
+
+def test_month_close_standalone_choice_advances_to_live_artifact_selection(
+    tmp_path: Path,
+) -> None:
+    graph = _orchestrator(
+        tmp_path,
+        _NeverCalledProvider(),
+        operation_catalog=_CompleteStandaloneFlowOperationCatalog(),
+    )
+
+    result = graph.invoke(
+        conversation_id="conversation-month-close-standalone-choice",
+        user_id=7,
+        messages=(
+            _message("Start September month close."),
+            _message("Run Data Integration, then Business Rule, then Data Map."),
+            _message(
+                "Configure and execute a standalone flow without an Oracle "
+                "Pipeline for these operations: Data Integrations -> Business "
+                "Rules -> Data Maps. Objective: Sep Month Close."
+            ),
+        ),
+        task_context={
+            "intent": "MONTH_CLOSE",
+            "phase": "READY_FOR_PLAN",
+            "confidence": "HIGH_CONFIDENCE",
+            "parameters": {
+                "period": "Sep",
+                "activities": [
+                    "Data Integration",
+                    "Business Rule",
+                    "Data Map",
+                ],
+            },
+            "missing_parameters": [],
+            "clarification_prompt": None,
+            "objective": "Start September month close",
+        },
+    )
+
+    assert result.input_request is not None
+    assert result.input_request.operation_code == "data-integrations"
+    assert result.input_request.artifact_name == "Revenue Load"
+    assert result.input_request.context["flow_step"] == {
+        "sequence": 1,
+        "total": 3,
+    }
+    assert result.tool_activity == ()
+
+
+def test_explicit_forecast_seed_lists_live_rule_choices_and_synonyms(
+    tmp_path: Path,
+) -> None:
+    graph = _orchestrator(
+        tmp_path,
+        _NeverCalledProvider(),
+        operation_catalog=_ForecastSeedRuleCatalog(),
+    )
+    message = _message("Run forecast seeding")
+    conversation_id = "conversation-explicit-forecast-seed"
+
+    choice = graph.invoke(
+        conversation_id=conversation_id,
+        user_id=7,
+        messages=(message,),
+        task_context=AgentTaskInterpreter.interpret((message,)).to_payload(),
+    )
+
+    assert choice.clarification_request is not None
+    assert choice.clarification_request.operation_code == "business-rules"
+    assert set(choice.clarification_request.options) == {
+        "Actual to Forecast",
+        "Plan to Forecast",
+        "Create Forecast",
+        "Aggregate Forecast",
+    }
+    recommended = choice.clarification_request.recommendations
+    assert {item["name"] for item in recommended[:2]} == {
+        "Actual to Forecast", "Plan to Forecast"
+    }
+    assert all(item["confidence"] == "Possible match" for item in recommended)
+
+    selected = graph.resume_clarification(
+        conversation_id=conversation_id,
+        user_id=7,
+        request_id=choice.clarification_request.request_id,
+        value="Plan to Forecast",
+    )
+    assert selected.input_request is not None
+    assert selected.input_request.operation_code == "business-rules"
+    assert selected.input_request.artifact_name == "Plan to Forecast"
+
+
+def test_forecast_seeding_asks_for_the_approved_live_method_when_ambiguous(
+    tmp_path: Path,
+) -> None:
+    graph = _orchestrator(
+        tmp_path,
+        _NeverCalledProvider(),
+        operation_catalog=_ForecastSeedingOperationCatalog(),
+    )
+
+    result = graph.invoke(
+        conversation_id="conversation-forecast-method",
+        user_id=7,
+        messages=(
+            _message("Prepare the new forecast."),
+            _message("Use actuals through August."),
+        ),
+        task_context={
+            "intent": "FORECAST_SEEDING",
+            "phase": "READY_FOR_PLAN",
+            "confidence": "HIGH_CONFIDENCE",
+            "parameters": {"cutoff_period": "Aug"},
+            "missing_parameters": [],
+            "clarification_prompt": None,
+            "objective": "Prepare the new forecast",
+        },
+    )
+
+    assert "more than one approved Oracle route" in result.text
+    assert "Oracle Pipeline" in result.text
+    assert "Business Rule" in result.text
+    assert "Data Integration" in result.text
+    assert result.tool_activity == ()
+
+
+def test_forecast_seeding_method_advances_to_live_artifact_and_inputs(
+    tmp_path: Path,
+) -> None:
+    graph = _orchestrator(
+        tmp_path,
+        _NeverCalledProvider(),
+        operation_catalog=_ForecastSeedingOperationCatalog(),
+    )
+    conversation_id = "conversation-forecast-rule"
+
+    choice = graph.invoke(
+        conversation_id=conversation_id,
+        user_id=7,
+        messages=(
+            _message("Prepare the new forecast."),
+            _message("Use actuals through August."),
+            _message("Use the Business Rule."),
+        ),
+        task_context={
+            "intent": "FORECAST_SEEDING",
+            "phase": "READY_FOR_PLAN",
+            "confidence": "HIGH_CONFIDENCE",
+            "parameters": {
+                "cutoff_period": "Aug",
+                "execution_method": "BUSINESS_RULE",
+            },
+            "missing_parameters": [],
+            "clarification_prompt": None,
+            "objective": "Prepare the new forecast",
+        },
+    )
+
+    assert choice.clarification_request is not None
+    assert choice.clarification_request.operation_code == "business-rules"
+    assert choice.clarification_request.options == ("Seed Forecast",)
+    inputs = graph.resume_clarification(
+        conversation_id=conversation_id,
+        user_id=7,
+        request_id=choice.clarification_request.request_id,
+        value="Seed Forecast",
+    )
+    assert inputs.input_request is not None
+    assert inputs.input_request.operation_code == "business-rules"
+    assert inputs.input_request.context["task_context"] == {
+        "cutoff_period": "Aug",
+        "execution_method": "BUSINESS_RULE",
+    }
+
+
+def test_variance_reporting_lists_saved_layouts_before_reading_data(
+    tmp_path: Path,
+) -> None:
+    graph = _orchestrator(
+        tmp_path,
+        _NeverCalledProvider(),
+        report_workspace=_ReportWorkspace(),
+    )
+
+    result = graph.invoke(
+        conversation_id="conversation-variance-layouts",
+        user_id=7,
+        messages=(_message("Show September Actual vs Budget variance."),),
+        allowed_tool_names=("list_variance_views", "review_saved_variance"),
+        task_context={
+            "intent": "VARIANCE_REPORTING",
+            "phase": "READY_FOR_PLAN",
+            "confidence": "HIGH_CONFIDENCE",
+            "parameters": {
+                "comparison": "Actual vs Budget",
+                "period": "Sep",
+            },
+            "missing_parameters": [],
+            "clarification_prompt": None,
+            "objective": "Show September Actual vs Budget variance.",
+        },
+    )
+
+    assert result.tool_activity[0].name == "list_variance_views"
+    assert result.tool_activity[0].result["purpose"] == "variance"
+    assert "Choose one below" in result.text
+
+
+def test_variance_reporting_uses_selected_layout_for_live_comparison(
+    tmp_path: Path,
+) -> None:
+    graph = _orchestrator(
+        tmp_path,
+        _NeverCalledProvider(),
+        data_review=_VarianceDataReview(),
+        report_workspace=_ReportWorkspace(),
+    )
+
+    result = graph.invoke(
+        conversation_id="conversation-variance-review",
+        user_id=7,
+        messages=(
+            _message("Show September Actual vs Budget variance above 500 for FY26."),
+            _message(
+                "Use saved Data Explorer view `revenue-forecast` for the variance review."
+            ),
+        ),
+        allowed_tool_names=("list_variance_views", "review_saved_variance"),
+        task_context={
+            "intent": "VARIANCE_REPORTING",
+            "phase": "READY_FOR_PLAN",
+            "confidence": "HIGH_CONFIDENCE",
+            "parameters": {
+                "comparison": "Actual vs Budget",
+                "period": "Sep",
+                "year": "FY26",
+                "threshold": 500,
+                "saved_view": "revenue-forecast",
+                "pov_overrides": {"Product": "Snacks"},
+            },
+            "missing_parameters": [],
+            "clarification_prompt": None,
+            "objective": "Show September Actual vs Budget variance above 500 for FY26.",
+        },
+    )
+
+    assert result.tool_activity[0].name == "review_saved_variance"
+    assert result.tool_activity[0].arguments["pov_overrides"] == {
+        "Product": "Snacks"
+    }
+    assert result.tool_activity[0].result["result"]["compared_cells"] == 3
+    assert "found **1**" in result.text
 
 
 def test_standalone_flow_input_resume_returns_next_artifact_choice(
@@ -2954,6 +3849,28 @@ def test_graph_prefills_exact_user_variable_and_new_member_without_model(
     }
 
 
+def test_user_variable_review_rejects_member_from_wrong_dimension(
+    tmp_path: Path,
+) -> None:
+    gateway = AgentCapabilityGateway(
+        _settings(tmp_path),
+        control_center=_ControlCenter(),
+        data_review=_DataReview(),
+        substitution_variables=_SubstitutionVariables(),
+        user_variables=_RejectingUserVariables(),
+    )
+
+    with pytest.raises(
+        AgentCapabilityError,
+        match="not an exact live member of dimension 'Entity'",
+    ):
+        gateway.normalize_guided_inputs(
+            "user-variables",
+            "MyEntity",
+            {"user_name": "planner", "new_member": "FY28"},
+        )
+
+
 def test_graph_collects_explicit_substitution_variable_creation(
     tmp_path: Path,
 ) -> None:
@@ -3141,3 +4058,46 @@ def test_checkpoint_store_is_reused_across_compiled_graphs(tmp_path: Path) -> No
     assert store.get() is store.get()
     store.setup()
     store.close()
+
+
+def test_checkpointed_task_context_survives_graph_reconstruction_and_is_isolated(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    store = AgentCheckpointStore(settings.database_target)
+    gateway = AgentCapabilityGateway(
+        settings,
+        control_center=_ControlCenter(),
+        data_review=_DataReview(),
+    )
+
+    def new_graph() -> AgentGraphOrchestrator:
+        return AgentGraphOrchestrator(
+            provider_factory=_NeverCalledProvider,
+            gateway=gateway,
+            checkpointer=store,
+            system_instruction="Read only.",
+            max_tool_rounds=2,
+            environment_key="example|Vision",
+        )
+
+    task = AgentTaskInterpreter.interpret((_message("Start month close"),))
+    first = new_graph()
+    first.invoke(
+        conversation_id="checkpointed-task",
+        user_id=7,
+        messages=(_message("Start month close"),),
+        allowed_tool_names=(),
+        task_context=task.to_payload(),
+    )
+
+    reconstructed = new_graph()
+    assert reconstructed.current_task_context(
+        conversation_id="checkpointed-task", user_id=7
+    ) == task.to_payload()
+    assert reconstructed.current_task_context(
+        conversation_id="checkpointed-task", user_id=8
+    ) is None
+    assert reconstructed.current_task_context(
+        conversation_id="other-conversation", user_id=7
+    ) is None

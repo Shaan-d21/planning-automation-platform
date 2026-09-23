@@ -9,6 +9,11 @@ from app.clients.epm_client import EPMClient
 from app.config.settings import Settings
 from app.models.user_variable import UserVariableDefinition, UserVariableValue
 from app.services.user_variable_service import UserVariableService
+from app.services.variable_value_validation_service import (
+    VariableValueValidationError,
+    VariableValueValidationService,
+)
+from app.utils.exceptions import UserVariableError
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,12 +54,14 @@ class UserVariableApplicationService:
         settings: Settings | None = None,
         *,
         client: EPMClient | None = None,
+        value_validator: VariableValueValidationService | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         if settings is None and client is None:
             raise ValueError("Settings or an authenticated client is required.")
         self._settings = settings
         self._client = client
+        self._value_validator = value_validator
         self._logger = logger or logging.getLogger(__name__)
 
     def discover(self, user_name: str) -> UserVariableCatalog:
@@ -67,6 +74,24 @@ class UserVariableApplicationService:
             client.authenticate()
             return self._discover_with_client(client, normalized_user)
 
+    def validate_value_compatibility(
+        self,
+        *,
+        variable_name: str,
+        dimension: str,
+        member: str,
+    ) -> None:
+        """Validate strong local type facts without listing live members."""
+        validate = (
+            VariableValueValidationService
+            .validate_user_variable_without_live_metadata
+        )
+        validate(
+            variable_name=variable_name,
+            dimension=dimension,
+            member=member,
+        )
+
     def apply(self, command: UserVariableOperationInput) -> UserVariableChangeResult:
         if self._client is None:
             raise ValueError("An authenticated client is required to apply a change.")
@@ -78,10 +103,45 @@ class UserVariableApplicationService:
             (item for item in service.get_values(user_name) if item.name.casefold() == name.casefold()),
             None,
         )
+        actual = current.member if current is not None else None
+        if actual != command.expected_current_member:
+            raise UserVariableError(
+                f"User variable '{name}' for '{user_name}' changed after it "
+                "was reviewed. Refresh the live values and try again."
+            )
+        definition = next(
+            (
+                item
+                for item in service.get_definitions()
+                if item.name.casefold() == name.casefold()
+            ),
+            None,
+        )
+        if definition is None:
+            raise UserVariableError(
+                f"User variable '{name}' is not defined in Oracle Planning."
+            )
+        if definition.dimension.casefold() != dimension.casefold():
+            raise UserVariableError(
+                f"User variable '{definition.name}' belongs to dimension "
+                f"'{definition.dimension}', not '{dimension}'. No change was submitted."
+            )
+        try:
+            validate = (
+                VariableValueValidationService
+                .validate_user_variable_without_live_metadata
+            )
+            validate(
+                variable_name=definition.name,
+                dimension=definition.dimension,
+                member=member,
+            )
+        except VariableValueValidationError as exc:
+            raise UserVariableError(str(exc)) from exc
         updated = service.set_value(
             user_name=user_name,
             name=name,
-            dimension=dimension,
+            dimension=definition.dimension,
             member=member,
             expected_current_member=command.expected_current_member,
         )

@@ -6,7 +6,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MACRO_PATH = (
     PROJECT_ROOT
-    / "outputs"
+    / "integrations"
     / "excel_pipeline_runner"
     / "BispEpmPipeline.bas"
 )
