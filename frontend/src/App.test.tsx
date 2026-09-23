@@ -1212,6 +1212,98 @@ describe("App", () => {
     expect(JSON.parse(String(inputs?.[1]?.body))).toEqual({ request_id: "input-1", values: { runtime_prompt_mode: "Use Calculation Manager defaults", runtime_prompts: {} } });
   });
 
+  it("cancels an in-flight assistant turn when another conversation opens", async () => {
+    window.location.hash = "#assistant";
+    const assistantUser = {
+      ...bootstrap,
+      user: { ...bootstrap.user!, permissions: ["agent.use", "operation.execute"] },
+      navigation: [...bootstrap.navigation, { code: "assistant", label: "EPM Assistant", path: "/app/agent", group: "Workspace" }]
+    };
+    const first = { conversation_id: "conv-slow", user_id: 7, title: "Slow request", provider: "groq", model: "test", created_at: "2026-08-11T10:00:00Z", updated_at: "2026-08-11T10:00:00Z" };
+    const second = { conversation_id: "conv-second", user_id: 7, title: "Second task", provider: "groq", model: "test", created_at: "2026-08-11T09:00:00Z", updated_at: "2026-08-11T09:00:00Z" };
+    let aborted = false;
+    vi.mocked(fetch).mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/v1/bootstrap") return response(assistantUser);
+      if (url === "/api/v1/home") return response(home);
+      if (url === "/api/v1/notifications") return response(notificationInbox);
+      if (url === "/api/v1/agent/status") return response({ enabled: true, configured: true, provider: "groq", model: "test", mode: "read-only", message: "Agent is ready." });
+      if (url === "/api/v1/agent/conversations") return response({ status: "success", conversations: [first, second] });
+      if (url === "/api/v1/agent/conversations/conv-slow/messages" && init?.method === "POST") {
+        return new Promise<Response>((_resolve, reject) => {
+          init.signal?.addEventListener("abort", () => {
+            aborted = true;
+            reject(new DOMException("Aborted", "AbortError"));
+          });
+        });
+      }
+      if (url === "/api/v1/agent/conversations/conv-slow/messages") return response({ status: "success", messages: [], action_drafts: [], approval_request: null, clarification_request: null, input_request: null });
+      if (url === "/api/v1/agent/conversations/conv-second/messages") return response({ status: "success", messages: [{ message_id: 20, conversation_id: "conv-second", role: "assistant", content: "Second conversation ready.", created_at: "2026-08-11T09:01:00Z" }], action_drafts: [], approval_request: null, clarification_request: null, input_request: null });
+      return response({ detail: "Unexpected request" }, 404);
+    });
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "How can I help with Planning?" })).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Message the EPM Assistant"), { target: { value: "Load volume data" } });
+    fireEvent.click(screen.getByRole("button", { name: /^Send/ }));
+    await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([url, init]) => String(url) === "/api/v1/agent/conversations/conv-slow/messages" && init?.method === "POST")).toBe(true));
+
+    fireEvent.click(screen.getByRole("button", { name: /Second task/ }));
+
+    await waitFor(() => expect(aborted).toBe(true));
+    expect(await screen.findByText("Second conversation ready.")).toBeTruthy();
+    expect(
+      (screen.getByLabelText("Message the EPM Assistant") as HTMLTextAreaElement)
+        .disabled
+    ).toBe(false);
+  });
+
+  it("cancels a pending load-route choice from its review card", async () => {
+    window.location.hash = "#assistant";
+    const assistantUser = {
+      ...bootstrap,
+      user: { ...bootstrap.user!, permissions: ["agent.use", "operation.execute"] },
+      navigation: [...bootstrap.navigation, { code: "assistant", label: "EPM Assistant", path: "/app/agent", group: "Workspace" }]
+    };
+    const conversation = { conversation_id: "conv-load-cancel", user_id: 7, title: "Load Product Price", provider: "groq", model: "test", created_at: "2026-08-11T10:00:00Z", updated_at: "2026-08-11T10:00:00Z" };
+    const clarification = {
+      request_id: "load-choice-1", operation_code: "load-options", display_name: "data load options",
+      prompt: "Choose which data load to prepare.",
+      options: ["data-import::Import Product Price", "data-integrations::Product_Price_Load"],
+      option_labels: {
+        "data-import::Import Product Price": "Saved Import Data job · Import Product Price",
+        "data-integrations::Product_Price_Load": "Data Integration · Product Price Load"
+      },
+      allows_cancel: true, recommendations: [], catalog_recovery: {}, search_context: "Load Product Price"
+    };
+    const cancelledMessage = { message_id: 3, conversation_id: conversation.conversation_id, role: "assistant", content: "Data Import preparation was cancelled. No Oracle operation was started.", created_at: "2026-08-11T10:01:30Z" };
+    vi.mocked(fetch).mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/v1/bootstrap") return response(assistantUser);
+      if (url === "/api/v1/home") return response(home);
+      if (url === "/api/v1/notifications") return response(notificationInbox);
+      if (url === "/api/v1/agent/status") return response({ enabled: true, configured: true, provider: "groq", model: "test", mode: "governed", message: "Agent is ready." });
+      if (url === "/api/v1/agent/conversations") return response({ status: "success", conversations: [conversation] });
+      if (url === "/api/v1/agent/conversations/conv-load-cancel/messages" && init?.method === "POST") return response({ status: "success", message: { ...cancelledMessage, message_id: 2, content: "Choose a data load route." }, tool_activity: [], action_drafts: [], approval_request: null, clarification_request: clarification, input_request: null });
+      if (url === "/api/v1/agent/conversations/conv-load-cancel/clarification" && init?.method === "POST") return response({ status: "success", message: cancelledMessage, tool_activity: [{ name: "prepare_operation_action", arguments: { operation_code: "data-import" }, status: "CANCELLED", summary: "Cancelled." }], action_drafts: [], approval_request: null, clarification_request: null, input_request: null });
+      if (url === "/api/v1/agent/conversations/conv-load-cancel/messages") return response({ status: "success", messages: [], action_drafts: [], approval_request: null, clarification_request: null, input_request: null });
+      return response({ detail: "Unexpected request" }, 404);
+    });
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "How can I help with Planning?" })).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Message the EPM Assistant"), { target: { value: "Load Product Price" } });
+    fireEvent.click(screen.getByRole("button", { name: /^Send/ }));
+    expect(await screen.findByRole("heading", { name: "Choose a load route" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel proposal" }));
+
+    expect(await screen.findByText(/Data Import preparation was cancelled/)).toBeTruthy();
+    await waitFor(() => expect(screen.queryByRole("heading", { name: "Choose a load route" })).toBeNull());
+    const cancellation = vi.mocked(fetch).mock.calls.find(([url]) => String(url) === "/api/v1/agent/conversations/conv-load-cancel/clarification");
+    expect(JSON.parse(String(cancellation?.[1]?.body))).toEqual({ request_id: "load-choice-1", value: null });
+  });
+
   it("shows RTP name and value prefilled from the prompt without a registry", async () => {
     window.location.hash = "#assistant";
     const assistantUser = {

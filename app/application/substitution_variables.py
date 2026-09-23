@@ -12,6 +12,10 @@ from app.models.substitution_variable import PlanType, SubstitutionVariable
 from app.services.substitution_variable_service import (
     SubstitutionVariableService,
 )
+from app.services.variable_value_validation_service import (
+    VariableValueValidationError,
+    VariableValueValidationService,
+)
 from app.utils.exceptions import SubstitutionVariableError
 
 
@@ -62,12 +66,14 @@ class SubstitutionVariableApplicationService:
         settings: Settings | None = None,
         *,
         client: EPMClient | None = None,
+        value_validator: VariableValueValidationService | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         if settings is None and client is None:
             raise ValueError("Settings or an authenticated client is required.")
         self._settings = settings
         self._client = client
+        self._value_validator = value_validator
         self._logger = logger or logging.getLogger(__name__)
 
     def discover(self) -> SubstitutionVariableCatalog:
@@ -82,6 +88,26 @@ class SubstitutionVariableApplicationService:
         ) as client:
             client.authenticate()
             return self._discover_with_client(client)
+
+    def validate_value_compatibility(
+        self,
+        *,
+        variable_name: str,
+        current_value: str | None,
+        proposed_value: str,
+        scope: str = "ALL",
+    ) -> None:
+        """Validate strong local type facts without listing live members."""
+        validate = (
+            VariableValueValidationService
+            .validate_substitution_variable_without_live_metadata
+        )
+        validate(
+            variable_name=variable_name,
+            current_value=current_value,
+            proposed_value=proposed_value,
+            scope=scope,
+        )
 
     def apply(
         self,
@@ -112,6 +138,19 @@ class SubstitutionVariableApplicationService:
         )
 
         if normalized.action is SubstitutionVariableAction.CREATE:
+            try:
+                validate = (
+                    VariableValueValidationService
+                    .validate_substitution_variable_without_live_metadata
+                )
+                validate(
+                    variable_name=normalized.name,
+                    current_value=None,
+                    proposed_value=normalized.value,
+                    scope=normalized.scope,
+                )
+            except VariableValueValidationError as exc:
+                raise SubstitutionVariableError(str(exc)) from exc
             created = service.create_variable(
                 normalized.scope,
                 normalized.name,
@@ -141,6 +180,19 @@ class SubstitutionVariableApplicationService:
                 "changed after this page was loaded. Refresh the catalog "
                 "before applying another update."
             )
+        try:
+            validate = (
+                VariableValueValidationService
+                .validate_substitution_variable_without_live_metadata
+            )
+            validate(
+                variable_name=existing.name,
+                current_value=existing.value,
+                proposed_value=normalized.value,
+                scope=existing.scope,
+            )
+        except VariableValueValidationError as exc:
+            raise SubstitutionVariableError(str(exc)) from exc
         updates = service.build_updates(
             {(existing.scope, existing.name): normalized.value},
             current_variables=current,

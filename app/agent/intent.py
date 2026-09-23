@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -50,6 +51,14 @@ class AgentIntentRouter:
         "records processed",
         "records rejected",
         "load statistics",
+        "is it done",
+        "is it running",
+        "did it start",
+        "what happened",
+        "show the error",
+        "try again",
+        "rerun it",
+        "run the same thing again",
     )
     _DATA_TERMS = (
         "cube",
@@ -140,18 +149,30 @@ class AgentIntentRouter:
         permitted_tool_names: frozenset[str],
         *,
         has_data_review_context: bool = False,
+        has_execution_context: bool = False,
         task_intent: str | None = None,
+        canonical_capability: str | None = None,
+        action_mode: str | None = None,
     ) -> AgentIntentDecision:
         """Return the smallest useful permitted tool set for this prompt."""
         normalized = " ".join(str(prompt).casefold().split())
+        canonical = str(canonical_capability or "").strip().casefold()
+        canonical_action = str(action_mode or "").strip().casefold()
         selected = set(cls._BASE)
         matches: list[AgentIntent] = []
-        explicit_operation = any(
-            term in normalized for term in cls._EXPLICIT_OPERATION_TERMS
-        ) or str(task_intent or "").strip().upper() in {
-            "RUN_BUSINESS_RULE",
-            "FORECAST_SEEDING",
-        }
+        explicit_operation = (
+            any(term in normalized for term in cls._EXPLICIT_OPERATION_TERMS)
+            or bool(
+                re.search(
+                    r"\b(?:change|set|update|assign)\b.{0,60}"
+                    r"\b(?:planning|application|global|fiscal|current)\s+"
+                    r"(?:year|period|month)\b",
+                    normalized,
+                )
+            )
+            or str(task_intent or "").strip().upper()
+            in {"RUN_BUSINESS_RULE", "FORECAST_SEEDING", "RUN_CUBE_REFRESH"}
+        )
         contextual_refinement = (
             has_data_review_context
             and not explicit_operation
@@ -161,10 +182,17 @@ class AgentIntentRouter:
         )
         history_match = any(
             term in normalized for term in cls._HISTORY_TERMS
+        ) or (
+            has_execution_context
+            and bool(re.fullmatch(r"\s*why\s*[?!.]?\s*", normalized))
         )
         schedule_match = any(
             term in normalized for term in cls._SCHEDULE_TERMS
-        )
+        ) or canonical == "schedule.manage"
+        if canonical == "execution.history":
+            history_match = True
+        if canonical == "data.review":
+            contextual_refinement = True
         active_execution_task = str(task_intent or "").strip().upper() in {
             "MONTH_CLOSE",
             "METADATA_LOAD",
@@ -174,6 +202,7 @@ class AgentIntentRouter:
             "RUN_BUSINESS_RULE",
             "RUN_DATA_INTEGRATION",
             "RUN_PIPELINE",
+            "RUN_CUBE_REFRESH",
         }
         if schedule_match:
             selected.add("prepare_schedule_action")
@@ -182,8 +211,10 @@ class AgentIntentRouter:
             selected.add("get_recent_execution_history")
             selected.add("get_execution_evidence")
             matches.append(AgentIntent.HISTORY_REVIEW)
-        if contextual_refinement or any(
-            term in normalized for term in cls._DATA_TERMS
+        if str(task_intent or "").strip().upper() != "RUN_CUBE_REFRESH" and (
+            contextual_refinement or any(
+                term in normalized for term in cls._DATA_TERMS
+            )
         ):
             selected.update(
                 {
@@ -199,13 +230,37 @@ class AgentIntentRouter:
                 }
             )
             matches.append(AgentIntent.DATA_REVIEW)
-        if (explicit_operation and not schedule_match) or (
+        canonical_operation = canonical in {
+            "report.export",
+            "cube.refresh",
+            "variable.substitution",
+            "variable.user",
+            "data.import",
+            "metadata.import",
+            "pipeline.run",
+            "data.integration",
+            "business_rule.run",
+            "data_map.run",
+            "flow.multi_step",
+        } and canonical_action in {"execute", "update", "list"}
+        canonical_non_execution = bool(canonical) and canonical_action in {
+            "status",
+            "review",
+            "explain",
+            "export",
+            "cancel",
+        }
+        if canonical_operation:
+            explicit_operation = True
+        if not canonical_non_execution and (
+            (explicit_operation and not schedule_match) or (
             not contextual_refinement
             and not history_match
             and not schedule_match
             and (
                 any(term in normalized for term in cls._PREPARATION_TERMS)
                 or active_execution_task
+            )
             )
         ):
             selected.update(

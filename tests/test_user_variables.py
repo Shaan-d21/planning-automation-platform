@@ -47,11 +47,16 @@ def test_definition_discovery_falls_back_for_older_planning_versions() -> None:
 
 def test_apply_posts_oracle_contract_and_verifies_result() -> None:
     client = _client()
+    validator = Mock()
     old = {"items": [{"userName": "planner@example.com", "name": "MyEntity", "dimension": "Entity", "member": "Sales East"}]}
     new = {"items": [{"userName": "planner@example.com", "name": "MyEntity", "dimension": "Entity", "member": "Sales West"}]}
-    client.get.side_effect = (old, old, new)
+    definitions = {"items": [{"name": "MyEntity", "dimension": "Entity"}]}
+    client.get.side_effect = (old, definitions, old, new)
 
-    result = UserVariableApplicationService(client=client).apply(
+    result = UserVariableApplicationService(
+        client=client,
+        value_validator=validator,
+    ).apply(
         UserVariableOperationInput(
             user_name="planner@example.com",
             name="MyEntity",
@@ -63,6 +68,7 @@ def test_apply_posts_oracle_contract_and_verifies_result() -> None:
 
     assert result.old_member == "Sales East"
     assert result.new_member == "Sales West"
+    validator.validate_user_variable.assert_not_called()
     client.post.assert_called_once_with(
         "HyperionPlanning/rest/v3/applications/Vision/uservariablevalues",
         payload={"items": [{"userName": "planner@example.com", "name": "MyEntity", "dimension": "Entity", "member": "Sales West"}]},
@@ -85,3 +91,64 @@ def test_stale_assignment_is_rejected_without_post() -> None:
         )
 
     client.post.assert_not_called()
+
+
+def test_declared_dimension_mismatch_is_rejected_without_post() -> None:
+    client = _client()
+    current = {"items": [{
+        "userName": "planner@example.com",
+        "name": "MyScenario",
+        "dimension": "Scenario",
+        "member": "Actual",
+    }]}
+    definitions = {"items": [{"name": "MyScenario", "dimension": "Scenario"}]}
+    client.get.side_effect = (current, definitions)
+
+    with pytest.raises(UserVariableError, match="belongs to dimension 'Scenario'"):
+        UserVariableApplicationService(
+            client=client,
+            value_validator=Mock(),
+        ).apply(
+            UserVariableOperationInput(
+                user_name="planner@example.com",
+                name="MyScenario",
+                dimension="Year",
+                member="FY28",
+                expected_current_member="Actual",
+            )
+        )
+
+    client.post.assert_not_called()
+
+
+def test_obvious_cross_type_member_is_rejected_without_live_metadata() -> None:
+    client = _client()
+    validator = Mock()
+    validator.validate_user_variable.side_effect = UserVariableError(
+        "'FY28' is not an exact live member of dimension 'Scenario'."
+    )
+    current = {"items": [{
+        "userName": "planner@example.com",
+        "name": "MyScenario",
+        "dimension": "Scenario",
+        "member": "Actual",
+    }]}
+    definitions = {"items": [{"name": "MyScenario", "dimension": "Scenario"}]}
+    client.get.side_effect = (current, definitions)
+
+    with pytest.raises(UserVariableError, match="clearly a year value"):
+        UserVariableApplicationService(
+            client=client,
+            value_validator=validator,
+        ).apply(
+            UserVariableOperationInput(
+                user_name="planner@example.com",
+                name="MyScenario",
+                dimension="Scenario",
+                member="FY28",
+                expected_current_member="Actual",
+            )
+        )
+
+    client.post.assert_not_called()
+    validator.validate_user_variable.assert_not_called()

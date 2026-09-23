@@ -351,6 +351,9 @@ class _VarianceDataReview:
 
 
 class _SubstitutionVariables:
+    def validate_value_compatibility(self, **_kwargs):
+        return None
+
     def discover(self):
         return SubstitutionVariableCatalog(
             variables=(
@@ -567,21 +570,87 @@ class _MetadataImportCatalog:
 class _DualLoadCatalog:
     def discover_job_names(self, *, job_type):
         return {
-            "IMPORT_DATA": ("Import Actuals", "Import Forecast"),
-            "IMPORT_METADATA": ("Import Products",),
+            "IMPORT_DATA": (
+                "Import Actuals",
+                "Import Forecast",
+                "Import Product Units",
+            ),
+            "IMPORT_METADATA": ("Import Products", "Import Entities"),
             "CUBE_REFRESH": (),
         }.get(job_type, ())
 
     def discover_registered(self):
         integrations = tuple(
             type("Integration", (), {"name": name})()
-            for name in ("Actual_Load", "Product_Metadata")
+            for name in (
+                "Actual_Load",
+                "Product_Metadata",
+                "Product_Volume_Load",
+                "Entity_Metadata",
+                "Workforce_Load",
+            )
         )
         return type(
             "Catalog",
             (),
             {"pipelines": (), "data_integrations": integrations},
         )()
+
+
+def test_data_integration_catalog_exposes_description_for_agent_matching(
+    tmp_path: Path,
+) -> None:
+    class DescribedCatalog:
+        def discover_registered(self):
+            integration = SimpleNamespace(
+                name="LOAD_001",
+                description="Product volume and unit data",
+            )
+            return SimpleNamespace(
+                pipelines=(), data_integrations=(integration,)
+            )
+
+    gateway = AgentCapabilityGateway(
+        _settings(tmp_path),
+        control_center=_ControlCenter(),
+        data_review=_DataReview(),
+        operation_catalog=DescribedCatalog(),
+    )
+
+    assert gateway.artifact_catalog("data-integrations") == (
+        ("LOAD_001", "LOAD_001 - Product volume and unit data"),
+    )
+
+
+def test_agent_job_catalog_uses_verified_cache_before_live_oracle(
+    tmp_path: Path,
+) -> None:
+    class CachedCatalog:
+        def registered_artifacts(self, artifact_type):
+            assert str(artifact_type) == "DATA_IMPORT_JOB"
+            return (
+                SimpleNamespace(
+                    oracle_identifier="Import Product Units",
+                    display_name="Import Product Units",
+                    is_verified=True,
+                ),
+            )
+
+        def discover_job_names(self, *, job_type):
+            raise AssertionError(
+                f"Live Oracle discovery was not expected for {job_type}."
+            )
+
+    gateway = AgentCapabilityGateway(
+        _settings(tmp_path),
+        control_center=_ControlCenter(),
+        data_review=_DataReview(),
+        operation_catalog=CachedCatalog(),
+    )
+
+    assert gateway.artifact_catalog("data-import") == (
+        ("Import Product Units", "Import Product Units"),
+    )
 
 
 class _CubeRefreshCatalog:
@@ -662,6 +731,210 @@ class _InputCancellationGraph:
     def resume_input(self, *, values, **_):
         self.values = values
         return AgentProviderResult(text="Preparation cancelled.")
+
+
+def test_chat_can_fill_one_registered_numeric_rtp_without_approval() -> None:
+    recorded = []
+    service = SimpleNamespace(
+        _repository=SimpleNamespace(add_message=lambda **kwargs: recorded.append(kwargs)),
+        resolve_input=lambda **kwargs: kwargs,
+    )
+    request = AgentInputRequest(
+        request_id="rtp-input-1",
+        operation_code="business-rules",
+        display_name="Business Rules",
+        artifact_name="Apply Growth",
+        title="Runtime prompts",
+        description="Enter the RTP",
+        fields=(),
+        context={
+            "rtp_definition": {
+                "prompts": [{"name": "GrowthPct", "hidden": False}]
+            }
+        },
+    )
+
+    result = AgentApplicationService._continue_pending_chat_reply(
+        service,
+        conversation_id="conversation-1",
+        user=_user(),
+        prompt="10 percent",
+        clarification=None,
+        input_request=request,
+    )
+
+    assert result["values"] == {
+        "runtime_prompt_mode": "Provide runtime prompt values",
+        "runtime_prompts": {"GrowthPct": "10"},
+    }
+    assert len(recorded) == 1
+
+
+def test_chat_does_not_guess_which_of_multiple_rtps_a_number_means() -> None:
+    service = SimpleNamespace(
+        _repository=SimpleNamespace(add_message=lambda **_kwargs: pytest.fail("unexpected write")),
+    )
+    request = AgentInputRequest(
+        request_id="rtp-input-2",
+        operation_code="business-rules",
+        display_name="Business Rules",
+        artifact_name="Apply Growth",
+        title="Runtime prompts",
+        description="Enter the RTPs",
+        fields=(),
+        context={
+            "rtp_definition": {
+                "prompts": [
+                    {"name": "GrowthPct", "hidden": False},
+                    {"name": "Year", "hidden": False},
+                ]
+            }
+        },
+    )
+
+    assert AgentApplicationService._continue_pending_chat_reply(
+        service,
+        conversation_id="conversation-1",
+        user=_user(),
+        prompt="10",
+        clarification=None,
+        input_request=request,
+    ) is None
+
+
+def test_chat_can_fill_one_simple_required_pending_field() -> None:
+    request = AgentInputRequest(
+        request_id="variable-input-1",
+        operation_code="substitution-variables",
+        display_name="Substitution Variables",
+        artifact_name="CurYr",
+        title="Enter the new value",
+        description="Update one value",
+        fields=(
+            {
+                "key": "new_value",
+                "label": "New value",
+                "kind": "text",
+                "required": True,
+                "options": [],
+            },
+        ),
+        context={"scope": "ALL", "variable_name": "CurYr"},
+    )
+
+    assert AgentApplicationService._single_pending_field_values(
+        request, "FY28"
+    ) == {"new_value": "FY28"}
+
+
+def test_chat_does_not_guess_between_multiple_or_file_pending_fields() -> None:
+    multiple = AgentInputRequest(
+        request_id="integration-input-1",
+        operation_code="data-integrations",
+        display_name="Data Integrations",
+        artifact_name="Actual Load",
+        title="Inputs",
+        description="Enter inputs",
+        fields=(
+            {"key": "start_period", "kind": "text", "required": True},
+            {"key": "end_period", "kind": "text", "required": True},
+        ),
+    )
+    file_request = AgentInputRequest(
+        request_id="data-input-1",
+        operation_code="data-import",
+        display_name="Planning Data Import",
+        artifact_name="Import Actuals",
+        title="File",
+        description="Choose a file",
+        fields=(
+            {"key": "source_file", "kind": "file_reference", "required": True},
+        ),
+    )
+
+    assert AgentApplicationService._single_pending_field_values(
+        multiple, "Jan-27"
+    ) is None
+    assert AgentApplicationService._single_pending_field_values(
+        file_request, "Actual.csv"
+    ) is None
+
+
+def test_chat_can_cancel_pending_choice_and_switch_to_new_task(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    AccessControlService(settings.workflow_database_file).bootstrap_administrator(
+        username="admin",
+        display_name="Administrator",
+        email=None,
+        password="Strong password 123!",
+    )
+    repository = SQLiteAgentRepository(settings.workflow_database_file)
+    user = _user(Permission.OPERATION_EXECUTE)
+    conversation = repository.create_conversation(
+        user_id=user.user_id,
+        provider="fake",
+        model="fake-model",
+    )
+
+    class SwitchingGraph:
+        pending = AgentClarificationRequest(
+            request_id="choice-1",
+            operation_code="business-rules",
+            display_name="Business Rules",
+            prompt="Choose a rule",
+            options=("Rule A", "Rule B"),
+        )
+        selected = "not-resumed"
+
+        def pending_approval(self, **_kwargs):
+            return None
+
+        def pending_clarification(self, **_kwargs):
+            return self.pending
+
+        def pending_input(self, **_kwargs):
+            return None
+
+        def resume_clarification(self, *, value, **_kwargs):
+            self.selected = value
+            self.pending = None
+            return AgentProviderResult(text="Previous task cancelled.")
+
+        def current_task_context(self, **_kwargs):
+            return None
+
+        def invoke(self, **_kwargs):
+            return AgentProviderResult(text="I will review the new task.")
+
+    graph = SwitchingGraph()
+    service = AgentApplicationService(
+        settings,
+        gateway=AgentCapabilityGateway(
+            settings,
+            control_center=_ControlCenter(),
+            data_review=_DataReview(),
+        ),
+        repository=repository,
+        graph_orchestrator=graph,
+    )
+
+    result = service.send_message(
+        conversation_id=conversation.conversation_id,
+        user=user,
+        content="actually cancel this and refresh Plan1",
+    )
+
+    assert graph.selected is None
+    assert result["message"].content == "I will review the new task."
+    assert [message.content for message in repository.list_messages(
+        conversation.conversation_id, user.user_id
+    )] == [
+        "Previous task cancelled.",
+        "refresh Plan1",
+        "I will review the new task.",
+    ]
 
 
 class _ReportWorkspace:
@@ -1731,8 +2004,13 @@ def test_new_product_member_dialogue_keeps_context_without_model_reasking(
         ),
         (
             "Load product units data from Jan to Mar for FY27",
-            "data-import::Import Actuals",
-            "data-integrations::Actual_Load",
+            "data-import::Import Product Units",
+            "data-integrations::Product_Volume_Load",
+        ),
+        (
+            "Load Product Price",
+            "data-import::Import Product Units",
+            "data-integrations::Product_Volume_Load",
         ),
         (
             "Load metadata",
@@ -1787,7 +2065,17 @@ def test_agent_compares_integration_and_saved_job_before_a_load(
     assert integration_name in choice.options
     assert result["approval_request"] is None
     if "metadata" in prompt.casefold():
-        assert "purpose not verified" in choice.option_labels[integration_name]
+        assert "purpose inferred" in choice.option_labels[integration_name]
+    if "product units" in prompt.casefold():
+        assert set(choice.options) == {
+            "data-import::Import Product Units",
+            "data-integrations::Product_Volume_Load",
+        }
+    if "product metadata" in prompt.casefold():
+        assert set(choice.options) == {
+            "metadata-import::Import Products",
+            "data-integrations::Product_Metadata",
+        }
 
     selected = service.resolve_clarification(
         conversation_id=conversation.conversation_id,
@@ -1830,6 +2118,96 @@ def test_agent_compares_integration_and_saved_job_before_a_load(
     assert job_input.artifact_name == expected_job.partition("::")[2]
 
 
+def test_agent_can_cancel_a_data_load_route_choice(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    access = AccessControlService(settings.workflow_database_file)
+    account = access.bootstrap_administrator(
+        username="admin",
+        display_name="Administrator",
+        email=None,
+        password="Strong password 123!",
+    )
+    service = AgentApplicationService(
+        settings,
+        gateway=AgentCapabilityGateway(
+            settings,
+            control_center=_ControlCenter(),
+            data_review=_DataReview(),
+            operation_catalog=_DualLoadCatalog(),
+        ),
+        repository=SQLiteAgentRepository(settings.workflow_database_file),
+        provider_factory=_NeverCalledProvider,
+    )
+    user = replace(_user(Permission.OPERATION_EXECUTE), user_id=account.user_id)
+    conversation = service.create_conversation(user)
+
+    initial = service.send_message(
+        conversation_id=conversation.conversation_id,
+        user=user,
+        content="Load Product Price",
+    )
+    choice = initial["clarification_request"]
+    assert choice is not None
+
+    cancelled = service.resolve_clarification(
+        conversation_id=conversation.conversation_id,
+        user=user,
+        request_id=choice.request_id,
+        value=None,
+    )
+
+    assert cancelled["clarification_request"] is None
+    assert cancelled["input_request"] is None
+    assert cancelled["approval_request"] is None
+    assert "cancelled" in cancelled["message"].content.casefold()
+    assert service.get_pending_clarification(
+        conversation.conversation_id,
+        user,
+    ) is None
+
+
+def test_new_customer_dimension_never_lists_native_data_import_jobs(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    access = AccessControlService(settings.workflow_database_file)
+    account = access.bootstrap_administrator(
+        username="admin",
+        display_name="Administrator",
+        email=None,
+        password="Strong password 123!",
+    )
+    service = AgentApplicationService(
+        settings,
+        gateway=AgentCapabilityGateway(
+            settings,
+            control_center=_ControlCenter(),
+            data_review=_DataReview(),
+            operation_catalog=_DualLoadCatalog(),
+        ),
+        repository=SQLiteAgentRepository(settings.workflow_database_file),
+        provider_factory=_NeverCalledProvider,
+    )
+    user = replace(_user(Permission.OPERATION_EXECUTE), user_id=account.user_id)
+    conversation = service.create_conversation(user)
+
+    result = service.send_message(
+        conversation_id=conversation.conversation_id,
+        user=user,
+        content="Load new Department",
+    )
+
+    choice = result["clarification_request"]
+    assert choice is not None
+    assert choice.operation_code == "load-options"
+    assert any(item.startswith("metadata-import::") for item in choice.options)
+    assert not any(item.startswith("data-import::") for item in choice.options)
+    assert not any(
+        "Product_Volume_Load" in item or "Actual_Load" in item
+        for item in choice.options
+    )
+
+
 def test_load_route_selection_overrides_artifact_named_in_prompt(
     tmp_path: Path,
 ) -> None:
@@ -1857,7 +2235,7 @@ def test_load_route_selection_overrides_artifact_named_in_prompt(
     result = service.send_message(
         conversation_id=conversation.conversation_id,
         user=user,
-        content="Load data using Import Actuals",
+        content="Load data",
     )
     choice = result["clarification_request"]
     assert choice is not None
@@ -1908,6 +2286,47 @@ def test_agent_does_not_prepare_a_load_when_both_catalogs_are_empty(
     assert result["clarification_request"] is None
     assert result["approval_request"] is None
     assert "No operation was prepared" in result["message"].content
+
+
+def test_agent_shows_compatible_load_catalog_when_names_are_opaque(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    access = AccessControlService(settings.workflow_database_file)
+    account = access.bootstrap_administrator(
+        username="admin",
+        display_name="Administrator",
+        email=None,
+        password="Strong password 123!",
+    )
+    service = AgentApplicationService(
+        settings,
+        gateway=AgentCapabilityGateway(
+            settings,
+            control_center=_ControlCenter(),
+            data_review=_DataReview(),
+            operation_catalog=_DualLoadCatalog(),
+        ),
+        repository=SQLiteAgentRepository(settings.workflow_database_file),
+        provider_factory=_NeverCalledProvider,
+    )
+    user = replace(_user(Permission.OPERATION_EXECUTE), user_id=account.user_id)
+    conversation = service.create_conversation(user)
+
+    result = service.send_message(
+        conversation_id=conversation.conversation_id,
+        user=user,
+        content="Load margin data",
+    )
+
+    choice = result["clarification_request"]
+    assert choice is not None
+    assert choice.options
+    assert any(item.startswith("data-import::") for item in choice.options)
+    assert any(
+        item.startswith("data-integrations::") for item in choice.options
+    )
+    assert "could not prove a name or description match" in choice.prompt
 
 
 def test_agent_reports_authenticated_users_own_role_and_permissions(
@@ -3615,6 +4034,59 @@ def test_gemini_adapter_supports_current_json_schema_field() -> None:
     assert declaration.values["parameters_json_schema"] == (
         tool.parameters_schema
     )
+
+
+def test_gemini_can_require_one_structured_interpretation_tool() -> None:
+    class Value:
+        def __init__(self, **values) -> None:
+            self.values = values
+
+    class Models:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def generate_content(self, **values):
+            self.calls.append(values)
+            return SimpleNamespace(
+                function_calls=(), candidates=(), text="Recorded."
+            )
+
+    models = Models()
+    fake_types = SimpleNamespace(
+        FunctionDeclaration=Value,
+        GenerateContentConfig=Value,
+        Tool=Value,
+        ToolConfig=Value,
+        FunctionCallingConfig=Value,
+        AutomaticFunctionCallingConfig=Value,
+    )
+    provider = GeminiAgentProvider(
+        api_key="test-key",
+        model="test-model",
+        client=SimpleNamespace(models=models),
+        types_module=fake_types,
+    )
+    tool = AgentToolDefinition(
+        name="record_task_interpretation",
+        description="Record structured task semantics.",
+        parameters_schema={"type": "object", "properties": {}},
+    )
+
+    provider.generate(
+        messages=(),
+        system_instruction="Return structured semantics only.",
+        tools=(tool,),
+        provider_exchange=(),
+        required_tool_name="record_task_interpretation",
+    )
+
+    config = models.calls[0]["config"]
+    tool_config = config.values["tool_config"]
+    function_config = tool_config.values["function_calling_config"]
+    assert function_config.values == {
+        "mode": "ANY",
+        "allowed_function_names": ["record_task_interpretation"],
+    }
 
 
 def test_gemini_function_result_is_returned_as_a_user_turn() -> None:

@@ -22,6 +22,9 @@ from app.agent.capabilities import (
     PIPELINE_SCHEDULE_RESUME,
 )
 from app.agent.checkpoints import AgentCheckpointStore
+from app.agent.canonical import capability_definition
+from app.agent.entity_resolution import CatalogEntityResolver
+from app.agent.errors import classify_agent_error
 from app.agent.execution_plan import AgentExecutionPlanBuilder
 from app.agent.models import (
     AgentMessage,
@@ -38,10 +41,15 @@ from app.agent.models import (
 from app.agent.provider import AgentProvider
 from app.agent.rule_matching import (
     BusinessRuleMatch,
+    filter_relevant_load_artifacts,
     recommend_artifacts,
     recommend_forecast_seeding_rules,
 )
-from app.utils.exceptions import AgentProviderError
+from app.utils.exceptions import (
+    AgentCapabilityError,
+    AgentConversationError,
+    AgentProviderError,
+)
 
 
 ProviderFactory = Callable[[], AgentProvider]
@@ -124,12 +132,13 @@ class AgentGraphState(TypedDict, total=False):
     task_context: dict[str, Any] | None
     task_plan: dict[str, Any] | None
     load_discovery_blocker: str | None
+    authorized_execution_ids: list[str] | None
 
 
 class AgentGraphOrchestrator:
     """Compile and run the deterministic model -> tools -> model graph."""
 
-    STATE_SCHEMA_VERSION = 6
+    STATE_SCHEMA_VERSION = 7
 
     def __init__(
         self,
@@ -165,6 +174,7 @@ class AgentGraphOrchestrator:
         allowed_tool_names: Sequence[str] | None = None,
         data_review_context: dict[str, Any] | None = None,
         task_context: dict[str, Any] | None = None,
+        authorized_execution_ids: Sequence[str] = (),
     ) -> AgentProviderResult:
         """Run one auditable assistant turn under an isolated thread ID."""
         initial: AgentGraphState = {
@@ -189,6 +199,7 @@ class AgentGraphOrchestrator:
             "task_context": task_context,
             "task_plan": None,
             "load_discovery_blocker": None,
+            "authorized_execution_ids": list(authorized_execution_ids),
         }
         try:
             state = self._compiled_graph().invoke(
@@ -247,6 +258,16 @@ class AgentGraphOrchestrator:
                 if approval is not None:
                     return approval
         return None
+
+    def current_task_context(
+        self, *, conversation_id: str, user_id: int
+    ) -> dict[str, Any] | None:
+        """Read the last checkpointed task, independent of the chat window."""
+        snapshot = self._compiled_graph().get_state(
+            self._config(conversation_id, user_id)
+        )
+        value = snapshot.values.get("task_context") if snapshot.values else None
+        return dict(value) if isinstance(value, dict) else None
 
     def pending_clarification(
         self,
@@ -351,13 +372,41 @@ class AgentGraphOrchestrator:
             raise AgentProviderError(
                 "This agent input request is stale. Refresh the conversation."
             )
+        normalized_values: dict[str, Any] | None = None
+        if values is not None and pending.operation_code in {
+            "substitution-variables",
+            "user-variables",
+        }:
+            # Validate variable values before advancing the durable graph. A
+            # failed node invocation can retain the rejected resume payload in
+            # the checkpointer, causing every later correction or cancellation
+            # to replay the same error. Pre-validation leaves the interrupt
+            # untouched, so the same form can be corrected or cancelled.
+            try:
+                normalized_values = self._gateway.normalize_guided_inputs(
+                    pending.operation_code,
+                    pending.artifact_name,
+                    values,
+                )
+            except AgentCapabilityError as exc:
+                raise AgentProviderError(str(exc)) from exc
         try:
             state = self._compiled_graph().invoke(
-                Command(resume={"values": values}),
+                Command(
+                    resume={
+                        "values": values,
+                        "normalized_values": normalized_values,
+                    }
+                ),
                 config=self._config(conversation_id, user_id),
             )
         except AgentProviderError:
             raise
+        except AgentCapabilityError as exc:
+            # Preserve safe deterministic validation feedback so the user can
+            # correct the same pending form instead of seeing a generic model
+            # or infrastructure error.
+            raise AgentProviderError(str(exc)) from exc
         except Exception as exc:
             self._logger.exception("LangGraph operation input resume failed.")
             raise AgentProviderError(
@@ -472,7 +521,22 @@ class AgentGraphOrchestrator:
                 "assistant_text": self._deterministic_completion_text(
                     deterministic_operation,
                     state.get("tool_activity", []),
+                    latest_user_text=next(
+                        (
+                            str(item.get("content") or "")
+                            for item in reversed(state.get("messages", []))
+                            if item.get("role") == AgentMessageRole.USER.value
+                        ),
+                        "",
+                    ),
                 ),
+                "pending_tool_calls": [],
+            }
+        variable_type_question = self._deterministic_variable_type_question(state)
+        if variable_type_question is not None:
+            return {
+                **state,
+                "assistant_text": variable_type_question,
                 "pending_tool_calls": [],
             }
         task_response = self._deterministic_task_response(state)
@@ -489,6 +553,7 @@ class AgentGraphOrchestrator:
         deterministic_task_call = (
             self._deterministic_standalone_flow_call(state)
             or self._deterministic_task_operation_call(state)
+            or self._deterministic_canonical_operation_call(state)
             or self._deterministic_task_plan_call(state)
             or self._deterministic_forecast_seeding_call(state)
             or self._deterministic_variance_reporting_call(state)
@@ -528,6 +593,8 @@ class AgentGraphOrchestrator:
             or self._deterministic_data_map_call(state)
             or self._deterministic_metadata_import_call(state)
             or self._deterministic_variable_call(state)
+            or self._deterministic_cube_refresh_call(state)
+            or self._deterministic_named_process_call(state)
         )
         if deterministic_call is not None:
             deterministic_operation = {
@@ -665,7 +732,7 @@ class AgentGraphOrchestrator:
                 result = self._execute_allowed_tool(call, state)
             except Exception as exc:
                 self._logger.warning("Agent tool '%s' failed: %s", call.name, exc)
-                result = {"error": str(exc)}
+                result = classify_agent_error(exc).as_payload()
                 status = "FAILED"
             else:
                 status = "SUCCESS"
@@ -832,6 +899,7 @@ class AgentGraphOrchestrator:
                 "PLANNING_IMPORT": "data-import",
             }.get(str(task_parameters.get("load_method") or "").upper(), "data-import"),
             "RUN_BUSINESS_RULE": "business-rules",
+            "RUN_CUBE_REFRESH": "cube-refresh",
         }.get(intent)
         if operation_code is None:
             return None
@@ -843,6 +911,46 @@ class AgentGraphOrchestrator:
                 or "Prepare the clarified Oracle EPM task.",
             },
             call_id=f"deterministic-task-{operation_code}",
+        )
+
+    @staticmethod
+    def _deterministic_canonical_operation_call(
+        state: AgentGraphState,
+    ) -> AgentToolCall | None:
+        """Route schema-validated semantics into an existing governed operation."""
+        context = state.get("task_context")
+        if not isinstance(context, dict):
+            return None
+        if bool(context.get("negated")) or not bool(
+            context.get("execution_requested", False)
+        ):
+            return None
+        if str(context.get("action_mode") or "").casefold() not in {
+            "execute",
+            "update",
+        }:
+            return None
+        definition = capability_definition(
+            str(context.get("canonical_capability") or "unknown")
+        )
+        if not definition.operation_code:
+            return None
+        allowed = {
+            str(item).strip() for item in state.get("allowed_tool_names", [])
+        }
+        if "prepare_operation_action" not in allowed:
+            return None
+        return AgentToolCall(
+            name="prepare_operation_action",
+            arguments={
+                "operation_code": definition.operation_code,
+                "objective": str(context.get("objective") or "").strip()
+                or "Prepare the interpreted Oracle EPM task.",
+            },
+            call_id=(
+                "canonical-task-"
+                + definition.operation_code.replace("-", "_")
+            ),
         )
 
     def _deterministic_task_plan_call(
@@ -1280,7 +1388,7 @@ class AgentGraphOrchestrator:
                 "selector": (
                     "latest_failed"
                     if re.search(
-                        r"\b(fail(?:ed|ure)?|error)\b",
+                        r"\b(fail(?:ed|ure)?|error)\b|^\s*why\s*[?!.]?\s*$",
                         latest,
                         re.IGNORECASE,
                     )
@@ -2092,6 +2200,14 @@ class AgentGraphOrchestrator:
         latest = user_messages[-1]
         source_request = latest
         normalized = self._normalize_artifact_text(latest)
+        type_reply = self._variable_type_reply(latest)
+        if (
+            type_reply
+            and len(user_messages) >= 2
+            and self._needs_variable_type(user_messages[-2])
+        ):
+            source_request = f"{user_messages[-2]} {latest}"
+            normalized = self._normalize_artifact_text(source_request)
         if not self._contains_preparation_action(normalized):
             if (
                 len(user_messages) < 2
@@ -2105,10 +2221,19 @@ class AgentGraphOrchestrator:
 
         operation_code: str | None = None
         artifact_name: str | None = None
-        if self._mentions_user_variable(source_request):
+        if type_reply == "user-variables" or self._mentions_user_variable(source_request):
             operation_code = "user-variables"
-        elif self._mentions_substitution_variable(source_request):
+        elif type_reply == "substitution-variables" or self._mentions_substitution_variable(source_request):
             operation_code = "substitution-variables"
+        elif self._is_planning_time_variable_request(source_request):
+            # Planning-wide year/period settings are substitution variables,
+            # not Year/Period dimension metadata. The live catalog still
+            # decides which exact variable may be changed.
+            operation_code = "substitution-variables"
+        elif self._is_time_setting_request(source_request) and re.search(
+            r"\bmy\s+(?:year|period|month)\b", source_request, re.I
+        ):
+            operation_code = "user-variables"
         else:
             # Business users commonly omit the words "substitution variable".
             # Accept that shorthand only after an exact live-name match.
@@ -2164,6 +2289,212 @@ class AgentGraphOrchestrator:
             name="prepare_operation_action",
             arguments=arguments,
             call_id=f"deterministic-{operation_code}-preparation",
+        )
+
+    @classmethod
+    def _deterministic_variable_type_question(
+        cls,
+        state: AgentGraphState,
+    ) -> str | None:
+        if "prepare_operation_action" not in state.get("allowed_tool_names", []):
+            return None
+        if state.get("data_review_context"):
+            # An unqualified year/period correction in a live data review is
+            # a POV refinement, not a request to change Oracle variables.
+            return None
+        user_messages = [
+            str(item.get("content") or "").strip()
+            for item in state.get("messages", [])
+            if item.get("role") == AgentMessageRole.USER.value
+        ]
+        if user_messages and cls._needs_variable_type(user_messages[-1]):
+            return (
+                "Do you want to update an application-wide substitution "
+                "variable or your personal Planning user variable? I will "
+                "check the live variables before preparing any change."
+            )
+        return None
+
+    @classmethod
+    def _needs_variable_type(cls, text: str) -> bool:
+        return (
+            cls._is_time_setting_request(text)
+            and not cls._mentions_substitution_variable(text)
+            and not cls._mentions_user_variable(text)
+            and not cls._is_planning_time_variable_request(text)
+            and not re.search(r"\bmy\s+(?:year|period|month)\b", text, re.I)
+        )
+
+    @classmethod
+    def _is_time_setting_request(cls, text: str) -> bool:
+        normalized = cls._normalize_artifact_text(text)
+        if not cls._contains_preparation_action(normalized):
+            return False
+        if not re.search(r"\b(?:year|period|month)\b", normalized):
+            return False
+        if not re.search(r"\b(?:change|set|update|assign)\b", normalized):
+            return False
+        # A POV, report, integration, or metadata edit is not a variable edit.
+        return not re.search(
+            r"\b(?:pov|view|report|integration|pipeline|metadata|"
+            r"dimension|member|data load|import|rows?|columns?|slice)\b",
+            normalized,
+        )
+
+    @classmethod
+    def _is_planning_time_variable_request(cls, text: str) -> bool:
+        return bool(
+            cls._is_time_setting_request(text)
+            and re.search(
+                r"\b(?:planning|application|global|fiscal|current)\s+"
+                r"(?:year|period|month)\b",
+                cls._normalize_artifact_text(text),
+            )
+        )
+
+    @classmethod
+    def _variable_type_reply(cls, text: str) -> str | None:
+        normalized = cls._normalize_artifact_text(text)
+        if re.fullmatch(
+            r"(?:(?:use|the|an?|my)\s+){0,2}(?:substitution|subst)\s+"
+            r"(?:variable|var)(?:\s+please)?",
+            normalized,
+        ):
+            return "substitution-variables"
+        if re.fullmatch(
+            r"(?:(?:use|the|an?|my)\s+){0,2}user\s+"
+            r"(?:variable|var)(?:\s+please)?",
+            normalized,
+        ):
+            return "user-variables"
+        return None
+
+    @classmethod
+    def _semantic_time_variable_artifact(
+        cls,
+        catalog: Sequence[tuple[str, str]],
+        request: str,
+    ) -> str | None:
+        """Select only one live, clearly named current-year/period variable.
+
+        A generic ``Year`` or a Forecast-specific variable is not enough to
+        infer an application planning setting. Duplicated cube scopes remain
+        a user choice rather than silently selecting one scope.
+        """
+        normalized = cls._normalize_artifact_text(request)
+        if re.search(r"\byear\b", normalized):
+            suffixes = ("year", "yr", "fy")
+        elif re.search(r"\b(?:period|month)\b", normalized):
+            suffixes = ("period", "prd", "month", "mth")
+        else:
+            return None
+        preferred: list[str] = []
+        for identifier, display_name in catalog:
+            variable_name = display_name.split(" · ", 1)[0].strip()
+            compact = re.sub(r"[^a-z0-9]", "", variable_name.casefold())
+            if any(
+                compact == f"{prefix}{suffix}"
+                for prefix in ("cur", "curr", "current", "planning", "plan", "fiscal")
+                for suffix in suffixes
+            ):
+                preferred.append(identifier)
+        return preferred[0] if len(preferred) == 1 else None
+
+    @classmethod
+    def _deterministic_cube_refresh_call(
+        cls,
+        state: AgentGraphState,
+    ) -> AgentToolCall | None:
+        if "prepare_operation_action" not in state.get("allowed_tool_names", []):
+            return None
+        user_messages = [
+            str(item.get("content") or "").strip()
+            for item in state.get("messages", [])
+            if item.get("role") == AgentMessageRole.USER.value
+        ]
+        if not user_messages:
+            return None
+        latest = user_messages[-1]
+        source_request = latest
+        if not cls._is_cube_refresh_request(latest):
+            # Recover a short answer to a prior, model-written cube question.
+            # A cube name is not a saved Cube Refresh job and is never used as
+            # the artifact without live job-catalog verification.
+            short_reply = (
+                cls._is_artifact_confirmation_reply(latest)
+                or bool(re.fullmatch(r"[A-Za-z][\w.-]{0,79}", latest))
+            )
+            if not short_reply or len(user_messages) < 2:
+                return None
+            prior = next(
+                (
+                    item for item in reversed(user_messages[:-1])
+                    if cls._is_cube_refresh_request(item)
+                ),
+                None,
+            )
+            if prior is None:
+                return None
+            source_request = prior
+        return AgentToolCall(
+            name="prepare_operation_action",
+            arguments={
+                "operation_code": "cube-refresh",
+                "objective": " ".join(source_request.split())[:500],
+            },
+            call_id="deterministic-cube-refresh-preparation",
+        )
+
+    @classmethod
+    def _is_cube_refresh_request(cls, text: str) -> bool:
+        normalized = cls._normalize_artifact_text(text)
+        if normalized.startswith(
+            ("how ", "why ", "what ", "which ", "when ", "show ", "list ")
+        ):
+            return False
+        return bool(
+            re.search(
+                r"\brefresh\b.{0,50}\b(?:cube|database)\b|"
+                r"\b(?:cube|database)\s+refresh\b",
+                normalized,
+            )
+            and re.search(r"\b(?:refresh|run|execute|start|prepare)\b", normalized)
+        )
+
+    @classmethod
+    def _deterministic_named_process_call(
+        cls,
+        state: AgentGraphState,
+    ) -> AgentToolCall | None:
+        if "prepare_operation_action" not in state.get("allowed_tool_names", []):
+            return None
+        user_messages = [
+            str(item.get("content") or "").strip()
+            for item in state.get("messages", [])
+            if item.get("role") == AgentMessageRole.USER.value
+        ]
+        if not user_messages:
+            return None
+        latest = user_messages[-1]
+        normalized = cls._normalize_artifact_text(latest)
+        if normalized.startswith(
+            ("how ", "why ", "what ", "which ", "show ", "list ")
+        ):
+            return None
+        if not re.search(
+            r"\b(?:run|execute|start|prepare|launch)\b.{0,100}\bprocess\b",
+            normalized,
+        ):
+            return None
+        if re.search(r"\b(?:month close|monthly close|closing)\b", normalized):
+            return None
+        return AgentToolCall(
+            name="prepare_operation_action",
+            arguments={
+                "operation_code": "pipelines",
+                "objective": " ".join(latest.split())[:500],
+            },
+            call_id="deterministic-named-process-preparation",
         )
 
     @classmethod
@@ -2340,6 +2671,13 @@ class AgentGraphOrchestrator:
         if not normalized:
             return False
         patterns = (
+            r"^why\s*[?!.]?$",
+            r"^(?:is it done|is it running|did it start|what happened|"
+            r"show the error|why did it fail|try again|rerun it|"
+            r"run the same thing again)\??$",
+            r"\b(?:is|has)\s+(?:the\s+)?(?:last\s+|latest\s+)?"
+            r"(?:job|run|execution|load|import|pipeline)\b.{0,40}"
+            r"\b(?:done|running|finished|complete|failed)\b",
             r"\bhow many records?\b.*\b(read|processed|rejected)\b",
             r"\b(records? read|records? processed|records? rejected)\b.*\b(latest|last|run|job|execution|how many|show|tell)\b",
             r"\b(load statistics|record statistics|load counts?|record counts?)\b",
@@ -2373,11 +2711,33 @@ class AgentGraphOrchestrator:
     def _deterministic_completion_text(
         operation_code: str,
         activities: Sequence[dict[str, Any]],
+        *,
+        latest_user_text: str = "",
     ) -> str:
         if operation_code == "execution-evidence":
-            return AgentGraphOrchestrator._execution_evidence_completion_text(
-                activities
+            evidence = AgentGraphOrchestrator._execution_evidence_completion_text(
+                activities,
+                include_missing_statistics=bool(
+                    re.search(
+                        r"\b(?:records?|counts?|statistics)\b",
+                        latest_user_text,
+                        re.IGNORECASE,
+                    )
+                ),
             )
+            if re.fullmatch(
+                r"\s*(?:try again|rerun it|run the same thing again)[.!?]?\s*",
+                latest_user_text,
+                re.IGNORECASE,
+            ):
+                return (
+                    evidence
+                    + "\n\nA retry has **not** started. To rerun this operation, "
+                    "prepare a new request and review its inputs and approval. "
+                    "If Oracle reported a validation or permission error, "
+                    "resolve it before resubmitting."
+                )
+            return evidence
         if operation_code == "multi-step-plan":
             activity = next(
                 (
@@ -2647,6 +3007,8 @@ class AgentGraphOrchestrator:
     @staticmethod
     def _execution_evidence_completion_text(
         activities: Sequence[dict[str, Any]],
+        *,
+        include_missing_statistics: bool = True,
     ) -> str:
         activity = next(
             (
@@ -2688,7 +3050,7 @@ class AgentGraphOrchestrator:
                     "",
                 ]
             )
-        else:
+        elif include_missing_statistics:
             lines.extend(
                 [
                     "Oracle did not expose record statistics for this "
@@ -2724,8 +3086,9 @@ class AgentGraphOrchestrator:
     def _load_route_artifacts(
         self,
         task_intent: str,
-    ) -> tuple[tuple[tuple[str, str], ...], tuple[str, ...]]:
-        """Compare both runnable load catalogs without guessing an artifact type."""
+        objective: str,
+    ) -> tuple[tuple[tuple[str, str], ...], tuple[str, ...], bool]:
+        """Compare both load catalogs and retain business-relevant artifacts."""
         operations = (
             ("data-integrations", "Data Integration"),
             (
@@ -2737,9 +3100,9 @@ class AgentGraphOrchestrator:
                 ),
             ),
         )
-        options: list[tuple[str, str]] = []
+        discovered: list[tuple[str, str, str]] = []
         errors: list[str] = []
-        for operation_code, route_label in operations:
+        for operation_code, _route_label in operations:
             try:
                 catalog = self._gateway.artifact_catalog(operation_code)
             except Exception as exc:
@@ -2751,19 +3114,43 @@ class AgentGraphOrchestrator:
                 errors.append(operation_code)
                 continue
             for identifier, display_name in catalog:
-                note = (
-                    " · metadata purpose not verified"
-                    if task_intent == "METADATA_LOAD"
-                    and operation_code == "data-integrations"
-                    else ""
+                discovered.append(
+                    (identifier, display_name, operation_code)
                 )
-                options.append(
-                    (
-                        f"{operation_code}::{identifier}",
-                        f"{route_label} · {display_name}{note}",
-                    )
+        relevant = filter_relevant_load_artifacts(
+            objective,
+            task_intent,
+            tuple(discovered),
+        )
+        used_fallback = False
+        if not relevant and discovered:
+            # Names/descriptions are sometimes opaque codes. Never turn that
+            # lack of metadata into an empty UI: fall back to the compatible
+            # route catalog and require the user to choose explicitly.
+            relevant = filter_relevant_load_artifacts(
+                "",
+                task_intent,
+                tuple(discovered),
+                allow_unknown_integrations=True,
+            )
+            used_fallback = True
+        labels_by_operation = dict(operations)
+        options: list[tuple[str, str]] = []
+        for identifier, display_name, operation_code in relevant:
+            note = (
+                " · purpose inferred from its matching name; verify before approval"
+                if task_intent == "METADATA_LOAD"
+                and operation_code == "data-integrations"
+                else ""
+            )
+            options.append(
+                (
+                    f"{operation_code}::{identifier}",
+                    f"{labels_by_operation[operation_code]} · "
+                    f"{display_name}{note}",
                 )
-        return tuple(options), tuple(errors)
+            )
+        return tuple(options), tuple(errors), used_fallback
 
     def _approval_node(self, state: AgentGraphState) -> AgentGraphState:
         if any(
@@ -2798,8 +3185,12 @@ class AgentGraphOrchestrator:
             and str(task_context.get("phase") or "").upper()
             in {"READY_FOR_PLAN", "COLLECTING_INFORMATION"}
         ):
-            load_options, discovery_errors = self._load_route_artifacts(
-                task_intent
+            objective = str(task_context.get("objective") or "").strip()
+            load_options, discovery_errors, used_catalog_fallback = (
+                self._load_route_artifacts(
+                    task_intent,
+                    objective,
+                )
             )
             if not load_options:
                 kinds = (
@@ -2815,15 +3206,16 @@ class AgentGraphOrchestrator:
                 return {
                     **state,
                     "load_discovery_blocker": (
-                        f"I could not find any selectable {kinds} in this "
-                        "environment. No operation was prepared."
+                        f"I checked both load catalogs but could not find any "
+                        f"selectable {kinds} matching '{objective}'. Try the "
+                        "business subject or exact artifact name. No operation "
+                        "was prepared."
                         + detail
                     ),
                     "pending_tool_calls": [],
                     "approval_decision": "reject",
                 }
             labels = dict(load_options)
-            objective = str(task_context.get("objective") or "").strip()
             recommendations = recommend_artifacts(objective, load_options)
             source_label = (
                 "data" if task_intent == "DATA_LOAD" else "metadata"
@@ -2837,6 +3229,11 @@ class AgentGraphOrchestrator:
                 " One catalog could not be read, so the list may be incomplete."
                 if discovery_errors else ""
             )
+            fallback_notice = (
+                " I could not prove a name or description match, so the card "
+                "shows the compatible load catalog for an explicit choice."
+                if used_catalog_fallback else ""
+            )
             selection = interrupt(
                 {
                     "kind": "operation_artifact_selection",
@@ -2845,6 +3242,7 @@ class AgentGraphOrchestrator:
                     "prompt": (
                         f"Choose which {source_label} load to prepare."
                         + warning
+                        + fallback_notice
                         + incomplete
                     ),
                     "options": [name for name, _label in load_options],
@@ -2936,6 +3334,7 @@ class AgentGraphOrchestrator:
             for item in state.get("pending_tool_calls", [])
         ]
         operation_code = str(proposal.get("target_code") or "").casefold()
+        artifact_catalog_available = True
         try:
             snapshot = state.get("artifact_catalog_snapshot")
             if (
@@ -2981,6 +3380,8 @@ class AgentGraphOrchestrator:
             )
             choices = ()
             display_names = {}
+            artifact_catalog = ()
+            artifact_catalog_available = False
         recovery = self._gateway.artifact_recovery_definition(operation_code)
         requested_artifact = str(proposal.get("artifact_name") or "").strip()
         confirmed_prior_artifact = (
@@ -3018,6 +3419,48 @@ class AgentGraphOrchestrator:
             if trusted_task_objective
             else None
         )
+        variable_source_text = (
+            f"{previous_user_text} {latest_user_text_original}"
+            if self._variable_type_reply(latest_user_text_original)
+            and self._needs_variable_type(previous_user_text)
+            else latest_user_text_original
+        )
+        semantic_variable_artifact = (
+            self._semantic_time_variable_artifact(
+                artifact_catalog,
+                variable_source_text,
+            )
+            if operation_code == "substitution-variables"
+            and self._is_planning_time_variable_request(variable_source_text)
+            else None
+        )
+        semantic_candidate = ""
+        if isinstance(task_context, dict):
+            entity_context = task_context.get("resolved_entity")
+            if isinstance(entity_context, dict):
+                semantic_candidate = str(
+                    entity_context.get("candidate_name") or ""
+                ).strip()
+        entity_resolution = CatalogEntityResolver.resolve(
+            semantic_candidate,
+            artifact_catalog,
+            catalog_available=artifact_catalog_available,
+        )
+        if isinstance(task_context, dict) and semantic_candidate:
+            task_context["resolved_entity"] = {
+                **(
+                    task_context.get("resolved_entity")
+                    if isinstance(task_context.get("resolved_entity"), dict)
+                    else {}
+                ),
+                **entity_resolution.as_payload(),
+                "catalog_source": operation_code,
+            }
+        semantic_exact = (
+            entity_resolution.canonical_name
+            if entity_resolution.status.value == "exact"
+            else None
+        )
         explicitly_named = self._artifact_alias_named_in_user_text(
             display_names,
             latest_user_text,
@@ -3028,7 +3471,7 @@ class AgentGraphOrchestrator:
             choices,
             latest_user_text,
             previous_assistant_text,
-        ) or confirmed_prior_artifact or task_artifact
+        ) or confirmed_prior_artifact or task_artifact or semantic_variable_artifact or semantic_exact
         if route_selected:
             # The user chose this exact live route; a name inferred from an
             # earlier message must not replace it during artifact resolution.
@@ -3106,6 +3549,15 @@ class AgentGraphOrchestrator:
                 PIPELINE_SCHEDULE_CREATE: "Choose the Oracle Pipeline to schedule.",
                 PIPELINE_SCHEDULE_PAUSE: "Choose the active schedule to pause.",
                 PIPELINE_SCHEDULE_RESUME: "Choose the paused schedule to resume.",
+                "cube-refresh": (
+                    "Choose a current saved Cube Refresh job. This refresh is "
+                    "application-wide; a cube name is not a refresh job."
+                ),
+                "pipelines": (
+                    "Choose the registered Oracle Pipeline that implements "
+                    "this process. Its stages and inputs will be reviewed "
+                    "before any execution."
+                ),
             }.get(
                 operation_code,
                 f"Choose the {proposal.get('display_name')} artifact to prepare.",
@@ -3236,6 +3688,12 @@ class AgentGraphOrchestrator:
             if self._is_artifact_confirmation_reply(latest_user_text)
             else latest_user_text_original
         )
+        if (
+            operation_code in {"substitution-variables", "user-variables"}
+            and self._variable_type_reply(latest_user_text_original)
+            and self._needs_variable_type(previous_user_text)
+        ):
+            input_source_text = previous_user_text
         if operation_code == "business-rules" and trusted_task_objective:
             input_source_text = " ".join(
                 item
@@ -3356,10 +3814,19 @@ class AgentGraphOrchestrator:
                 raise AgentProviderError(
                     "Metadata Data Integrations must use Merge export mode."
                 )
-            input_values = self._gateway.normalize_guided_inputs(
-                str(proposal.get("target_code") or ""),
-                artifact_name,
-                raw_values,
+            prevalidated_values = (
+                input_response.get("normalized_values")
+                if isinstance(input_response, dict)
+                else None
+            )
+            input_values = (
+                dict(prevalidated_values)
+                if isinstance(prevalidated_values, dict)
+                else self._gateway.normalize_guided_inputs(
+                    str(proposal.get("target_code") or ""),
+                    artifact_name,
+                    raw_values,
+                )
             )
             call = AgentToolCall(
                 name=call.name,
@@ -3560,10 +4027,19 @@ class AgentGraphOrchestrator:
                 )
                 if raw_values is None:
                     return {**state, "approval_decision": "reject"}
-                input_values = self._gateway.normalize_guided_inputs(
-                    operation_code,
-                    canonical,
-                    raw_values,
+                prevalidated_values = (
+                    answer.get("normalized_values")
+                    if isinstance(answer, dict)
+                    else None
+                )
+                input_values = (
+                    dict(prevalidated_values)
+                    if isinstance(prevalidated_values, dict)
+                    else self._gateway.normalize_guided_inputs(
+                        operation_code,
+                        canonical,
+                        raw_values,
+                    )
                 )
             validated_call = AgentToolCall(
                 name="prepare_operation_action",
@@ -4302,9 +4778,55 @@ class AgentGraphOrchestrator:
     ) -> dict[str, Any]:
         allowed = set(state.get("allowed_tool_names", []))
         if call.name not in GRAPH_TOOL_NAMES or call.name not in allowed:
-            raise AgentProviderError(
+            raise AgentCapabilityError(
                 f"Agent capability '{call.name}' is not permitted for this user."
             )
+        authorized = state.get("authorized_execution_ids")
+        if authorized is not None and call.name == "get_execution_evidence":
+            requested = str(call.arguments.get("execution_id") or "").strip()
+            if requested and requested not in authorized:
+                raise AgentConversationError(
+                    "This execution is not associated with this conversation."
+                )
+            selector = str(call.arguments.get("selector") or "").casefold()
+            candidates = [requested] if requested else list(authorized)
+            if not candidates:
+                raise AgentConversationError(
+                    "This conversation has no approved execution to inspect."
+                )
+            for execution_id in candidates:
+                result = self._gateway.execute(
+                    AgentToolCall(
+                        name="get_execution_evidence",
+                        arguments={"execution_id": execution_id},
+                        call_id=call.call_id,
+                    )
+                )
+                execution = result.get("execution")
+                if selector != "latest_failed" or (
+                    isinstance(execution, dict)
+                    and str(execution.get("status") or "").upper() == "FAILED"
+                ):
+                    return result
+            raise AgentProviderError(
+                "No failed execution was found in this conversation."
+            )
+        if authorized is not None and call.name == "get_recent_execution_history":
+            runs = []
+            for execution_id in authorized[:20]:
+                try:
+                    result = self._gateway.execute(
+                        AgentToolCall(
+                            name="get_execution_evidence",
+                            arguments={"execution_id": execution_id},
+                        )
+                    )
+                except Exception:
+                    continue
+                execution = result.get("execution")
+                if isinstance(execution, dict):
+                    runs.append(execution)
+            return {"count": len(runs), "runs": runs}
         return self._gateway.execute(call)
 
     def delete_thread(self, *, conversation_id: str, user_id: int) -> None:

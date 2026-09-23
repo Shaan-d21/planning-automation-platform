@@ -73,6 +73,9 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
   const messageViewport = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
   const keepConversationAtBottom = useRef(true);
+  const activeConversationRef = useRef<string | null>(null);
+  const sendRequest = useRef<AbortController | null>(null);
+  const conversationLoadSequence = useRef(0);
 
   useEffect(() => {
     let active = true;
@@ -87,6 +90,8 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
       .finally(() => active && setLoading(false));
     return () => { active = false; };
   }, []);
+
+  useEffect(() => () => sendRequest.current?.abort(), []);
 
   useEffect(() => {
     const viewport = messageViewport.current;
@@ -128,7 +133,15 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
   }
 
   async function openConversation(conversationId: string) {
+    sendRequest.current?.abort();
+    sendRequest.current = null;
+    setSending(false);
+    setDeciding(null);
+    setSelecting(false);
+    setSavingInputs(false);
+    const loadSequence = ++conversationLoadSequence.current;
     keepConversationAtBottom.current = true;
+    activeConversationRef.current = conversationId;
     setActiveId(conversationId);
     setLoadingMessages(true);
     setError(null);
@@ -137,6 +150,10 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
     setReviewContext(null);
     try {
       const response = await api.agentMessages(conversationId);
+      if (
+        loadSequence !== conversationLoadSequence.current
+        || activeConversationRef.current !== conversationId
+      ) return;
       setMessages(response.messages);
       setDrafts(response.action_drafts);
       setApproval(response.approval_request);
@@ -146,9 +163,15 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
       setApprovedExecution(null);
       setApprovedSchedule(null);
     } catch (reason) {
-      setError(errorMessage(reason));
+      if (
+        loadSequence === conversationLoadSequence.current
+        && activeConversationRef.current === conversationId
+      ) setError(errorMessage(reason));
     } finally {
-      setLoadingMessages(false);
+      if (
+        loadSequence === conversationLoadSequence.current
+        && activeConversationRef.current === conversationId
+      ) setLoadingMessages(false);
     }
   }
 
@@ -158,6 +181,13 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
     try {
       const response = await api.createAgentConversation(csrfToken);
       setConversations((current) => [response.conversation, ...current]);
+      sendRequest.current?.abort();
+      sendRequest.current = null;
+      setSending(false);
+      setDeciding(null);
+      setSelecting(false);
+      setSavingInputs(false);
+      activeConversationRef.current = response.conversation.conversation_id;
       setActiveId(response.conversation.conversation_id);
       setMessages([]);
       setDrafts([]);
@@ -188,6 +218,7 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
       setConversations(remaining);
       if (remaining.length) await openConversation(remaining[0].conversation_id);
       else {
+        activeConversationRef.current = null;
         setActiveId(null);
         setMessages([]);
         setDrafts([]);
@@ -233,8 +264,19 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
     };
     setMessages((current) => [...current, optimistic]);
     setContent("");
+    const controller = new AbortController();
+    sendRequest.current = controller;
     try {
-      const response = await api.sendAgentMessage(conversationId, prompt, csrfToken);
+      const response = await api.sendAgentMessage(
+        conversationId,
+        prompt,
+        csrfToken,
+        controller.signal
+      );
+      if (
+        controller.signal.aborted
+        || activeConversationRef.current !== conversationId
+      ) return;
       setMessages((current) => [...current, response.message]);
       rememberReviewActivity(response.message, response.tool_activity);
       if (response.tool_activity.some((item) => ["review_data_slice", "review_saved_data_view", "review_saved_variance", "compare_data_slices"].includes(item.name) && item.status === "SUCCESS")) setReviewContext(null);
@@ -245,6 +287,8 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
       setToolActivity(response.tool_activity);
       await refreshConversations();
     } catch (reason) {
+      if (controller.signal.aborted || isAbortError(reason)) return;
+      if (activeConversationRef.current !== conversationId) return;
       setError(errorMessage(reason));
       const response = await api.agentMessages(conversationId).catch(() => null);
       if (response) {
@@ -255,23 +299,30 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
         setInputRequest(response.input_request);
       }
     } finally {
-      setSending(false);
+      if (sendRequest.current === controller) {
+        sendRequest.current = null;
+        setSending(false);
+      }
     }
   }
 
   async function resolveApproval(decision: "approve" | "reject") {
     if (!activeId || !approval || deciding) return;
+    const conversationId = activeId;
+    const pendingApproval = approval;
     setApprovedExecution(null);
     setApprovedSchedule(null);
     setDeciding(decision);
     setError(null);
+    if (decision === "reject") setApproval(null);
     try {
       const response = await api.resolveAgentApproval(
-        activeId,
-        approval.request_id,
+        conversationId,
+        pendingApproval.request_id,
         decision,
         csrfToken
       );
+      if (activeConversationRef.current !== conversationId) return;
       setMessages((current) => [...current, response.message]);
       rememberReviewActivity(response.message, response.tool_activity);
       setDrafts((current) => [...current, ...response.action_drafts]);
@@ -283,8 +334,9 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
       setApprovedSchedule(response.schedule ?? null);
       await refreshConversations();
     } catch (reason) {
+      if (activeConversationRef.current !== conversationId) return;
       setError(errorMessage(reason));
-      const response = await api.agentMessages(activeId).catch(() => null);
+      const response = await api.agentMessages(conversationId).catch(() => null);
       if (response) {
         setMessages(response.messages);
         setDrafts(response.action_drafts);
@@ -299,16 +351,20 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
 
   async function resolveClarification(value: string | null) {
     if (!activeId || !clarification || selecting) return;
+    const conversationId = activeId;
+    const pendingClarification = clarification;
     setApprovedExecution(null);
     setSelecting(true);
     setError(null);
+    if (value === null) setClarification(null);
     try {
       const response = await api.resolveAgentClarification(
-        activeId,
-        clarification.request_id,
+        conversationId,
+        pendingClarification.request_id,
         value,
         csrfToken
       );
+      if (activeConversationRef.current !== conversationId) return;
       setMessages((current) => [...current, response.message]);
       rememberReviewActivity(response.message, response.tool_activity);
       setDrafts((current) => [...current, ...response.action_drafts]);
@@ -318,8 +374,9 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
       setInputRequest(response.input_request);
       await refreshConversations();
     } catch (reason) {
+      if (activeConversationRef.current !== conversationId) return;
       setError(errorMessage(reason));
-      const response = await api.agentMessages(activeId).catch(() => null);
+      const response = await api.agentMessages(conversationId).catch(() => null);
       if (response) {
         setMessages(response.messages);
         setDrafts(response.action_drafts);
@@ -384,16 +441,20 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
 
   async function resolveInput(values: Record<string, unknown> | null) {
     if (!activeId || !inputRequest || savingInputs) return;
+    const conversationId = activeId;
+    const pendingInput = inputRequest;
     setApprovedExecution(null);
     setSavingInputs(true);
     setError(null);
+    if (values === null) setInputRequest(null);
     try {
       const response = await api.resolveAgentInput(
-        activeId,
-        inputRequest.request_id,
+        conversationId,
+        pendingInput.request_id,
         values,
         csrfToken
       );
+      if (activeConversationRef.current !== conversationId) return;
       setMessages((current) => [...current, response.message]);
       rememberReviewActivity(response.message, response.tool_activity);
       setDrafts((current) => [...current, ...response.action_drafts]);
@@ -403,8 +464,9 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
       setInputRequest(response.input_request);
       await refreshConversations();
     } catch (reason) {
+      if (activeConversationRef.current !== conversationId) return;
       setError(errorMessage(reason));
-      const response = await api.agentMessages(activeId).catch(() => null);
+      const response = await api.agentMessages(conversationId).catch(() => null);
       if (response) {
         setMessages(response.messages);
         setDrafts(response.action_drafts);
@@ -2145,5 +2207,8 @@ function downloadAgentBlob(blob: Blob, filename: string) {
   anchor.click();
   anchor.remove();
   URL.revokeObjectURL(url);
+}
+function isAbortError(reason: unknown) {
+  return reason instanceof DOMException && reason.name === "AbortError";
 }
 function errorMessage(reason: unknown) { return reason instanceof Error ? reason.message : "The EPM Assistant request could not be completed."; }
