@@ -75,3 +75,42 @@ def test_update_stops_when_current_value_changed_after_review() -> None:
             )
 
     variable_service.apply_updates.assert_not_called()
+
+
+def test_update_stops_before_oracle_write_when_value_type_is_invalid() -> None:
+    client = _client()
+    validator = Mock()
+    validator.validate_substitution_variable.side_effect = (
+        SubstitutionVariableError(
+            "'FY28' is not an exact live member of dimension 'Scenario'."
+        )
+    )
+    service = SubstitutionVariableApplicationService(
+        client=client,
+        value_validator=validator,
+    )
+    variable_service = Mock()
+    variable_service.get_all_variables.return_value = (
+        SubstitutionVariable("CurrentScenario", "Actual", "ALL"),
+    )
+
+    from unittest.mock import patch
+
+    with patch(
+        "app.application.substitution_variables."
+        "SubstitutionVariableService",
+        return_value=variable_service,
+    ):
+        with pytest.raises(SubstitutionVariableError, match="expects a scenario"):
+            service.apply(
+                SubstitutionVariableOperationInput(
+                    action=SubstitutionVariableAction.UPDATE,
+                    scope="ALL",
+                    name="CurrentScenario",
+                    value="FY28",
+                    expected_current_value="Actual",
+                )
+            )
+
+    variable_service.apply_updates.assert_not_called()
+    validator.validate_substitution_variable.assert_not_called()

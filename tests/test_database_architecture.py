@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import inspect
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -79,6 +81,28 @@ EXPECTED_TABLES = {
     "agent_action_drafts",
     "agent_action_decisions",
 }
+
+
+def test_worker_imports_in_a_fresh_process() -> None:
+    """Protect worker startup from package-initialization import cycles."""
+    project_root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "from app.application.execution_worker "
+                "import DurableExecutionWorker; "
+                "from app.application.operations "
+                "import BusinessRuleOperationInput"
+            ),
+        ],
+        cwd=project_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_schema_contains_only_documented_tables() -> None:

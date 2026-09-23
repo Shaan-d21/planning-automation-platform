@@ -1,9 +1,52 @@
 """Tests for scalable, explainable Business Rule recommendations."""
 
 from app.agent.rule_matching import (
+    filter_relevant_load_artifacts,
     recommend_business_rules,
     recommend_forecast_seeding_rules,
 )
+
+
+def test_load_matching_compares_both_routes_and_filters_business_subject() -> None:
+    artifacts = (
+        ("Import Actuals", "Import Actuals", "data-import"),
+        ("Import Product Units", "Import Product Units", "data-import"),
+        ("Actual_Load", "Actual Load", "data-integrations"),
+        ("Product_Volume_Load", "Product Volume Load", "data-integrations"),
+        ("Product_Metadata", "Product Metadata", "data-integrations"),
+    )
+
+    matched = filter_relevant_load_artifacts(
+        "Load product units data from Jan to Mar for FY27",
+        "DATA_LOAD",
+        artifacts,
+    )
+
+    assert {item[0] for item in matched} == {
+        "Import Product Units",
+        "Product_Volume_Load",
+    }
+
+
+def test_metadata_load_matching_excludes_unrelated_jobs_and_data_integrations() -> None:
+    artifacts = (
+        ("Import Products", "Import Products", "metadata-import"),
+        ("Import Entities", "Import Entities", "metadata-import"),
+        ("Product_Metadata", "Product Metadata", "data-integrations"),
+        ("Product_Volume_Load", "Product Volume Load", "data-integrations"),
+        ("Actual_Load", "Actual Load", "data-integrations"),
+    )
+
+    matched = filter_relevant_load_artifacts(
+        "Load Product metadata using Product.csv",
+        "METADATA_LOAD",
+        artifacts,
+    )
+
+    assert {item[0] for item in matched} == {
+        "Import Products",
+        "Product_Metadata",
+    }
 
 
 def test_business_rule_matching_ranks_live_names_against_task_context() -> None:

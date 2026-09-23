@@ -288,10 +288,15 @@ export const api = {
     request<AgentMessagesResponse>(
       `/api/agent/conversations/${encodeURIComponent(conversationId)}/messages`
     ),
-  sendAgentMessage: (conversationId: string, content: string, csrfToken: string) =>
+  sendAgentMessage: (
+    conversationId: string,
+    content: string,
+    csrfToken: string,
+    signal?: AbortSignal
+  ) =>
     request<AgentSendResponse>(
       `/api/agent/conversations/${encodeURIComponent(conversationId)}/messages`,
-      { method: "POST", body: JSON.stringify({ content }) },
+      { method: "POST", body: JSON.stringify({ content }), signal },
       csrfToken
     ),
   resolveAgentApproval: (

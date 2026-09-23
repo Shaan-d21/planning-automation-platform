@@ -173,6 +173,47 @@
           ]
         }
       ]
+    },
+    {
+      "name": "New Product Revenue View",
+      "title": "New Product Revenue View",
+      "cube": "Plan1",
+      "pov": {
+        "HSP_View": "BaseData",
+        "Scenario": "Plan",
+        "Version": "Working",
+        "Product": "Orange Juice",
+        "Entity": "US Operations",
+        "Year": "FY27"
+      },
+      "columns": [
+        {
+          "dimensions": [
+            "Period"
+          ],
+          "members": [
+            [
+              "Jan",
+              "Feb",
+              "Mar"
+            ]
+          ]
+        }
+      ],
+      "rows": [
+        {
+          "dimensions": [
+            "Account"
+          ],
+          "members": [
+            [
+              "Units",
+              "ASP",
+              "Product_Revenue"
+            ]
+          ]
+        }
+      ]
     }
   ]
 }

@@ -60,6 +60,85 @@ def test_month_close_asks_only_for_the_first_missing_value() -> None:
     assert result.clarification_prompt == "Which period are we closing?"
 
 
+def test_checkpointed_task_continues_after_chat_history_is_truncated() -> None:
+    initial = AgentTaskInterpreter.interpret(
+        _messages("Load Actual data for FY27"),
+    )
+    resumed = AgentTaskInterpreter.interpret(
+        _messages("Use UAT_Units_Valid.csv for Jan"),
+        prior_context=initial.to_payload(),
+    )
+
+    assert resumed.intent is AgentTaskIntent.DATA_LOAD
+    assert resumed.parameters["year"] == "FY27"
+    assert resumed.parameters["scenario"] == "Actual"
+    assert resumed.parameters["file"] == "UAT_Units_Valid.csv"
+    assert resumed.parameters["period"] == "Jan"
+
+
+def test_checkpointed_task_does_not_override_explicit_new_intent() -> None:
+    initial = AgentTaskInterpreter.interpret(
+        _messages("Load Actual data for FY27"),
+    )
+    switched = AgentTaskInterpreter.interpret(
+        _messages("Refresh the Planning cube"),
+        prior_context=initial.to_payload(),
+    )
+
+    assert switched.intent is AgentTaskIntent.RUN_CUBE_REFRESH
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    (
+        "Load Product Price",
+        "Please import workforce compensation",
+        "Load regional margin values",
+    ),
+)
+def test_business_subject_loads_use_the_canonical_data_load_intent(
+    prompt: str,
+) -> None:
+    result = AgentTaskInterpreter.interpret(_messages(prompt))
+
+    assert result.intent is AgentTaskIntent.DATA_LOAD
+
+
+def test_list_them_retains_the_current_load_catalog_context() -> None:
+    result = AgentTaskInterpreter.interpret(
+        _messages("Load Product Price", "List them")
+    )
+
+    assert result.intent is AgentTaskIntent.DATA_LOAD
+    assert result.objective == "Load Product Price"
+
+
+def test_cube_refresh_request_retains_intent_across_short_cube_and_confirmation() -> None:
+    initial = AgentTaskInterpreter.interpret(
+        _messages("Refresh the planning cube")
+    )
+    cube_reply = AgentTaskInterpreter.interpret(
+        _messages("Refresh the planning cube", "plan1")
+    )
+    confirmed = AgentTaskInterpreter.interpret(
+        _messages("Refresh the planning cube", "plan1", "yes")
+    )
+
+    assert all(
+        item.intent is AgentTaskIntent.RUN_CUBE_REFRESH
+        for item in (initial, cube_reply, confirmed)
+    )
+    assert confirmed.objective == "Refresh the planning cube"
+
+
+def test_new_planning_year_change_does_not_inherit_old_metadata_task() -> None:
+    result = AgentTaskInterpreter.interpret(
+        _messages("Load new product dimensions", "Change the planning year to FY28")
+    )
+
+    assert result.intent is AgentTaskIntent.UNKNOWN
+
+
 def test_month_close_retains_period_and_collects_activity_reply() -> None:
     result = AgentTaskInterpreter.interpret(
         _messages(
@@ -127,6 +206,34 @@ def test_business_friendly_metadata_request_retains_intent_after_confirmation() 
     assert ready.parameters["dimension"] == "Product"
     assert ready.parameters["file_preference"] == "latest"
     assert ready.phase is AgentTaskPhase.READY_FOR_PLAN
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    (
+        "Load new Department",
+        "Load the new Cost Center dimension",
+        "Import new Sales Channel hierarchy",
+    ),
+)
+def test_customer_specific_new_dimensions_route_to_metadata(prompt: str) -> None:
+    result = AgentTaskInterpreter.interpret(_messages(prompt))
+
+    assert result.intent is AgentTaskIntent.METADATA_LOAD
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    (
+        "Load new sales data",
+        "Import new forecast values",
+        "Load new transaction records",
+    ),
+)
+def test_explicit_new_payloads_remain_data_loads(prompt: str) -> None:
+    result = AgentTaskInterpreter.interpret(_messages(prompt))
+
+    assert result.intent is AgentTaskIntent.DATA_LOAD
 
 
 @pytest.mark.parametrize(
@@ -799,3 +906,39 @@ def test_task_context_is_added_to_provider_instruction_without_credentials() -> 
     assert "VARIANCE_REPORTING" in instruction
     assert '"period":"Sep"' in instruction
     assert "password" not in instruction.casefold()
+
+
+def test_canonical_execution_routes_to_existing_governed_operation() -> None:
+    call = AgentGraphOrchestrator._deterministic_canonical_operation_call(
+        {
+            "task_context": {
+                "canonical_capability": "business_rule.run",
+                "action_mode": "execute",
+                "execution_requested": True,
+                "negated": False,
+                "objective": "FY27 ke liye Actual to Forecast rule chalao",
+            },
+            "allowed_tool_names": ["prepare_operation_action"],
+        }
+    )
+
+    assert call is not None
+    assert call.name == "prepare_operation_action"
+    assert call.arguments["operation_code"] == "business-rules"
+
+
+def test_canonical_negation_cannot_prepare_an_operation() -> None:
+    call = AgentGraphOrchestrator._deterministic_canonical_operation_call(
+        {
+            "task_context": {
+                "canonical_capability": "business_rule.run",
+                "action_mode": "explain",
+                "execution_requested": False,
+                "negated": True,
+                "objective": "Do not run Aggregate Plan.",
+            },
+            "allowed_tool_names": ["prepare_operation_action"],
+        }
+    )
+
+    assert call is None

@@ -51,7 +51,7 @@ from app.models.automation_schedule import (
     AutomationScheduleInput,
     AutomationTargetType,
 )
-from app.models.oracle_artifact import OracleEnvironment
+from app.models.oracle_artifact import OracleArtifactType, OracleEnvironment
 from app.services.business_rule_rtp_registry import BusinessRuleRTPRegistryService
 from app.services.data_integration_service import DataIntegrationService
 from app.services.data_map_service import DataMapService
@@ -1634,6 +1634,34 @@ class AgentCapabilityGateway:
         }
         job_type = job_types.get(normalized)
         if job_type is not None:
+            artifact_types = {
+                "RULES": OracleArtifactType.BUSINESS_RULE,
+                "PLAN_TYPE_MAP": OracleArtifactType.DATA_MAP,
+                "IMPORT_METADATA": OracleArtifactType.METADATA_IMPORT_JOB,
+                "IMPORT_DATA": OracleArtifactType.DATA_IMPORT_JOB,
+                "CUBE_REFRESH": OracleArtifactType.CUBE_REFRESH_JOB,
+            }
+            registered = getattr(
+                self._operation_catalog,
+                "registered_artifacts",
+                None,
+            )
+            if callable(registered):
+                registered_items = registered(artifact_types[job_type])
+                cached = (
+                    tuple(
+                        item
+                        for item in registered_items
+                        if item.is_verified
+                    )
+                    if isinstance(registered_items, (list, tuple))
+                    else ()
+                )
+                if cached:
+                    return tuple(
+                        (item.oracle_identifier, item.display_name)
+                        for item in cached
+                    )
             return tuple(
                 (name, name)
                 for name in self._operation_catalog.discover_job_names(
@@ -1651,7 +1679,18 @@ class AgentCapabilityGateway:
             )
         if normalized == "data-integrations":
             return tuple(
-                (item.name, item.name)
+                (
+                    item.name,
+                    str(
+                        getattr(item, "display_label", None)
+                        or (
+                            f"{item.name} - {item.description}"
+                            if getattr(item, "description", None)
+                            else None
+                        )
+                        or item.name
+                    ).strip(),
+                )
                 for item in catalog.data_integrations
             )
         return ()
@@ -2507,6 +2546,16 @@ class AgentCapabilityGateway:
             normalized = SubstitutionVariableApplicationService.normalize_input(
                 operation_input
             )
+            self._substitution_variables.validate_value_compatibility(
+                variable_name=normalized.name,
+                current_value=(
+                    None
+                    if normalized.action is SubstitutionVariableAction.CREATE
+                    else normalized.expected_current_value
+                ),
+                proposed_value=normalized.value,
+                scope=normalized.scope,
+            )
         except EPMError as exc:
             raise AgentCapabilityError(str(exc)) from exc
         return {
@@ -2574,6 +2623,11 @@ class AgentCapabilityGateway:
                 definition.name,
                 definition.dimension,
                 new_member,
+            )
+            self._user_variables.validate_value_compatibility(
+                variable_name=definition.name,
+                dimension=definition.dimension,
+                member=new_member,
             )
         except EPMError as exc:
             raise AgentCapabilityError(str(exc)) from exc

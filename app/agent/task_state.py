@@ -28,6 +28,7 @@ class AgentTaskIntent(StrEnum):
     RUN_BUSINESS_RULE = "RUN_BUSINESS_RULE"
     RUN_DATA_INTEGRATION = "RUN_DATA_INTEGRATION"
     RUN_PIPELINE = "RUN_PIPELINE"
+    RUN_CUBE_REFRESH = "RUN_CUBE_REFRESH"
     JOB_STATUS = "JOB_STATUS"
     CANCEL_OPERATION = "CANCEL_OPERATION"
     HELP_EXPLAIN = "HELP_EXPLAIN"
@@ -211,6 +212,9 @@ class AgentTaskInterpreter:
                 r"\bmetadata\s+(?:load|import|update)\b|"
                 r"\b(?:load|import|update)\s+(?:the\s+)?"
                 r"(?:account|entity|product)\s+metadata\b|"
+                r"\b(?:load|import|update)\s+(?:(?:the|new)\s+){0,2}"
+                r"[a-z][a-z0-9 _-]{0,80}\s+"
+                r"(?:dimensions?|hierarch(?:y|ies)|members?)\b|"
                 r"\b(?:load|import|update|add)\s+(?:(?:the|new)\s+){0,2}"
                 r"(?:account|entity|product|employee|job|project|scenario|"
                 r"version|period|year|currency)\s+"
@@ -222,7 +226,18 @@ class AgentTaskInterpreter:
                 r"\b(?:add|create)\b.{1,100}\bas\s+(?:a\s+|an\s+)?"
                 r"new\s+(?:product|account|entity|member)\b|"
                 r"\b(?:add|create)\s+(?:a\s+)?new\s+"
-                r"(?:product|account|entity|member)\b",
+                r"(?:product|account|entity|member)\b|"
+                # In Planning language, "load new <subject>" normally means
+                # introducing new dimension members. Explicit payload words
+                # (data, values, files, records, transactions) and scenario
+                # datasets remain DATA_LOAD. This supports customer-specific
+                # dimension names without maintaining a hard-coded catalog.
+                r"^\s*(?:(?:please|kindly)\s+|(?:can|could|would)\s+you\s+|"
+                r"i\s+(?:want|need)\s+to\s+)*"
+                r"(?:load|import|update)\s+(?:the\s+)?new\s+"
+                r"(?!(?:actuals?|forecast|budget)\b)"
+                r"(?!.*\b(?:data|values?|files?|records?|transactions?)\b)"
+                r".{1,100}$",
                 re.IGNORECASE,
             ),
         ),
@@ -237,6 +252,16 @@ class AgentTaskInterpreter:
             AgentTaskIntent.RUN_PIPELINE,
             re.compile(
                 r"\b(?:run|execute|start)\b.{0,100}\bpipeline\b",
+                re.IGNORECASE,
+            ),
+        ),
+        (
+            AgentTaskIntent.RUN_CUBE_REFRESH,
+            re.compile(
+                r"^\s*(?:(?:please|can you|could you)\s+)?"
+                r"(?:(?:refresh|run|execute|start|prepare)\b.{0,100}"
+                r"\b(?:cube|database)\b|"
+                r"(?:cube|database)\s+refresh\b)",
                 re.IGNORECASE,
             ),
         ),
@@ -264,7 +289,17 @@ class AgentTaskInterpreter:
                 r"\b(?:load|import)\b.{0,60}\b"
                 r"(?:actuals?|planning\s+data|data(?:\s+file)?)\b|"
                 r"\bpush\b.{0,60}\b(?:actuals?|data\s+file)\b|"
-                r"\bdata\s+(?:load|import)\b",
+                r"\bdata\s+(?:load|import)\b|"
+                # Business users normally name the measure or subject, not
+                # the technical payload type (for example, "Load Product
+                # Price"). Metadata-shaped requests are evaluated by the
+                # earlier METADATA_LOAD pattern, so the remaining Load/Import
+                # action is canonically a data-load request. This is a grammar
+                # rule rather than a list of customer-specific phrases.
+                r"^\s*(?:(?:please|kindly)\s+|(?:can|could|would)\s+you\s+|"
+                r"i\s+(?:want|need)\s+to\s+)*"
+                r"(?:load|import)\s+(?:the\s+)?(?=\S)(?!jobs?\b|"
+                r"integrations?\b|pipelines?\b).{1,160}$",
                 re.IGNORECASE,
             ),
         ),
@@ -276,8 +311,9 @@ class AgentTaskInterpreter:
         messages: Sequence[AgentMessage],
         *,
         today: date | None = None,
+        prior_context: dict[str, Any] | None = None,
     ) -> AgentTaskUnderstanding:
-        """Interpret all user turns so short answers retain task context."""
+        """Interpret the current turn, retaining a checkpointed open task."""
         user_turns = [
             message.content.strip()
             for message in messages
@@ -294,6 +330,44 @@ class AgentTaskInterpreter:
                 confidence=AgentTaskConfidence.HIGH_CONFIDENCE,
                 objective=latest,
             )
+
+        prior = prior_context if isinstance(prior_context, dict) else {}
+        prior_phase = str(prior.get("phase") or "")
+        try:
+            prior_intent = AgentTaskIntent(str(prior.get("intent") or "UNKNOWN"))
+        except ValueError:
+            prior_intent = AgentTaskIntent.UNKNOWN
+        direct_intent = cls._direct_intent(latest)
+        if (
+            prior_phase == AgentTaskPhase.COLLECTING_INFORMATION.value
+            and prior_intent not in {
+                AgentTaskIntent.UNKNOWN,
+                AgentTaskIntent.HELP_EXPLAIN,
+            }
+            and direct_intent is AgentTaskIntent.UNKNOWN
+            and (
+                cls._is_context_reply(latest.casefold())
+                or cls._is_open_slot_reply(latest.casefold())
+                or cls._contains_activity_description(latest.casefold())
+                or bool(re.fullmatch(r"\s*\d+(?:\.\d+)?\s*%?\s*", latest))
+            )
+        ):
+            # The chat history may have been truncated, but the previous
+            # question and collected slots live in the durable checkpoint.
+            # Parse the answer with its original objective, then merge only
+            # newly extracted values over the authoritative prior slots.
+            objective = str(prior.get("objective") or "").strip()
+            extracted = cls._extract_parameters(
+                (objective, latest), prior_intent, today=today
+            )
+            previous_parameters = prior.get("parameters")
+            parameters = (
+                dict(previous_parameters)
+                if isinstance(previous_parameters, dict)
+                else {}
+            )
+            parameters.update(extracted)
+            return cls._understanding(prior_intent, parameters, objective)
 
         intent = cls._latest_intent(user_turns)
         if intent is AgentTaskIntent.UNKNOWN and cls._HELP_PATTERN.search(latest):
@@ -344,6 +418,17 @@ class AgentTaskInterpreter:
     @classmethod
     def _latest_intent(cls, turns: Sequence[str]) -> AgentTaskIntent:
         latest = " ".join(turns[-1].casefold().split())
+        if re.match(
+            r"^(?:(?:please|can you|could you)\s+)?"
+            r"(?:change|set|update|assign)\s+(?:the\s+)?"
+            r"(?:(?:planning|application|global|fiscal|current|my)\s+)?"
+            r"(?:year|period|month)\b",
+            latest,
+        ):
+            # A year/period setting is a new variable task, not a short
+            # continuation of a previous metadata or Month Close interview.
+            # The graph resolves the live variable and its scope separately.
+            return AgentTaskIntent.UNKNOWN
         if re.search(r"\bmetadata\s+(?:import\s+)?job\b", latest):
             # An exact saved Planning job is already handled by the existing
             # governed metadata operation and must not be converted into a
@@ -366,7 +451,10 @@ class AgentTaskInterpreter:
         if len(turns) > 1 and any(
             cls._matches_intent(text, AgentTaskIntent.DATA_LOAD)
             for text in turns[:-1]
-        ) and cls._is_data_load_method_reply(latest):
+        ) and (
+            cls._is_data_load_method_reply(latest)
+            or cls._is_artifact_listing_reply(latest)
+        ):
             # This short answer completes the existing business task; it must
             # not discard the scenario, period, and file already collected.
             return AgentTaskIntent.DATA_LOAD
@@ -390,6 +478,30 @@ class AgentTaskInterpreter:
             for text in turns[:-1]
         ) and cls._is_variance_view_reply(latest):
             return AgentTaskIntent.VARIANCE_REPORTING
+        if len(turns) > 1 and cls._is_artifact_listing_reply(latest):
+            # "List them" refers to the catalog required by the most recent
+            # structured operation. It is not a request for the platform-wide
+            # capability list. Stop at the first prior task boundary so an old
+            # operation cannot leak into a new conversation topic.
+            for prior_text in reversed(turns[:-1]):
+                prior_intent = cls._direct_intent(prior_text)
+                if prior_intent is not AgentTaskIntent.UNKNOWN:
+                    return prior_intent
+                if cls._NEW_TASK_START.search(prior_text):
+                    break
+        if len(turns) > 1 and (
+            cls._is_confirmation_reply(latest)
+            or bool(re.fullmatch(r"[a-z][a-z0-9_.-]{0,79}", latest))
+        ):
+            for prior in reversed(turns[:-1]):
+                prior_intent = cls._direct_intent(prior)
+                if prior_intent is AgentTaskIntent.RUN_CUBE_REFRESH:
+                    return prior_intent
+                if (
+                    prior_intent is not AgentTaskIntent.UNKNOWN
+                    or cls._NEW_TASK_START.search(prior)
+                ):
+                    break
         direct = cls._direct_intent(turns[-1])
         if direct is not AgentTaskIntent.UNKNOWN:
             return direct
@@ -522,6 +634,26 @@ class AgentTaskInterpreter:
                 normalized,
             )
             or re.search(r"\bplanning\s+import\b", normalized)
+        )
+
+    @staticmethod
+    def _is_artifact_listing_reply(normalized: str) -> bool:
+        """Recognize a request to show choices for the current operation.
+
+        This dialogue act is operation-neutral: the preceding structured task
+        determines whether "them" means load jobs, rules, maps, or another
+        artifact catalog. It must never select or execute an artifact.
+        """
+        return bool(
+            re.fullmatch(
+                r"\s*(?:(?:please\s+)?(?:show|list)(?:\s+me)?\s+"
+                r"(?:the\s+)?(?:available\s+|matching\s+|relevant\s+|"
+                r"other\s+)?(?:ones?|them|options?|artifacts?|jobs?|"
+                r"integrations?)|what(?:'s|\s+is|\s+are)\s+available)"
+                r"[.!?]?\s*",
+                normalized,
+                re.IGNORECASE,
+            )
         )
 
     @staticmethod

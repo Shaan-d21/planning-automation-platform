@@ -22,17 +22,26 @@ from app.agent.capabilities import (
 from app.agent.gemini_provider import GeminiAgentProvider
 from app.agent.groq_provider import GroqAgentProvider
 from app.agent.checkpoints import AgentCheckpointStore
+from app.agent.context import AgentContextResolver
+from app.agent.canonical import recognize_explicit_capability
 from app.agent.graph import AgentGraphOrchestrator
 from app.agent.intent import AgentIntentRouter
-from app.agent.task_state import AgentTaskInterpreter
+from app.agent.semantic_interpreter import (
+    AgentSemanticInterpreter,
+    semantic_task_understanding,
+)
+from app.agent.task_state import AgentTaskIntent, AgentTaskInterpreter
 from app.agent.models import (
     AgentActionDecision,
     AgentApprovalRequest,
     AgentClarificationRequest,
+    AgentInputRequest,
     AgentMessageRole,
     AgentProviderResult,
     AgentToolActivity,
+    AgentToolCall,
 )
+from app.agent.observability import log_agent_decision
 from app.agent.preflight import AgentActionPreflightService
 from app.agent.provider import AgentProvider
 from app.agent.repository import SQLAgentRepository
@@ -154,6 +163,16 @@ Safety rules:
 - Understand business phrases such as Month Close, metadata load, actual data
   load, forecast seeding, and variance reporting. Do not invent the Oracle
   artifact that implements a business task; discover and validate it first.
+- A request to change the application Planning year or current period is a
+  variable-setting request, not a Year/Period Metadata Import. Resolve the
+  exact live substitution variable and scope; if the user means a personal
+  user variable instead, clarify that choice before preparing an action.
+- For a named business process, inspect registered Oracle Pipelines before
+  asking the user to design steps. A Pipeline name is not proof of its stages;
+  use its governed preflight. Do not revive the retired process builder.
+- Cube Refresh runs a saved application-wide Cube Refresh job. A plan-type
+  name such as Plan1 is not itself a refresh job, and refresh does not execute
+  every Business Rule. Discover the current saved refresh job before review.
 - Forecast seeding means initializing Forecast values from an approved source
   such as Actual or Plan, but the exact logic belongs to the customer's rule.
   For a seeding request, inspect current Business Rules, including names such
@@ -720,14 +739,67 @@ class AgentApplicationService:
             raise AgentConfigurationError(
                 "Agent messages cannot exceed 4,000 characters."
             )
-        if (
-            self.get_pending_approval(conversation_id, user) is not None
-            or self.get_pending_clarification(conversation_id, user) is not None
-            or self.get_pending_input(conversation_id, user) is not None
-        ):
+        self._logger.info(
+            "Agent turn started: conversation_id='%s', user_id=%s, "
+            "application='%s', message_chars=%d.",
+            conversation_id,
+            user.user_id,
+            self._settings.application_name,
+            len(prompt),
+        )
+        pending_approval = self.get_pending_approval(conversation_id, user)
+        pending_clarification = self.get_pending_clarification(
+            conversation_id, user
+        )
+        pending_input = self.get_pending_input(conversation_id, user)
+        switch = re.fullmatch(
+            r"\s*(?:actually\s+)?cancel\s+(?:this|the\s+current)"
+            r"(?:\s+(?:task|request|proposal))?\s+and\s+(.+?)\s*",
+            prompt,
+            re.IGNORECASE,
+        )
+        if switch and (pending_approval or pending_clarification or pending_input):
+            next_request = switch.group(1).strip()
+            if pending_approval is not None:
+                self.resolve_approval(
+                    conversation_id=conversation_id,
+                    user=user,
+                    request_id=pending_approval.request_id,
+                    decision="reject",
+                )
+            elif pending_clarification is not None:
+                self.resolve_clarification(
+                    conversation_id=conversation_id,
+                    user=user,
+                    request_id=pending_clarification.request_id,
+                    value=None,
+                )
+            else:
+                self.resolve_input(
+                    conversation_id=conversation_id,
+                    user=user,
+                    request_id=pending_input.request_id,
+                    values=None,
+                )
+            return self.send_message(
+                conversation_id=conversation_id,
+                user=user,
+                content=next_request,
+            )
+        if pending_clarification is not None or pending_input is not None:
+            continuation = self._continue_pending_chat_reply(
+                conversation_id=conversation_id,
+                user=user,
+                prompt=prompt,
+                clarification=pending_clarification,
+                input_request=pending_input,
+            )
+            if continuation is not None:
+                return continuation
+        if pending_approval or pending_clarification or pending_input:
             raise AgentConversationError(
-                "Complete or cancel the pending agent request before sending "
-                "another message."
+                "Complete or cancel the pending review card before sending "
+                "another message. Chat cannot approve an Oracle operation."
             )
         self._repository.add_message(
             conversation_id=conversation_id,
@@ -750,8 +822,91 @@ class AgentApplicationService:
             conversation_id,
             user,
         )
-        task_understanding = AgentTaskInterpreter.interpret(messages)
-        task_context = task_understanding.to_payload()
+        prior_task_context = (
+            self._graph.current_task_context(
+                conversation_id=conversation_id,
+                user_id=user.user_id,
+            )
+            if self._graph is not None
+            and callable(getattr(self._graph, "current_task_context", None))
+            else None
+        )
+        task_understanding = AgentTaskInterpreter.interpret(
+            messages,
+            prior_context=prior_task_context,
+        )
+        semantic_interpretation = None
+        explicit_canonical_interpretation = None
+        active_prior_context = (
+            isinstance(prior_task_context, dict)
+            and str(prior_task_context.get("intent") or "").upper()
+            not in {"", "UNKNOWN"}
+            and str(prior_task_context.get("phase") or "").upper()
+            not in {"COMPLETED", "FAILED", "CANCELLED"}
+        )
+        retain_active_context = (
+            task_understanding.intent is AgentTaskIntent.UNKNOWN
+            and active_prior_context
+        )
+        if (
+            task_understanding.intent is AgentTaskIntent.UNKNOWN
+            and not retain_active_context
+        ):
+            explicit_canonical_interpretation = recognize_explicit_capability(
+                prompt
+            )
+            semantic_interpretation = explicit_canonical_interpretation
+            if semantic_interpretation is None:
+                semantic_interpretation = AgentSemanticInterpreter.interpret(
+                    provider=self._provider_factory(),
+                    messages=messages,
+                    prior_context=prior_task_context,
+                    logger=self._logger,
+                )
+            if (
+                semantic_interpretation is not None
+                and explicit_canonical_interpretation is None
+            ):
+                task_understanding = semantic_task_understanding(
+                    semantic_interpretation,
+                    fallback_objective=prompt,
+                )
+        if retain_active_context:
+            # The active checkpoint is authoritative while waiting for an
+            # answer. An unclear reply must not create a new task or trigger a
+            # second provider call; the graph will repeat the focused prompt.
+            task_context = dict(prior_task_context)
+        else:
+            canonical_context = AgentContextResolver.resolve(
+                task_understanding.to_payload(),
+                prior_context=prior_task_context,
+                canonical_override=(
+                    semantic_interpretation.capability
+                    if semantic_interpretation is not None else None
+                ),
+                action_override=(
+                    semantic_interpretation.action_mode
+                    if semantic_interpretation is not None else None
+                ),
+            )
+            task_context = canonical_context.model_dump(mode="json")
+        if semantic_interpretation is not None:
+            task_context["execution_requested"] = (
+                semantic_interpretation.execution_requested
+            )
+            task_context["negated"] = semantic_interpretation.negated
+            task_context["referenced_entity"] = (
+                semantic_interpretation.referenced_entity
+            )
+            if semantic_interpretation.entity_name:
+                task_context["resolved_entity"] = {
+                    "entity_type": semantic_interpretation.entity_type,
+                    "candidate_name": semantic_interpretation.entity_name,
+                    "canonical_name": None,
+                    "status": "unresolved",
+                    "candidates": [],
+                    "catalog_source": None,
+                }
         if task_understanding.intent.value == "CANCEL_OPERATION":
             stopped = self._stop_latest_active_flow(
                 conversation_id=conversation_id,
@@ -764,19 +919,45 @@ class AgentApplicationService:
                 raise AgentConfigurationError(
                     "LangGraph orchestration is not configured."
                 )
+            authorized_executions = self._authorized_execution_ids(
+                conversation_id, user.user_id
+            )
             intent = AgentIntentRouter.route(
                 prompt,
                 self._allowed_tool_names(user),
                 has_data_review_context=data_review_context is not None,
+                has_execution_context=bool(authorized_executions),
                 task_intent=task_understanding.intent.value,
+                canonical_capability=str(
+                    task_context.get("canonical_capability") or "unknown"
+                ),
+                action_mode=str(task_context.get("action_mode") or "unknown"),
             )
             self._logger.info(
-                "Agent intent classified: user='%s', intent='%s', "
-                "task_intent='%s', task_phase='%s'.",
-                user.username,
+                "Agent intent classified: conversation_id='%s', user_id=%s, "
+                "intent='%s', task_intent='%s', canonical_capability='%s', "
+                "task_id='%s', task_phase='%s', task_confidence='%s', "
+                "missing_parameters=%s.",
+                conversation_id,
+                user.user_id,
                 intent.intent.value,
                 task_understanding.intent.value,
-                task_understanding.phase.value,
+                str(task_context.get("canonical_capability") or "unknown"),
+                str(task_context.get("task_id") or "legacy-checkpoint"),
+                str(task_context.get("phase") or task_understanding.phase.value),
+                str(
+                    task_context.get("confidence")
+                    or task_understanding.confidence.value
+                ),
+                list(task_context.get("missing_parameters") or ()),
+            )
+            log_agent_decision(
+                self._logger,
+                conversation_id=conversation_id,
+                user_id=user.user_id,
+                task_context=task_context,
+                routed_intent=intent.intent.value,
+                allowed_tools=intent.tool_names,
             )
             result = self._graph.invoke(
                 conversation_id=conversation_id,
@@ -785,6 +966,7 @@ class AgentApplicationService:
                 allowed_tool_names=intent.tool_names,
                 data_review_context=data_review_context,
                 task_context=task_context,
+                authorized_execution_ids=authorized_executions,
             )
         else:
             provider = self._provider_factory()
@@ -800,7 +982,10 @@ class AgentApplicationService:
                     if item.name in allowed
                 ),
                 execute_tool=lambda call: self._execute_user_tool(
-                    call, allowed
+                    call,
+                    allowed,
+                    conversation_id=conversation_id,
+                    user_id=user.user_id,
                 ),
             )
         return self._persist_agent_result(
@@ -808,6 +993,165 @@ class AgentApplicationService:
             user=user,
             result=result,
         )
+
+    def _continue_pending_chat_reply(
+        self,
+        *,
+        conversation_id: str,
+        user: UserAccount,
+        prompt: str,
+        clarification: AgentClarificationRequest | None,
+        input_request: AgentInputRequest | None,
+    ) -> dict[str, object] | None:
+        """Resume only unambiguous, non-approval interrupt answers from chat."""
+        normalized = prompt.strip().casefold()
+        cancel = normalized in {
+            "cancel", "cancel this", "cancel this task", "never mind", "nevermind"
+        }
+        if clarification is not None:
+            choice = next(
+                (
+                    option
+                    for option in clarification.options
+                    if option.casefold() == normalized
+                ),
+                None,
+            )
+            if not cancel and choice is None:
+                return None
+            self._repository.add_message(
+                conversation_id=conversation_id,
+                user_id=user.user_id,
+                role=AgentMessageRole.USER,
+                content=prompt,
+            )
+            return self.resolve_clarification(
+                conversation_id=conversation_id,
+                user=user,
+                request_id=clarification.request_id,
+                value=None if cancel else choice,
+            )
+        if input_request is None:
+            return None
+        if cancel:
+            values: dict[str, object] | None = None
+        elif input_request.operation_code == "business-rules":
+            definition = input_request.context.get("rtp_definition")
+            prompts = (
+                definition.get("prompts")
+                if isinstance(definition, dict)
+                else None
+            )
+            visible = [
+                item for item in prompts
+                if isinstance(item, dict) and not item.get("hidden")
+            ] if isinstance(prompts, list) else []
+            match = re.fullmatch(
+                r"\s*([+-]?\d+(?:\.\d+)?)\s*(?:%|percent)?\s*",
+                prompt,
+                re.IGNORECASE,
+            )
+            if len(visible) != 1 or match is None:
+                return None
+            name = str(visible[0].get("name") or "").strip()
+            if not name:
+                return None
+            values = {
+                "runtime_prompt_mode": "Provide runtime prompt values",
+                "runtime_prompts": {name: match.group(1)},
+            }
+        else:
+            values = self._single_pending_field_values(input_request, prompt)
+            if values is None:
+                return None
+        self._repository.add_message(
+            conversation_id=conversation_id,
+            user_id=user.user_id,
+            role=AgentMessageRole.USER,
+            content=prompt,
+        )
+        return self.resolve_input(
+            conversation_id=conversation_id,
+            user=user,
+            request_id=input_request.request_id,
+            values=values,
+        )
+
+    @staticmethod
+    def _single_pending_field_values(
+        input_request: AgentInputRequest,
+        prompt: str,
+    ) -> dict[str, object] | None:
+        """Fill one simple pending field; complex/file inputs remain on the card."""
+        context = (
+            input_request.context
+            if isinstance(input_request.context, dict)
+            else {}
+        )
+        prefill = context.get("prefill")
+        values: dict[str, object] = (
+            dict(prefill) if isinstance(prefill, dict) else {}
+        )
+        unsupported_kinds = {
+            "file_reference",
+            "pipeline_file",
+            "pipeline_review",
+            "pipeline_variable",
+            "schedule",
+        }
+        pending = []
+        for field in input_request.fields:
+            if not isinstance(field, dict) or not field.get("required"):
+                continue
+            key = str(field.get("key") or "").strip()
+            if not key or key in values:
+                continue
+            kind = str(field.get("kind") or "text").strip().casefold()
+            if kind in unsupported_kinds:
+                return None
+            pending.append(field)
+        if len(pending) != 1:
+            return None
+        field = pending[0]
+        key = str(field.get("key") or "").strip()
+        kind = str(field.get("kind") or "text").strip().casefold()
+        raw = str(prompt or "").strip()
+        if not raw or len(raw) > 500:
+            return None
+        if kind == "choice":
+            options = [str(item) for item in field.get("options", ())]
+            value = next(
+                (item for item in options if item.casefold() == raw.casefold()),
+                None,
+            )
+            if value is None:
+                return None
+        elif kind == "boolean":
+            normalized = raw.casefold()
+            if normalized in {"yes", "y", "true", "1"}:
+                value = True
+            elif normalized in {"no", "n", "false", "0"}:
+                value = False
+            else:
+                return None
+        elif kind in {"number", "integer"}:
+            if re.fullmatch(r"[+-]?\d+", raw) is None:
+                return None
+            value = int(raw)
+        elif kind == "key_value":
+            pairs: dict[str, str] = {}
+            for line in raw.splitlines():
+                name, separator, item_value = line.partition("=")
+                if not separator or not name.strip() or not item_value.strip():
+                    return None
+                pairs[name.strip()] = item_value.strip()
+            value = pairs
+        elif kind == "text":
+            value = raw
+        else:
+            return None
+        values[key] = value
+        return values
 
     def _latest_data_review_context(
         self,
@@ -1251,10 +1595,23 @@ class AgentApplicationService:
             and isinstance(activity.result.get("action_draft"), dict)
         )
         self._logger.info(
-            "Agent response completed: user='%s', provider='%s', tools=%d.",
-            user.username,
+            "Agent response completed: conversation_id='%s', user_id=%s, "
+            "provider='%s', tools=%d, interrupted='%s', execution_id='%s'.",
+            conversation_id,
+            user.user_id,
             self._settings.agent_provider,
             len(result.tool_activity),
+            (
+                "approval" if result.approval_request is not None
+                else "clarification" if clarification_request is not None
+                else "input" if result.input_request is not None
+                else "none"
+            ),
+            (
+                execution.get("execution_id")
+                if isinstance(execution, dict)
+                else ""
+            ),
         )
         return {
             "message": assistant,
@@ -2495,12 +2852,69 @@ class AgentApplicationService:
             },
         )
 
-    def _execute_user_tool(self, call, allowed: frozenset[str]):
+    def _authorized_execution_ids(
+        self, conversation_id: str, user_id: int
+    ) -> tuple[str, ...]:
+        return tuple(
+            decision.execution_id
+            for decision in reversed(
+                self._repository.list_action_decisions(conversation_id, user_id)
+            )
+            if decision.outcome_status == "SUBMITTED"
+            and decision.execution_id
+            and not decision.execution_id.startswith("schedule:")
+        )
+
+    def _execute_user_tool(
+        self,
+        call,
+        allowed: frozenset[str],
+        *,
+        conversation_id: str,
+        user_id: int,
+    ):
         if call.name not in allowed:
             raise AgentConversationError(
                 f"Agent capability '{call.name}' is not permitted for this user."
             )
+        if call.name in {"get_execution_evidence", "get_recent_execution_history"}:
+            if self._graph is None:
+                # The legacy provider has no checkpointed graph identity, but
+                # it must still honor the same conversation evidence boundary.
+                return self._conversation_execution_tool(
+                    call, conversation_id, user_id
+                )
         return self._gateway.execute(call)
+
+    def _conversation_execution_tool(self, call, conversation_id: str, user_id: int):
+        identifiers = self._authorized_execution_ids(conversation_id, user_id)
+        requested = str(call.arguments.get("execution_id") or "").strip()
+        if requested and requested not in identifiers:
+            raise AgentConversationError(
+                "This execution is not associated with this conversation."
+            )
+        selector = str(call.arguments.get("selector") or "").casefold()
+        matches = []
+        for identifier in ((requested,) if requested else identifiers[:20]):
+            result = self._gateway.execute(
+                AgentToolCall(
+                    name="get_execution_evidence",
+                    arguments={"execution_id": identifier},
+                )
+            )
+            execution = result.get("execution")
+            if isinstance(execution, dict):
+                matches.append(execution)
+        if call.name == "get_recent_execution_history":
+            return {"count": len(matches), "runs": matches}
+        for execution in matches:
+            if selector != "latest_failed" or str(
+                execution.get("status") or ""
+            ).upper() == "FAILED":
+                return {"execution": execution}
+        raise AgentConversationError(
+            "No matching execution was found in this conversation."
+        )
 
     @staticmethod
     def _require_agent_use(user: UserAccount) -> None:

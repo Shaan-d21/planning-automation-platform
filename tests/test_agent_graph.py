@@ -43,7 +43,12 @@ from app.models.workflow import (
     WorkflowStepStatus,
 )
 from app.models.user_variable import UserVariableDefinition, UserVariableValue
-from app.utils.exceptions import AgentProviderError
+from app.utils.exceptions import (
+    AgentCapabilityError,
+    AgentProviderError,
+    SubstitutionVariableError,
+    UserVariableError,
+)
 
 
 class _ControlCenter:
@@ -197,6 +202,9 @@ class _VarianceDataReview(_DataReview):
 
 
 class _SubstitutionVariables:
+    def validate_value_compatibility(self, **_kwargs):
+        return None
+
     def discover(self):
         return SubstitutionVariableCatalog(
             variables=(
@@ -212,6 +220,9 @@ class _SubstitutionVariables:
 
 
 class _DuplicateSubstitutionVariables:
+    def validate_value_compatibility(self, **_kwargs):
+        return None
+
     def discover(self):
         return SubstitutionVariableCatalog(
             variables=(
@@ -223,7 +234,24 @@ class _DuplicateSubstitutionVariables:
         )
 
 
+class _PeriodSubstitutionVariables:
+    def validate_value_compatibility(self, **_kwargs):
+        return None
+
+    def discover(self):
+        return SubstitutionVariableCatalog(
+            variables=(
+                SubstitutionVariable("CurMth", "Feb", "ALL"),
+            ),
+            plan_types=(),
+            scopes=("ALL",),
+        )
+
+
 class _EmptyScopeSubstitutionVariables:
+    def validate_value_compatibility(self, **_kwargs):
+        return None
+
     def discover(self):
         return SubstitutionVariableCatalog(
             variables=(),
@@ -233,6 +261,9 @@ class _EmptyScopeSubstitutionVariables:
 
 
 class _UserVariables:
+    def validate_value_compatibility(self, **_kwargs):
+        return None
+
     def discover(self, user_name: str):
         return UserVariableCatalog(
             user_name=user_name,
@@ -247,6 +278,49 @@ class _UserVariables:
                     member="Sales West",
                 ),
             ),
+        )
+
+
+class _RejectingSubstitutionVariables:
+    def discover(self):
+        return SubstitutionVariableCatalog(
+            variables=(
+                SubstitutionVariable("CurrentScenario", "Actual", "ALL"),
+            ),
+            plan_types=(),
+            scopes=("ALL",),
+        )
+
+    def validate_value_compatibility(self, **_kwargs):
+        raise SubstitutionVariableError(
+            "'FY28' is not an exact live member of dimension 'Scenario'. "
+            "No change was submitted."
+        )
+
+
+class _TypedScenarioSubstitutionVariables:
+    def discover(self):
+        return SubstitutionVariableCatalog(
+            variables=(
+                SubstitutionVariable("CurrentScenario", "Actual", "ALL"),
+            ),
+            plan_types=(),
+            scopes=("ALL",),
+        )
+
+    def validate_value_compatibility(self, **kwargs):
+        if kwargs.get("proposed_value") not in {"Actual", "Budget", "Forecast"}:
+            raise SubstitutionVariableError(
+                "Substitution variable 'CurrentScenario' expects a scenario "
+                "value, but 'FY28' looks like a year. No change was submitted."
+            )
+
+
+class _RejectingUserVariables(_UserVariables):
+    def validate_value_compatibility(self, **_kwargs):
+        raise UserVariableError(
+            "'FY28' is not an exact live member of dimension 'Entity'. "
+            "No change was submitted."
         )
 
 
@@ -517,6 +591,30 @@ class _PipelineOperationCatalog:
                     runs_in_parallel=False,
                 ),
             ),
+        )
+
+
+class _SalesProcessCatalog:
+    def discover_registered(self):
+        pipeline = type(
+            "Pipeline",
+            (),
+            {"code": "SALES_PIPELINE", "name": "Sales Process"},
+        )()
+        return type(
+            "Catalog",
+            (),
+            {"pipelines": (pipeline,), "data_integrations": ()},
+        )()
+
+    def preflight_pipeline(self, pipeline_code):
+        assert pipeline_code == "SALES_PIPELINE"
+        return PipelineOperationPreview(
+            code="SALES_PIPELINE",
+            display_name="Sales Process",
+            variables=(),
+            file_requirements=(),
+            stages=(),
         )
 
 
@@ -942,6 +1040,7 @@ def test_graph_inspects_latest_record_counts_without_model_tool_choice(
             _message("How many records were read, processed, and rejected?"),
         ),
         allowed_tool_names=("get_execution_evidence",),
+        authorized_execution_ids=("evidence-run-1",),
     )
 
     assert "**25 records read**" in result.text
@@ -965,6 +1064,96 @@ def test_graph_inspects_latest_failed_run_without_model_tool_choice(
         user_id=7,
         messages=(_message("Why did the latest job fail?"),),
         allowed_tool_names=("get_execution_evidence",),
+        authorized_execution_ids=("evidence-run-1",),
+    )
+
+    assert "Invalid Entity member" in result.text
+    assert result.tool_activity[0].arguments == {
+        "selector": "latest_failed"
+    }
+
+
+def test_status_followup_uses_only_conversation_owned_execution(
+    tmp_path: Path,
+) -> None:
+    graph = _orchestrator(
+        tmp_path,
+        _NeverCalledProvider(),
+        control_center=_ExecutionEvidenceControlCenter(),
+    )
+
+    result = graph.invoke(
+        conversation_id="owned-execution",
+        user_id=7,
+        messages=(_message("Is it done?"),),
+        allowed_tool_names=("get_execution_evidence",),
+        authorized_execution_ids=("evidence-run-1",),
+    )
+
+    assert "**Status:** FAILED" in result.text
+    assert "evidence-run-1" in result.text
+    assert result.tool_activity[0].arguments == {"selector": "latest"}
+
+
+def test_execution_id_from_another_conversation_is_not_disclosed(
+    tmp_path: Path,
+) -> None:
+    graph = _orchestrator(
+        tmp_path,
+        _NeverCalledProvider(),
+        control_center=_ExecutionEvidenceControlCenter(),
+    )
+
+    result = graph.invoke(
+        conversation_id="other-execution",
+        user_id=8,
+        messages=(_message("Show execution id evidence-run-1"),),
+        allowed_tool_names=("get_execution_evidence",),
+        authorized_execution_ids=(),
+    )
+
+    assert "not associated with this conversation" in result.text
+    assert "Invalid Entity member" not in result.text
+
+
+def test_retry_followup_does_not_resubmit_oracle_job(tmp_path: Path) -> None:
+    graph = _orchestrator(
+        tmp_path,
+        _NeverCalledProvider(),
+        control_center=_ExecutionEvidenceControlCenter(),
+    )
+
+    result = graph.invoke(
+        conversation_id="retry-execution",
+        user_id=7,
+        messages=(_message("try again"),),
+        allowed_tool_names=("get_execution_evidence",),
+        authorized_execution_ids=("evidence-run-1",),
+    )
+
+    assert "retry has **not** started" in result.text
+    assert "Invalid Entity member" in result.text
+    assert all(
+        activity.name == "get_execution_evidence"
+        for activity in result.tool_activity
+    )
+
+
+def test_short_why_followup_inspects_last_failed_conversation_run(
+    tmp_path: Path,
+) -> None:
+    graph = _orchestrator(
+        tmp_path,
+        _NeverCalledProvider(),
+        control_center=_ExecutionEvidenceControlCenter(),
+    )
+
+    result = graph.invoke(
+        conversation_id="short-why-execution",
+        user_id=7,
+        messages=(_message("why?"),),
+        allowed_tool_names=("get_execution_evidence",),
+        authorized_execution_ids=("evidence-run-1",),
     )
 
     assert "Invalid Entity member" in result.text
@@ -2444,6 +2633,193 @@ def test_graph_prepares_exact_live_cube_refresh_for_one_approval(
     assert "application" in result.approval_request.effect.casefold()
 
 
+def test_graph_refresh_planning_cube_uses_saved_application_job_not_cube(
+    tmp_path: Path,
+) -> None:
+    graph = _orchestrator(
+        tmp_path,
+        _NeverCalledProvider(),
+        operation_catalog=_CubeRefreshOperationCatalog(),
+    )
+
+    result = graph.invoke(
+        conversation_id="conversation-refresh-planning-cube",
+        user_id=7,
+        messages=(_message("Refresh the planning cube"),),
+    )
+
+    assert result.clarification_request is not None
+    assert result.clarification_request.operation_code == "cube-refresh"
+    assert result.clarification_request.options == (
+        "Refresh_Cube", "RefreshDatabase"
+    )
+    assert "application-wide" in result.clarification_request.prompt
+    assert "Plan1" not in result.clarification_request.options
+
+
+def test_cube_refresh_followup_yes_recovers_after_misleading_model_answer(
+    tmp_path: Path,
+) -> None:
+    graph = _orchestrator(
+        tmp_path,
+        _NeverCalledProvider(),
+        operation_catalog=_CubeRefreshOperationCatalog(),
+    )
+    messages = (
+        _message("Refresh the planning cube"),
+        AgentMessage(
+            message_id=2,
+            conversation_id="conversation-1",
+            role=AgentMessageRole.ASSISTANT,
+            content="Which cube would you like to refresh?",
+            created_at=datetime.now(UTC),
+        ),
+        _message("plan1"),
+        AgentMessage(
+            message_id=4,
+            conversation_id="conversation-1",
+            role=AgentMessageRole.ASSISTANT,
+            content="I prepared a reviewable refresh proposal for Plan1. Confirm?",
+            created_at=datetime.now(UTC),
+        ),
+        _message("yes"),
+    )
+
+    result = graph.invoke(
+        conversation_id="conversation-refresh-followup",
+        user_id=7,
+        messages=messages,
+    )
+
+    assert result.clarification_request is not None
+    assert result.clarification_request.operation_code == "cube-refresh"
+    assert set(result.clarification_request.options) == {
+        "Refresh_Cube", "RefreshDatabase"
+    }
+
+
+def test_named_sales_process_prepares_live_oracle_pipeline(
+    tmp_path: Path,
+) -> None:
+    graph = _orchestrator(
+        tmp_path,
+        _NeverCalledProvider(),
+        operation_catalog=_SalesProcessCatalog(),
+    )
+
+    result = graph.invoke(
+        conversation_id="conversation-sales-process",
+        user_id=7,
+        messages=(_message("Run the sales process"),),
+    )
+
+    assert result.clarification_request is None
+    assert result.input_request is not None
+    assert result.input_request.operation_code == "pipelines"
+    assert result.input_request.artifact_name == "SALES_PIPELINE"
+
+
+def test_planning_year_change_prefills_one_live_current_year_variable(
+    tmp_path: Path,
+) -> None:
+    graph = _orchestrator(
+        tmp_path,
+        _NeverCalledProvider(),
+        substitution_variables=_SubstitutionVariables(),
+    )
+
+    result = graph.invoke(
+        conversation_id="conversation-planning-year-change",
+        user_id=7,
+        messages=(_message("Change the planning year to FY28."),),
+    )
+
+    assert result.clarification_request is None
+    assert result.input_request is not None
+    assert result.input_request.operation_code == "substitution-variables"
+    assert result.input_request.artifact_name == "CurYr"
+    assert result.input_request.context["prefill"] == {"new_value": "FY28"}
+
+
+def test_current_period_change_prefills_live_current_month_variable(
+    tmp_path: Path,
+) -> None:
+    graph = _orchestrator(
+        tmp_path,
+        _NeverCalledProvider(),
+        substitution_variables=_PeriodSubstitutionVariables(),
+    )
+
+    result = graph.invoke(
+        conversation_id="conversation-current-period-change",
+        user_id=7,
+        messages=(_message("Set the current period to Mar"),),
+    )
+
+    assert result.input_request is not None
+    assert result.input_request.artifact_name == "CurMth"
+    assert result.input_request.context["prefill"] == {"new_value": "Mar"}
+
+
+def test_planning_year_change_does_not_guess_between_scoped_variables(
+    tmp_path: Path,
+) -> None:
+    graph = _orchestrator(
+        tmp_path,
+        _NeverCalledProvider(),
+        substitution_variables=_DuplicateSubstitutionVariables(),
+    )
+
+    result = graph.invoke(
+        conversation_id="conversation-year-scoped-choice",
+        user_id=7,
+        messages=(_message("Change the planning year to FY28"),),
+    )
+
+    assert result.clarification_request is not None
+    assert set(result.clarification_request.options) == {
+        "ALL.CurYr", "Plan1.CurYr"
+    }
+
+
+def test_generic_year_change_asks_variable_type_and_retains_value(
+    tmp_path: Path,
+) -> None:
+    graph = _orchestrator(
+        tmp_path,
+        _NeverCalledProvider(),
+        substitution_variables=_SubstitutionVariables(),
+    )
+    first = graph.invoke(
+        conversation_id="conversation-generic-year-change",
+        user_id=7,
+        messages=(_message("Change year to FY28"),),
+    )
+
+    assert "substitution variable" in first.text
+    assert "user variable" in first.text
+    assert first.input_request is None
+    second = graph.invoke(
+        conversation_id="conversation-generic-year-choice",
+        user_id=7,
+        messages=(
+            _message("Change year to FY28"),
+            _message("substitution variable"),
+        ),
+    )
+
+    assert second.clarification_request is not None
+    assert second.clarification_request.operation_code == "substitution-variables"
+    selected = graph.resume_clarification(
+        conversation_id="conversation-generic-year-choice",
+        user_id=7,
+        request_id=second.clarification_request.request_id,
+        value="CurYr",
+    )
+    assert selected.input_request is not None
+    assert selected.input_request.context["prefill"] == {"new_value": "FY28"}
+
+
 def test_graph_collects_live_substitution_variable_update_for_one_approval(
     tmp_path: Path,
 ) -> None:
@@ -2592,6 +2968,154 @@ def test_application_scope_remains_valid_when_plan_types_are_unavailable(
 
     assert normalized["scope"] == "ALL"
     assert normalized["variable_name"] == "FcstYr"
+
+
+def test_substitution_variable_review_rejects_cross_dimension_value(
+    tmp_path: Path,
+) -> None:
+    gateway = AgentCapabilityGateway(
+        _settings(tmp_path),
+        control_center=_ControlCenter(),
+        data_review=_DataReview(),
+        substitution_variables=_RejectingSubstitutionVariables(),
+    )
+
+    with pytest.raises(
+        AgentCapabilityError,
+        match="not an exact live member of dimension 'Scenario'",
+    ):
+        gateway.normalize_guided_inputs(
+            "substitution-variables",
+            "CurrentScenario",
+            {"new_value": "FY28"},
+        )
+
+
+def test_invalid_variable_input_returns_exact_safe_feedback(
+    tmp_path: Path,
+) -> None:
+    graph = _orchestrator(
+        tmp_path,
+        _StepProvider(
+            requested_tool="prepare_operation_action",
+            arguments={
+                "operation_code": "substitution-variables",
+                "objective": "Change the current scenario to FY28.",
+                "artifact_name": "CurrentScenario",
+            },
+        ),
+        substitution_variables=_RejectingSubstitutionVariables(),
+    )
+    paused = graph.invoke(
+        conversation_id="conversation-invalid-variable-type",
+        user_id=7,
+        messages=(
+            _message("Set the CurrentScenario substitution variable to FY28."),
+        ),
+    )
+
+    assert paused.input_request is not None
+    with pytest.raises(
+        AgentProviderError,
+        match="not an exact live member of dimension 'Scenario'",
+    ):
+        graph.resume_input(
+            conversation_id="conversation-invalid-variable-type",
+            user_id=7,
+            request_id=paused.input_request.request_id,
+            values={"new_value": "FY28"},
+        )
+    retry = graph.pending_input(
+        conversation_id="conversation-invalid-variable-type",
+        user_id=7,
+    )
+    assert retry is not None
+    assert retry.request_id == paused.input_request.request_id
+
+
+def test_invalid_variable_input_can_be_corrected_on_the_same_card(
+    tmp_path: Path,
+) -> None:
+    graph = _orchestrator(
+        tmp_path,
+        _StepProvider(
+            requested_tool="prepare_operation_action",
+            arguments={
+                "operation_code": "substitution-variables",
+                "objective": "Change the current scenario.",
+                "artifact_name": "CurrentScenario",
+            },
+        ),
+        substitution_variables=_TypedScenarioSubstitutionVariables(),
+    )
+    conversation_id = "conversation-correct-variable-type"
+    paused = graph.invoke(
+        conversation_id=conversation_id,
+        user_id=7,
+        messages=(_message("Change CurrentScenario."),),
+    )
+    assert paused.input_request is not None
+
+    with pytest.raises(AgentProviderError, match="expects a scenario"):
+        graph.resume_input(
+            conversation_id=conversation_id,
+            user_id=7,
+            request_id=paused.input_request.request_id,
+            values={"new_value": "FY28"},
+        )
+
+    corrected = graph.resume_input(
+        conversation_id=conversation_id,
+        user_id=7,
+        request_id=paused.input_request.request_id,
+        values={"new_value": "Budget"},
+    )
+
+    assert corrected.approval_request is not None
+    assert corrected.approval_request.input_values["new_value"] == "Budget"
+
+
+def test_invalid_variable_input_can_be_cancelled_on_the_same_card(
+    tmp_path: Path,
+) -> None:
+    graph = _orchestrator(
+        tmp_path,
+        _StepProvider(
+            requested_tool="prepare_operation_action",
+            arguments={
+                "operation_code": "substitution-variables",
+                "objective": "Change the current scenario.",
+                "artifact_name": "CurrentScenario",
+            },
+        ),
+        substitution_variables=_TypedScenarioSubstitutionVariables(),
+    )
+    conversation_id = "conversation-cancel-invalid-variable-type"
+    paused = graph.invoke(
+        conversation_id=conversation_id,
+        user_id=7,
+        messages=(_message("Change CurrentScenario."),),
+    )
+    assert paused.input_request is not None
+
+    with pytest.raises(AgentProviderError, match="expects a scenario"):
+        graph.resume_input(
+            conversation_id=conversation_id,
+            user_id=7,
+            request_id=paused.input_request.request_id,
+            values={"new_value": "FY28"},
+        )
+
+    cancelled = graph.resume_input(
+        conversation_id=conversation_id,
+        user_id=7,
+        request_id=paused.input_request.request_id,
+        values=None,
+    )
+
+    assert cancelled.input_request is None
+    assert cancelled.approval_request is None
+    assert cancelled.tool_activity[0].status == "CANCELLED"
 
 
 def test_graph_can_cancel_substitution_variable_input(
@@ -3325,6 +3849,28 @@ def test_graph_prefills_exact_user_variable_and_new_member_without_model(
     }
 
 
+def test_user_variable_review_rejects_member_from_wrong_dimension(
+    tmp_path: Path,
+) -> None:
+    gateway = AgentCapabilityGateway(
+        _settings(tmp_path),
+        control_center=_ControlCenter(),
+        data_review=_DataReview(),
+        substitution_variables=_SubstitutionVariables(),
+        user_variables=_RejectingUserVariables(),
+    )
+
+    with pytest.raises(
+        AgentCapabilityError,
+        match="not an exact live member of dimension 'Entity'",
+    ):
+        gateway.normalize_guided_inputs(
+            "user-variables",
+            "MyEntity",
+            {"user_name": "planner", "new_member": "FY28"},
+        )
+
+
 def test_graph_collects_explicit_substitution_variable_creation(
     tmp_path: Path,
 ) -> None:
@@ -3512,3 +4058,46 @@ def test_checkpoint_store_is_reused_across_compiled_graphs(tmp_path: Path) -> No
     assert store.get() is store.get()
     store.setup()
     store.close()
+
+
+def test_checkpointed_task_context_survives_graph_reconstruction_and_is_isolated(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    store = AgentCheckpointStore(settings.database_target)
+    gateway = AgentCapabilityGateway(
+        settings,
+        control_center=_ControlCenter(),
+        data_review=_DataReview(),
+    )
+
+    def new_graph() -> AgentGraphOrchestrator:
+        return AgentGraphOrchestrator(
+            provider_factory=_NeverCalledProvider,
+            gateway=gateway,
+            checkpointer=store,
+            system_instruction="Read only.",
+            max_tool_rounds=2,
+            environment_key="example|Vision",
+        )
+
+    task = AgentTaskInterpreter.interpret((_message("Start month close"),))
+    first = new_graph()
+    first.invoke(
+        conversation_id="checkpointed-task",
+        user_id=7,
+        messages=(_message("Start month close"),),
+        allowed_tool_names=(),
+        task_context=task.to_payload(),
+    )
+
+    reconstructed = new_graph()
+    assert reconstructed.current_task_context(
+        conversation_id="checkpointed-task", user_id=7
+    ) == task.to_payload()
+    assert reconstructed.current_task_context(
+        conversation_id="checkpointed-task", user_id=8
+    ) is None
+    assert reconstructed.current_task_context(
+        conversation_id="other-conversation", user_id=7
+    ) is None
