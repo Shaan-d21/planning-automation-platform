@@ -606,7 +606,6 @@ export function App() {
               data={operations}
               csrfToken={bootstrap.csrf_token}
               canManageCatalog={bootstrap.user?.permissions.includes("catalog.manage") ?? false}
-              currentUsername={bootstrap.user?.username ?? ""}
               canManageUsers={bootstrap.user?.permissions.includes("user.manage") ?? false}
             />
           : <WorkspaceLoading label="Operations" message="Preparing your available Oracle EPM services..." />

@@ -6,7 +6,6 @@ import { EnvironmentSetupDialog } from "./EnvironmentSetupDialog";
 
 const configuration: EnvironmentConfigurationResponse = {
   status: "success",
-  base_url: "https://example.oraclecloud.com",
   deployment_mode: "cloud",
   active_application: "Vision",
   selected_application: "Vision",
@@ -45,7 +44,10 @@ describe("EnvironmentSetupDialog", () => {
   it("shows live applications and explains a controlled restart", async () => {
     render(<EnvironmentSetupDialog csrfToken="csrf-token" onClose={vi.fn()} />);
 
-    fireEvent.click(await screen.findByRole("radio", { name: /Forecast/ }));
+    expect(await screen.findByText("Configured securely")).toBeTruthy();
+    expect(screen.queryByText("https://example.oraclecloud.com")).toBeNull();
+
+    fireEvent.click(screen.getByRole("radio", { name: /Forecast/ }));
     fireEvent.click(screen.getByRole("button", { name: "Save application" }));
 
     expect(await screen.findByText("Restart required before running operations")).toBeTruthy();

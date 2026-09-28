@@ -7,7 +7,6 @@ export interface ProductSummary {
 export interface EnvironmentSummary {
   application_name: string;
   deployment_mode: string;
-  base_url: string;
   configured: boolean;
   execution_account?: string;
 }
@@ -21,7 +20,6 @@ export interface EnvironmentApplication {
 
 export interface EnvironmentConfigurationResponse {
   status: string;
-  base_url: string;
   deployment_mode: string;
   active_application: string | null;
   selected_application: string | null;

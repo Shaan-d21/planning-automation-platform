@@ -46,7 +46,7 @@ export function AppShell({
       <aside className={`sidebar${mobileOpen ? " is-open" : ""}`}>
         <div className="sidebar-brand">
           <img src="/static/images/bisp-logo.png" alt="BISP Solutions" />
-          <div><strong>EPM Automation</strong><small>Planning workspace</small></div>
+          <div><strong>EPM AI Assistant</strong><small>Planning workspace</small></div>
           <button className="sidebar-close" onClick={() => setMobileOpen(false)} aria-label="Close navigation"><Icon name="close" /></button>
         </div>
         <nav aria-label="Primary navigation">

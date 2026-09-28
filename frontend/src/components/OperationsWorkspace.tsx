@@ -17,11 +17,10 @@ interface OperationsWorkspaceProps {
   data: OperationsResponse;
   csrfToken: string;
   canManageCatalog: boolean;
-  currentUsername: string;
   canManageUsers: boolean;
 }
 
-export function OperationsWorkspace({ data, csrfToken, canManageCatalog, currentUsername, canManageUsers }: OperationsWorkspaceProps) {
+export function OperationsWorkspace({ data, csrfToken, canManageCatalog, canManageUsers }: OperationsWorkspaceProps) {
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState("ALL");
   const [catalog, setCatalog] = useState<OracleCatalogResponse | null>(null);
@@ -111,7 +110,7 @@ export function OperationsWorkspace({ data, csrfToken, canManageCatalog, current
       return <SubstitutionVariableRunner operation={selectedOperation} csrfToken={csrfToken} planningTaskId={planningTaskId} onBack={closeRunner} />;
     }
     if (selectedOperation.code === "user-variables") {
-      return <UserVariableRunner operation={selectedOperation} csrfToken={csrfToken} currentUsername={currentUsername} canManageUsers={canManageUsers} planningTaskId={planningTaskId} onBack={closeRunner} />;
+      return <UserVariableRunner operation={selectedOperation} csrfToken={csrfToken} canManageUsers={canManageUsers} planningTaskId={planningTaskId} onBack={closeRunner} />;
     }
     return <OperationRunner operation={selectedOperation} csrfToken={csrfToken} canManageCatalog={canManageCatalog} planningTaskId={planningTaskId} agentDraftId={agentDraftId} onBack={closeRunner} />;
   }

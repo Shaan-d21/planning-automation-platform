@@ -157,7 +157,7 @@ class UserVariableApplicationService:
     def _discover_with_client(self, client: EPMClient, user_name: str) -> UserVariableCatalog:
         service = UserVariableService(client, logger=self._logger.getChild("service"))
         values = service.get_values(user_name)
-        definitions = service.get_definitions()
+        definitions = service.get_definitions(fallback_values=values)
         return UserVariableCatalog(
             user_name=user_name,
             definitions=definitions,

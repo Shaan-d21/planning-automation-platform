@@ -74,6 +74,9 @@ from app.application.standalone_flow_recovery import (
     StandaloneFlowRecoveryService,
 )
 from app.application.user_variables import UserVariableApplicationService
+from app.services.oracle_user_variable_identity import (
+    OracleUserVariableIdentityResolver,
+)
 from app.application.reports import ReportWorkspaceService
 from app.config.settings import PROJECT_ROOT, Settings
 from app.infrastructure.database.migration import assert_schema_current
@@ -287,7 +290,7 @@ def create_app(
             application.state.agent_service.shutdown()
 
     app = FastAPI(
-        title="BISP Solutions Oracle EPM Automation",
+        title="EPM AI Assistant",
         version=__version__,
         docs_url=None,
         redoc_url=None,
@@ -349,6 +352,10 @@ def create_app(
         resolved_settings,
         logger=LOGGER.getChild("user_variables"),
     )
+    app.state.user_variable_identity = OracleUserVariableIdentityResolver(
+        resolved_settings,
+        logger=LOGGER.getChild("user_variable_identity"),
+    )
     app.state.report_workspace = ReportWorkspaceService(
         resolved_settings,
         logger=LOGGER.getChild("report_workspace"),
@@ -383,6 +390,7 @@ def create_app(
         ),
         operation_manager=app.state.operation_manager,
         schedule_service=app.state.automation_schedule_service,
+        user_variable_identity=app.state.user_variable_identity,
         schedule_coordinator=app.state.automation_schedule_coordinator,
         logger=LOGGER.getChild("agent"),
     )
@@ -663,7 +671,7 @@ def create_app(
                 status_code=503,
                 content={
                     "status": "unavailable",
-                    "product": "Oracle EPM Automation Platform",
+                    "product": "EPM AI Assistant",
                     "application": health_settings.application_name,
                     "active_application": active_application,
                     "restart_required": restart_required,
@@ -672,7 +680,7 @@ def create_app(
             )
         return {
             "status": "ok",
-            "product": "Oracle EPM Automation Platform",
+            "product": "EPM AI Assistant",
             "application": result.application_name,
             "active_application": active_application,
             "restart_required": restart_required,
@@ -2270,8 +2278,9 @@ def create_app(
         require_api_session(request)
         user = _current_user(request)
         assert user is not None
-        target_user = str(user_name or user.username).strip()
-        _require_user_variable_target(user, target_user)
+        assigned_user = request.app.state.user_variable_identity.resolve(user)
+        target_user = str(user_name or assigned_user).strip()
+        _require_user_variable_target(user, target_user, assigned_user)
         try:
             catalog = await run_in_threadpool(
                 request.app.state.user_variables.discover,
@@ -3528,7 +3537,12 @@ def create_app(
         require_api_session(request)
         user = _current_user(request)
         assert user is not None
-        _require_user_variable_target(user, payload.user_name)
+        assigned_user = request.app.state.user_variable_identity.resolve(user)
+        _require_user_variable_target(
+            user,
+            payload.user_name,
+            assigned_user,
+        )
         try:
             task_link = (
                 _planning_task_link_callback(
@@ -4579,15 +4593,22 @@ def _request_actor(request: Request) -> ExecutionActor:
     )
 
 
-def _require_user_variable_target(user: UserAccount, target_user: str) -> None:
-    """Allow ordinary users to manage only their own Oracle assignment."""
-    if target_user.casefold() == user.username.casefold():
+def _require_user_variable_target(
+    user: UserAccount,
+    target_user: str,
+    assigned_oracle_user: str,
+) -> None:
+    """Allow ordinary users to manage only their resolved Oracle identity."""
+    if target_user.casefold() == assigned_oracle_user.casefold():
         return
     if user.has_permission(Permission.USER_MANAGE):
         return
     raise HTTPException(
         status_code=403,
-        detail="Your platform role can update only your own user variables.",
+        detail=(
+            "Your platform role can update only the Oracle user-variable "
+            "identity assigned to your session."
+        ),
     )
 
 

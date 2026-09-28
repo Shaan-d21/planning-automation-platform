@@ -6,7 +6,7 @@ import type { BootstrapResponse, HomeResponse } from "./api/types";
 import { AgentExecutionCard } from "./components/EpmAssistantWorkspace";
 
 const bootstrap: BootstrapResponse = {
-  product: { name: "BISP EPM Automation", company: "BISP Solutions", api_version: "v1" },
+  product: { name: "EPM AI Assistant", company: "BISP Solutions", api_version: "v1" },
   authenticated: true,
   requires_bootstrap: false,
   csrf_token: "test-csrf",
@@ -20,7 +20,6 @@ const bootstrap: BootstrapResponse = {
   environment: {
     application_name: "Vision",
     deployment_mode: "cloud",
-    base_url: "https://example.oraclecloud.com",
     configured: true
   },
   user: {
@@ -396,7 +395,6 @@ describe("App", () => {
         environment: {
           application_name: "Vision",
           deployment_mode: "cloud",
-          base_url: "https://example.oraclecloud.com",
           configured: true
         },
         summary: { verified: 2, attention: 0, last_synchronized_at: "2026-08-11T10:00:00Z" },

@@ -17,7 +17,6 @@ type RunnerStep = "SETUP" | "REVIEW" | "RUNNING" | "RESULT";
 interface UserVariableRunnerProps {
   operation: OperationSummary;
   csrfToken: string;
-  currentUsername: string;
   canManageUsers: boolean;
   planningTaskId?: number | null;
   onBack: () => void;
@@ -26,13 +25,12 @@ interface UserVariableRunnerProps {
 export function UserVariableRunner({
   operation,
   csrfToken,
-  currentUsername,
   canManageUsers,
   planningTaskId = null,
   onBack
 }: UserVariableRunnerProps) {
   const [step, setStep] = useState<RunnerStep>("SETUP");
-  const [targetUser, setTargetUser] = useState(currentUsername);
+  const [targetUser, setTargetUser] = useState("");
   const [definitions, setDefinitions] = useState<UserVariableDefinition[]>([]);
   const [values, setValues] = useState<UserVariableValue[]>([]);
   const [selectedName, setSelectedName] = useState("");
@@ -54,19 +52,19 @@ export function UserVariableRunner({
     [selectedName, values]
   );
 
-  useEffect(() => { void loadCatalog(currentUsername); }, [currentUsername]);
+  useEffect(() => { void loadCatalog(); }, []);
   useEffect(() => { if (execution?.terminal) setStep("RESULT"); }, [execution]);
 
-  async function loadCatalog(userName = targetUser) {
-    const normalized = userName.trim();
-    if (!normalized) {
+  async function loadCatalog(userName?: string) {
+    const normalized = userName?.trim() ?? "";
+    if (userName !== undefined && !normalized) {
       setError("Enter the Oracle user name before loading variables.");
       return;
     }
     setLoading(true);
     setError(null);
     try {
-      const response = await api.userVariableCatalog(normalized);
+      const response = await api.userVariableCatalog(normalized || undefined);
       setTargetUser(response.catalog.user_name);
       setDefinitions(response.catalog.definitions);
       setValues(response.catalog.values);
@@ -150,7 +148,7 @@ export function UserVariableRunner({
 
       <div className="runner-form-grid">
         <label className="runner-field"><span>Oracle user *</span><input aria-label="Oracle user" value={targetUser} disabled={!canManageUsers || loading} onChange={(event) => setTargetUser(event.target.value)} /><small>{canManageUsers ? "Administrators may enter another exact Oracle user name, then refresh." : "Your role can update only your own assignments."}</small></label>
-        {canManageUsers && <div className="runner-field"><span>&nbsp;</span><button type="button" className="button button--quiet" disabled={loading} onClick={() => void loadCatalog()}><Icon name="refresh" /> Load this user</button></div>}
+        {canManageUsers && <div className="runner-field"><span>&nbsp;</span><button type="button" className="button button--quiet" disabled={loading} onClick={() => void loadCatalog(targetUser)}><Icon name="refresh" /> Load this user</button></div>}
         <label className="runner-field"><span>User variable *</span><select aria-label="User variable" value={selectedName} disabled={loading} onChange={(event) => chooseDefinition(event.target.value)}><option value="">Select a live variable</option>{definitions.map((item) => <option value={item.name} key={`${item.name}:${item.dimension}`}>{item.name} · {item.dimension}</option>)}</select><small>The list comes from the connected Planning application.</small></label>
         <label className="runner-field"><span>New member *</span><input aria-label="New user variable member" value={member} disabled={!selectedDefinition} onChange={(event) => setMember(event.target.value)} placeholder={selectedDefinition ? `Exact ${selectedDefinition.dimension} member` : "Choose a variable first"} /><small>Current value: {currentValue?.member || "Not assigned"}</small></label>
       </div>

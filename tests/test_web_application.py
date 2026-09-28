@@ -49,6 +49,7 @@ from app.application.planning_process import PlanningProcessPreflight
 from app.application.substitution_variables import (
     SubstitutionVariableCatalog,
 )
+from app.application.user_variables import UserVariableCatalog
 from app.application.reports import (
     ReportCatalogItem,
     ReportPreflight,
@@ -63,6 +64,7 @@ from app.models.workflow import (
     WorkflowStepResult,
     WorkflowStepStatus,
 )
+from app.models.user_variable import UserVariableDefinition, UserVariableValue
 from app.services.workflow_repository import SQLWorkflowRepository
 from app.models.data_validation import (
     DataComparisonCell,
@@ -349,7 +351,8 @@ def test_environment_configuration_exposes_only_non_secret_selection(
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["base_url"] == "http://epm.internal/HyperionPlanning"
+    assert "base_url" not in payload
+    assert "epm.internal" not in response.text
     assert payload["active_application"] == "Vision"
     assert payload["selected_application"] == "Vision"
     assert payload["selection_source"] == "ENVIRONMENT"
@@ -486,7 +489,7 @@ def test_v1_bootstrap_supports_an_independent_unauthenticated_client(
     assert response.status_code == 200
     payload = response.json()
     assert payload["product"] == {
-        "name": "Oracle EPM Automation Platform",
+        "name": "EPM AI Assistant",
         "company": "BISP Solutions",
         "api_version": "v1",
     }
@@ -565,7 +568,6 @@ def test_v1_bootstrap_returns_effective_user_and_navigation(
     assert payload["environment"] == {
         "application_name": "Vision",
         "deployment_mode": "on_premises",
-        "base_url": "http://epm.internal/HyperionPlanning",
         "configured": True,
         "execution_account": "administrator",
     }
@@ -3156,6 +3158,37 @@ def test_substitution_variable_catalog_and_update_start(
         action_type="UPDATE_SUBSTITUTION_VARIABLE",
         actor=ANY,
     )
+
+
+def test_user_variable_catalog_defaults_to_oracle_service_identity(
+    tmp_path: Path,
+) -> None:
+    app = create_app(
+        _settings(tmp_path),
+        session_secret="test-secret",
+        connection_use_case_factory=lambda settings: _SuccessfulConnection(),
+    )
+    app.state.user_variables = Mock()
+    app.state.user_variables.discover.return_value = UserVariableCatalog(
+        user_name="administrator",
+        definitions=(UserVariableDefinition("MyEntity", "Entity"),),
+        values=(
+            UserVariableValue(
+                user_name="administrator",
+                name="MyEntity",
+                dimension="Entity",
+                member="Sales East",
+            ),
+        ),
+    )
+    client = TestClient(app)
+    _login(client)
+
+    response = client.get("/api/user-variables/catalog")
+
+    assert response.status_code == 200
+    assert response.json()["catalog"]["user_name"] == "administrator"
+    app.state.user_variables.discover.assert_called_once_with("administrator")
 
 
 def test_cube_refresh_catalog_and_start_use_targeted_discovery(
