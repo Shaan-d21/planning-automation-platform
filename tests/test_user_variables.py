@@ -31,6 +31,44 @@ def test_discovers_definitions_and_values_for_selected_user() -> None:
     assert catalog.user_name == "planner@example.com"
     assert [(item.name, item.dimension) for item in catalog.definitions] == [("MyEntity", "Entity")]
     assert [(item.user_name, item.member) for item in catalog.values] == [("planner@example.com", "Sales East")]
+    assert client.get.call_args_list[0].kwargs["params"] == {
+        "q": '{"userName":"planner@example.com"}',
+        "offset": 0,
+        "limit": -1,
+    }
+
+
+def test_user_lookup_falls_back_to_plan_type_resource() -> None:
+    client = _client()
+    client.get.side_effect = (
+        APIRequestError("Not Found", status_code=404),
+        {"items": [{"planTypeName": "Plan1", "cubeName": "Plan1"}]},
+        {
+            "items": [
+                {
+                    "userName": "planner@example.com",
+                    "name": "MyEntity",
+                    "dimension": "Entity",
+                    "member": "Sales East",
+                }
+            ]
+        },
+    )
+
+    values = UserVariableService(client).get_values("planner@example.com")
+
+    assert [(item.name, item.member) for item in values] == [
+        ("MyEntity", "Sales East")
+    ]
+    fallback = client.get.call_args_list[2]
+    assert fallback.args[0].endswith(
+        "/applications/Vision/plantypes/Plan1/uservariablevalues"
+    )
+    assert fallback.kwargs["params"] == {
+        "q": '{"username":"planner@example.com"}',
+        "offset": 0,
+        "limit": -1,
+    }
 
 
 def test_definition_discovery_falls_back_for_older_planning_versions() -> None:

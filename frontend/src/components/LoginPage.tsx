@@ -73,7 +73,7 @@ export function LoginPage({
       <section className="login-story" aria-label="Product introduction">
         <div className="brand brand--inverse">
           <span className="brand-logo"><img src="/static/images/bisp-logo.png" alt="" /></span>
-          <span><strong>{company}</strong><small>EPM Automation</small></span>
+          <span><strong>{company}</strong><small>EPM AI Assistant</small></span>
         </div>
         <div className="login-story__content">
           <span className="eyebrow eyebrow--light">Planning, orchestrated</span>

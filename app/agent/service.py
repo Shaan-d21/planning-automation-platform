@@ -92,6 +92,9 @@ from app.services.agent_execution_followup_service import (
     AgentExecutionFollowUpService,
 )
 from app.services.metadata_service import MetadataService
+from app.services.oracle_user_variable_identity import (
+    OracleUserVariableIdentityResolver,
+)
 from app.config.settings import Settings
 from app.models.access_control import (
     ExecutionActor,
@@ -135,7 +138,7 @@ _PERMISSION_LABELS = {
 }
 
 SYSTEM_INSTRUCTION = """
-You are the governed operational assistant inside BISP Solutions Oracle EPM
+You are the governed operational assistant inside EPM AI Assistant
 Automation. Help Oracle EPM consultants, planners, finance users, and
 administrators accomplish business tasks conversationally, while the platform's
 deterministic services remain responsible for validation and execution. Use the
@@ -249,6 +252,7 @@ class AgentApplicationService:
         operation_manager: OperationExecutionManager | None = None,
         schedule_service: AutomationScheduleApplicationService | None = None,
         schedule_coordinator: AutomationScheduleCoordinator | None = None,
+        user_variable_identity: OracleUserVariableIdentityResolver | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._settings = settings
@@ -268,6 +272,10 @@ class AgentApplicationService:
         )
         self._schedule_service = schedule_service
         self._schedule_coordinator = schedule_coordinator
+        self._user_variable_identity = (
+            user_variable_identity
+            or OracleUserVariableIdentityResolver(settings)
+        )
         self._schedule_environment_key = OracleEnvironment.from_settings(
             settings.epm_base_url,
             settings.application_name,
@@ -1385,13 +1393,10 @@ class AgentApplicationService:
         # and run operation-specific validation.
         supplied_values = None if values is None else dict(values)
         if supplied_values is not None and "user_name" in supplied_values:
-            requested_user = str(supplied_values.get("user_name") or "").strip()
-            if not user.has_permission(Permission.USER_MANAGE):
-                if requested_user and requested_user.casefold() != user.username.casefold():
-                    raise AgentConversationError(
-                        "Your platform role can update only your own user variables."
-                    )
-                supplied_values["user_name"] = user.username
+            supplied_values["user_name"] = self._user_variable_target(
+                user,
+                supplied_values.get("user_name"),
+            )
         result = self._graph.resume_input(
             conversation_id=conversation_id,
             user_id=user.user_id,
@@ -1886,14 +1891,10 @@ class AgentApplicationService:
                 ),
             )
         if operation_code == "user-variables":
-            target_user = str(input_values.get("user_name") or "").strip()
-            if (
-                target_user.casefold() != user.username.casefold()
-                and not user.has_permission(Permission.USER_MANAGE)
-            ):
-                raise AgentConversationError(
-                    "Your platform role can update only your own user variables."
-                )
+            target_user = self._user_variable_target(
+                user,
+                input_values.get("user_name"),
+            )
             return UserVariableOperationInput(
                 user_name=target_user,
                 name=str(input_values.get("variable_name") or ""),
@@ -2411,14 +2412,10 @@ class AgentApplicationService:
                     ),
                 )
             elif operation_code == "user-variables":
-                target_user = str(input_values.get("user_name") or "").strip()
-                if (
-                    target_user.casefold() != user.username.casefold()
-                    and not user.has_permission(Permission.USER_MANAGE)
-                ):
-                    raise AgentConversationError(
-                        "Your platform role can update only your own user variables."
-                    )
+                target_user = self._user_variable_target(
+                    user,
+                    input_values.get("user_name"),
+                )
                 operation_input = UserVariableOperationInput(
                     user_name=target_user,
                     name=str(input_values.get("variable_name") or ""),
@@ -2839,18 +2836,35 @@ class AgentApplicationService:
             or user.has_permission(Permission.SCHEDULE_MANAGE)
         )
 
-    @staticmethod
-    def _personalize_input_request(request, user: UserAccount):
+    def _personalize_input_request(self, request, user: UserAccount):
         if request is None or request.operation_code.casefold() != "user-variables":
             return request
         return replace(
             request,
             context={
                 **request.context,
-                "default_user": user.username,
+                "default_user": self._user_variable_identity.resolve(user),
                 "can_manage_users": user.has_permission(Permission.USER_MANAGE),
             },
         )
+
+    def _user_variable_target(
+        self,
+        user: UserAccount,
+        requested_user: object,
+    ) -> str:
+        """Resolve and authorize the Oracle user targeted by the agent."""
+        assigned_user = self._user_variable_identity.resolve(user)
+        target_user = str(requested_user or "").strip() or assigned_user
+        if (
+            target_user.casefold() != assigned_user.casefold()
+            and not user.has_permission(Permission.USER_MANAGE)
+        ):
+            raise AgentConversationError(
+                "Your platform role can update only the Oracle "
+                "user-variable identity assigned to your session."
+            )
+        return target_user
 
     def _authorized_execution_ids(
         self, conversation_id: str, user_id: int

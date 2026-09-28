@@ -53,7 +53,6 @@ class EnvironmentSummary(BaseModel):
 
     application_name: str
     deployment_mode: str
-    base_url: str
     configured: bool
     execution_account: str
 
@@ -71,7 +70,6 @@ class EnvironmentConfigurationResponse(BaseModel):
     """Non-secret persisted connection configuration for administrators."""
 
     status: str = "success"
-    base_url: str
     deployment_mode: str
     active_application: str | None
     selected_application: str | None

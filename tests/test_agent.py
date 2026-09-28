@@ -114,6 +114,66 @@ class _FakeProvider:
         )
 
 
+class _UserVariableIdentity:
+    def __init__(self, username: str) -> None:
+        self.username = username
+
+    def resolve(self, _user: UserAccount) -> str:
+        return self.username
+
+
+def test_user_variable_input_uses_resolved_oracle_identity(
+    tmp_path: Path,
+) -> None:
+    service = AgentApplicationService(
+        _settings(tmp_path),
+        gateway=SimpleNamespace(),
+        user_variable_identity=_UserVariableIdentity("planner@oracle.example"),
+    )
+    request = AgentInputRequest(
+        request_id="input-user-variable",
+        operation_code="user-variables",
+        display_name="User Variables",
+        artifact_name="MyEntity",
+        title="Choose the user's Planning context",
+        description="Choose an assignment.",
+        fields=(),
+        context={"variable_name": "MyEntity", "dimension": "Entity"},
+    )
+
+    personalized = service._personalize_input_request(request, _user())
+
+    assert personalized.context["default_user"] == "planner@oracle.example"
+    assert personalized.context["can_manage_users"] is False
+
+
+def test_agent_user_variable_target_defaults_to_resolved_identity(
+    tmp_path: Path,
+) -> None:
+    service = AgentApplicationService(
+        _settings(tmp_path),
+        gateway=SimpleNamespace(),
+        user_variable_identity=_UserVariableIdentity("service@oracle.example"),
+    )
+
+    target = service._user_variable_target(_user(), "")
+
+    assert target == "service@oracle.example"
+
+
+def test_agent_rejects_unassigned_oracle_user_for_ordinary_user(
+    tmp_path: Path,
+) -> None:
+    service = AgentApplicationService(
+        _settings(tmp_path),
+        gateway=SimpleNamespace(),
+        user_variable_identity=_UserVariableIdentity("planner@oracle.example"),
+    )
+
+    with pytest.raises(AgentConversationError, match="assigned to your session"):
+        service._user_variable_target(_user(), "another@oracle.example")
+
+
 class _DraftProvider:
     provider_name = "fake"
     model_name = "fake-model"

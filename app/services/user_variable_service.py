@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Mapping
 from urllib.parse import quote
 
 from app.clients.epm_client import EPMClient
 from app.models.user_variable import UserVariableDefinition, UserVariableValue
+from app.services.application_service import ApplicationService
 from app.utils.exceptions import APIRequestError, UserVariableError
 
 
 class UserVariableService:
     """Read definitions and safely set one user's selected member value."""
+
+    _COMPATIBILITY_STATUS_CODES = frozenset({400, 404, 405, 501})
 
     def __init__(self, client: EPMClient, *, logger: logging.Logger | None = None) -> None:
         self._client = client
@@ -24,12 +28,16 @@ class UserVariableService:
 
     def get_values(self, user_name: str | None = None) -> tuple[UserVariableValue, ...]:
         """Return visible values, optionally limited to one exact Oracle user."""
-        response = self._client.get(
-            self._values_endpoint,
-            params={"offset": 0, "limit": -1},
-        )
-        items = self._response_items(response, "user-variable values")
-        requested = str(user_name or "").strip().casefold()
+        requested_user = str(user_name or "").strip()
+        if requested_user:
+            items = self._user_scoped_value_items(requested_user)
+        else:
+            response = self._client.get(
+                self._values_endpoint,
+                params={"offset": 0, "limit": -1},
+            )
+            items = self._response_items(response, "user-variable values")
+        requested = requested_user.casefold()
         values = (
             UserVariableValue.from_response(item)
             for item in items
@@ -42,7 +50,11 @@ class UserVariableService:
             )
         )
 
-    def get_definitions(self) -> tuple[UserVariableDefinition, ...]:
+    def get_definitions(
+        self,
+        *,
+        fallback_values: tuple[UserVariableValue, ...] | None = None,
+    ) -> tuple[UserVariableDefinition, ...]:
         """Return current definitions when supported by the Planning version."""
         try:
             response = self._client.get(
@@ -56,7 +68,12 @@ class UserVariableService:
                 "Planning user-variable definition discovery is unavailable; "
                 "deriving definitions from assigned values."
             )
-            return self._definitions_from_values(self.get_values())
+            values = (
+                fallback_values
+                if fallback_values is not None
+                else self.get_values()
+            )
+            return self._definitions_from_values(values)
         items = self._response_items(response, "user-variable definitions")
         definitions = {
             (definition.name.casefold(), definition.dimension.casefold()): definition
@@ -65,6 +82,76 @@ class UserVariableService:
             for definition in (UserVariableDefinition.from_response(item),)
         }
         return tuple(sorted(definitions.values(), key=lambda item: item.name.casefold()))
+
+    def _user_scoped_value_items(self, user_name: str) -> list[object]:
+        """Use Oracle's targeted query, with its legacy plan-type fallback."""
+        params = {
+            "q": json.dumps(
+                {"userName": user_name},
+                separators=(",", ":"),
+            ),
+            "offset": 0,
+            "limit": -1,
+        }
+        try:
+            response = self._client.get(self._values_endpoint, params=params)
+            return self._response_items(response, "user-variable values")
+        except APIRequestError as exc:
+            if exc.status_code not in self._COMPATIBILITY_STATUS_CODES:
+                raise
+            application_failure = exc
+            self._logger.warning(
+                "Application-scoped user-variable lookup is unavailable; "
+                "trying compatible plan-type resources."
+            )
+
+        try:
+            plan_types = ApplicationService(
+                self._client,
+                logger=self._logger.getChild("application"),
+            ).get_plan_types()
+        except APIRequestError as exc:
+            raise self._unsupported_values_error() from exc
+
+        supported = False
+        items: list[object] = []
+        application = quote(self._client.application_name, safe="")
+        for plan_type in plan_types:
+            endpoint = (
+                f"{self._client.planning_api_root}/applications/{application}/"
+                f"plantypes/{quote(plan_type.name, safe='')}/uservariablevalues"
+            )
+            try:
+                response = self._client.get(
+                    endpoint,
+                    params={
+                        "q": json.dumps(
+                            {"username": user_name},
+                            separators=(",", ":"),
+                        ),
+                        "offset": 0,
+                        "limit": -1,
+                    },
+                )
+            except APIRequestError as exc:
+                if exc.status_code in self._COMPATIBILITY_STATUS_CODES:
+                    continue
+                raise
+            supported = True
+            items.extend(
+                self._response_items(response, "user-variable values")
+            )
+        if not supported:
+            raise self._unsupported_values_error() from application_failure
+        return items
+
+    @staticmethod
+    def _unsupported_values_error() -> UserVariableError:
+        return UserVariableError(
+            "This Oracle Planning release does not expose user-variable "
+            "values through the supported REST resources. The platform "
+            "cannot safely list or update user variables for this environment."
+        )
 
     def set_value(
         self,

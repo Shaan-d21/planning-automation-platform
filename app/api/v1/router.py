@@ -165,7 +165,7 @@ async def frontend_bootstrap(request: Request) -> FrontendBootstrapResponse:
     )
     return FrontendBootstrapResponse(
         product=ProductSummary(
-            name="Oracle EPM Automation Platform",
+            name="EPM AI Assistant",
             company="BISP Solutions",
             api_version="v1",
         ),
@@ -187,7 +187,6 @@ async def frontend_bootstrap(request: Request) -> FrontendBootstrapResponse:
             EnvironmentSummary(
                 application_name=settings.application_name,
                 deployment_mode=settings.resolved_deployment_mode,
-                base_url=settings.epm_base_url,
                 configured=bool(settings.application_name),
                 execution_account=settings.oracle_execution_username,
             )
@@ -1213,7 +1212,6 @@ def _environment_configuration_payload(
     else:
         message = "Discover the Planning applications available in Oracle."
     return EnvironmentConfigurationResponse(
-        base_url=settings.epm_base_url,
         deployment_mode=settings.resolved_deployment_mode,
         active_application=active,
         selected_application=selected,
