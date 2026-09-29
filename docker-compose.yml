@@ -44,6 +44,8 @@ x-app-environment: &app-environment
   REPORT_OUTPUT_DIR: /app/reports
   WEB_SESSION_SECRET: ${WEB_SESSION_SECRET:?Set WEB_SESSION_SECRET in the Docker environment file}
   WEB_SECURE_COOKIES: ${WEB_SECURE_COOKIES:-true}
+  # Enable only when the origin is reachable exclusively through Cloudflare.
+  TRUST_CLOUDFLARE_HEADERS: ${TRUST_CLOUDFLARE_HEADERS:-false}
   WEB_FRONTEND_URL: ""
   IDENTITY_PROVIDER: ${IDENTITY_PROVIDER:-local}
   ORACLE_PASSWORD_LOGIN_ENABLED: ${ORACLE_PASSWORD_LOGIN_ENABLED:-true}

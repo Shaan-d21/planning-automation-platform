@@ -5,7 +5,7 @@ import { Icon } from "./Icon";
 
 interface AppShellProps {
   bootstrap: BootstrapResponse;
-  activeView: "home" | "tasks" | "cycles" | "approvals" | "notifications" | "access" | "jobs" | "operations" | "schedules" | "data-review" | "reports" | "assistant";
+  activeView: "home" | "tasks" | "cycles" | "approvals" | "notifications" | "access" | "system-administration" | "jobs" | "operations" | "schedules" | "data-review" | "reports" | "assistant";
   children: ReactNode;
   busy: boolean;
   unreadNotifications: number;
@@ -111,7 +111,8 @@ function navigationIcon(code: string) {
     assistant: "assistant",
     cycles: "calendar",
     "access-control": "users",
-    jobs: "activity"
+    jobs: "activity",
+    "system-administration": "users"
   } as const;
   return icons[code as keyof typeof icons] ?? "chevron";
 }
@@ -128,6 +129,7 @@ function navigationHref(code: string, fallback: string) {
     approvals: "approvals",
     notifications: "notifications",
     "access-control": "access",
+    "system-administration": "system-administration",
     jobs: "jobs",
     operations: "operations",
     schedules: "schedules",
@@ -140,6 +142,6 @@ function navigationHref(code: string, fallback: string) {
 }
 
 function viewLabel(view: AppShellProps["activeView"]) {
-  const labels = { home: "Home", tasks: "My Work", cycles: "Planning Cycles", approvals: "Approvals", notifications: "Notifications", access: "Access Control", jobs: "Jobs & Activity", operations: "Operations", schedules: "Schedules", "data-review": "Data Explorer", reports: "Data Explorer", assistant: "EPM Assistant" };
+  const labels = { home: "Home", tasks: "My Work", cycles: "Planning Cycles", approvals: "Approvals", notifications: "Notifications", access: "Access Control", "system-administration": "System Administration", jobs: "Jobs & Activity", operations: "Operations", schedules: "Schedules", "data-review": "Data Explorer", reports: "Data Explorer", assistant: "EPM Assistant" };
   return labels[view];
 }

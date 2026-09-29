@@ -261,6 +261,12 @@ class PlatformPasswordChangeRequest(BaseModel):
     password_confirmation: str = Field(min_length=12, max_length=256)
 
 
+class SystemAdministratorRoleRequest(BaseModel):
+    """Grant or remove the separate platform-security role."""
+
+    enabled: bool
+
+
 class IdentitySynchronizationRequest(BaseModel):
     """Apply the exact Oracle directory state previously reviewed."""
 

@@ -27,7 +27,10 @@ def test_first_administrator_is_atomic_and_has_all_permissions(
     )
 
     assert service.requires_bootstrap is False
-    assert administrator.roles == (RoleCode.SERVICE_ADMINISTRATOR,)
+    assert set(administrator.roles) == {
+        RoleCode.SERVICE_ADMINISTRATOR,
+        RoleCode.SYSTEM_ADMINISTRATOR,
+    }
     assert administrator.permissions == frozenset(Permission)
     assert service.authenticate("ADMIN", "Secure passphrase 123!") is not None
     assert service.authenticate("admin", "wrong password") is None

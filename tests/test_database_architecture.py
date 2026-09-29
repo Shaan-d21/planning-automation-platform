@@ -46,6 +46,7 @@ EXPECTED_TABLES = {
     "platform_role_permissions",
     "platform_user_roles",
     "authentication_events",
+    "platform_sessions",
     "identity_providers",
     "external_identities",
     "external_entitlements",
@@ -148,7 +149,7 @@ def test_alembic_has_one_production_head() -> None:
     scripts = ScriptDirectory.from_config(
         Config(str(project_root / "alembic.ini"))
     )
-    assert scripts.get_heads() == ["0022_agent_execution_followups"]
+    assert scripts.get_heads() == ["0023_security_administration"]
     assert all(len(revision.revision) <= 32 for revision in scripts.walk_revisions())
 
 

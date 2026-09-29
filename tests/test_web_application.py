@@ -573,7 +573,8 @@ def test_v1_bootstrap_returns_effective_user_and_navigation(
     }
     assert payload["user"]["username"] == "admin"
     assert payload["user"]["platform_roles"] == [
-        "SERVICE_ADMINISTRATOR"
+        "SERVICE_ADMINISTRATOR",
+        "SYSTEM_ADMINISTRATOR",
     ]
     assert payload["user"]["persona"] == "SERVICE_ADMINISTRATOR"
     assert payload["user"]["persona_label"] == "Service Administrator"
@@ -585,6 +586,7 @@ def test_v1_bootstrap_returns_effective_user_and_navigation(
         "jobs",
         "operations",
         "access-control",
+        "system-administration",
     }
     assert "process-designer" not in {
         item["code"] for item in payload["navigation"]
@@ -678,6 +680,57 @@ def test_v1_session_login_and_logout_rotate_browser_security_state(
     assert payload["csrf_token"] != anonymous["csrf_token"]
     assert payload["user"]["username"] == "admin"
     assert client.get("/api/v1/bootstrap").json()["authenticated"] is True
+
+
+def test_system_administration_lists_concurrent_sessions_and_revokes_one(
+    tmp_path: Path,
+) -> None:
+    app = create_app(_settings(tmp_path), session_secret="test-secret")
+    first = TestClient(app)
+    _login(first)
+    second = TestClient(app)
+    anonymous = second.get("/api/v1/bootstrap").json()
+    signed_in = second.post(
+        "/api/v1/session",
+        headers={"X-CSRF-Token": anonymous["csrf_token"]},
+        json={"username": "admin", "password": "Test password 123!"},
+    )
+    assert signed_in.status_code == 200
+
+    security = first.get("/api/v1/system-administration/security")
+    assert security.status_code == 200
+    payload = security.json()
+    assert payload["summary"]["active_sessions"] == 2
+    assert payload["summary"]["concurrent_accounts"] == 1
+    target = next(item for item in payload["sessions"] if not item["current"])
+
+    revoked = first.post(
+        f"/api/v1/system-administration/sessions/{target['session_key']}/revoke"
+    )
+    assert revoked.status_code == 200
+    assert second.get("/api/v1/bootstrap").json()["authenticated"] is False
+
+
+def test_cloudflare_client_ip_is_used_only_when_explicitly_trusted(
+    tmp_path: Path,
+) -> None:
+    settings = replace(_settings(tmp_path), trust_cloudflare_headers=True)
+    app = create_app(settings, session_secret="test-secret")
+    client = TestClient(app)
+    client.headers.update(
+        {
+            "CF-Connecting-IP": "203.0.113.42",
+            "CF-IPCountry": "IN",
+            "CF-Ray": "trusted-ray",
+        }
+    )
+    _login(client)
+
+    payload = client.get("/api/v1/system-administration/security").json()
+    current = next(item for item in payload["sessions"] if item["current"])
+    assert current["current_ip"] == "203.0.113.42"
+    assert current["country_code"] == "IN"
+    assert current["cloudflare_ray"] == "trusted-ray"
 
 
 def test_oracle_credentials_are_advertised_and_start_a_platform_session(

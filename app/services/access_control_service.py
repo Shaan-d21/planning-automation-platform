@@ -48,13 +48,29 @@ _MAX_ORACLE_IP_FAILURES = 15
 
 ROLE_DEFINITIONS = (
     RoleDefinition(
+        code=RoleCode.SYSTEM_ADMINISTRATOR,
+        name="System Administrator",
+        description=(
+            "Reviews authentication activity and manages active platform "
+            "sessions independently of Oracle EPM operations."
+        ),
+        permissions=frozenset(
+            {Permission.SECURITY_AUDIT_VIEW, Permission.SESSION_MANAGE}
+        ),
+    ),
+    RoleDefinition(
         code=RoleCode.SERVICE_ADMINISTRATOR,
         name="Service Administrator",
         description=(
             "Administers the platform, users, Planning cycles, schedules, "
             "and governed Oracle EPM operations."
         ),
-        permissions=frozenset(Permission),
+        permissions=frozenset(
+            permission
+            for permission in Permission
+            if permission
+            not in {Permission.SECURITY_AUDIT_VIEW, Permission.SESSION_MANAGE}
+        ),
     ),
     RoleDefinition(
         code=RoleCode.POWER_USER,
@@ -177,6 +193,7 @@ class AccessControlService:
     def __init__(self, database_target: DatabaseTarget) -> None:
         self._database = database_for(database_target)
         self._seed_roles()
+        self._ensure_initial_system_administrator()
         self._dummy_hash = PasswordHasher.hash("dummy timing password")
 
     @property
@@ -189,8 +206,12 @@ class AccessControlService:
         return int(count) == 0
 
     def roles(self) -> tuple[RoleDefinition, ...]:
-        """Return the stable role catalog."""
-        return ROLE_DEFINITIONS
+        """Return assignable business roles; security role is managed separately."""
+        return tuple(
+            role
+            for role in ROLE_DEFINITIONS
+            if role.code != RoleCode.SYSTEM_ADMINISTRATOR
+        )
 
     def bootstrap_administrator(
         self,
@@ -234,7 +255,10 @@ class AccessControlService:
             self._assign_roles(
                 connection,
                 user_id,
-                (RoleCode.SERVICE_ADMINISTRATOR,),
+                (
+                    RoleCode.SERVICE_ADMINISTRATOR,
+                    RoleCode.SYSTEM_ADMINISTRATOR,
+                ),
                 assigned_by_user_id=user_id,
             )
             self._record_event(
@@ -387,6 +411,100 @@ class AccessControlService:
             )
         return tuple(self.require_user(user_id) for user_id in ids)
 
+    def system_administrator_ids(self) -> frozenset[int]:
+        """Return active and inactive users holding the security role."""
+        with self._database.connect() as connection:
+            values = connection.execute(
+                select(platform_user_roles.c.user_id)
+                .join(
+                    platform_roles,
+                    platform_roles.c.role_id == platform_user_roles.c.role_id,
+                )
+                .where(
+                    platform_roles.c.code
+                    == RoleCode.SYSTEM_ADMINISTRATOR.value
+                )
+            ).scalars().all()
+        return frozenset(int(value) for value in values)
+
+    def set_system_administrator(
+        self,
+        user_id: int,
+        *,
+        enabled: bool,
+        actor_user_id: int,
+    ) -> UserAccount:
+        """Grant or remove the separate security-administration role."""
+        target = self.require_user(user_id)
+        if enabled and not target.active:
+            raise AccessControlError(
+                "Activate the user before granting System Administrator access."
+            )
+        with self._database.begin() as connection:
+            role_id = int(
+                connection.execute(
+                    select(platform_roles.c.role_id).where(
+                        platform_roles.c.code
+                        == RoleCode.SYSTEM_ADMINISTRATOR.value
+                    )
+                ).scalar_one()
+            )
+            assigned = connection.execute(
+                select(platform_user_roles.c.user_id).where(
+                    platform_user_roles.c.user_id == user_id,
+                    platform_user_roles.c.role_id == role_id,
+                )
+            ).first() is not None
+            if enabled and not assigned:
+                connection.execute(
+                    insert(platform_user_roles).values(
+                        user_id=user_id,
+                        role_id=role_id,
+                        assigned_at=datetime.now(UTC),
+                        assigned_by_user_id=actor_user_id,
+                    )
+                )
+            elif not enabled and assigned:
+                active_count = int(
+                    connection.execute(
+                        select(func.count())
+                        .select_from(platform_user_roles)
+                        .join(
+                            platform_users,
+                            platform_users.c.user_id
+                            == platform_user_roles.c.user_id,
+                        )
+                        .where(
+                            platform_user_roles.c.role_id == role_id,
+                            platform_users.c.is_active.is_(True),
+                        )
+                    ).scalar_one()
+                )
+                if target.active and active_count <= 1:
+                    raise AccessControlError(
+                        "The last active System Administrator cannot be removed."
+                    )
+                connection.execute(
+                    delete(platform_user_roles).where(
+                        platform_user_roles.c.user_id == user_id,
+                        platform_user_roles.c.role_id == role_id,
+                    )
+                )
+            if assigned != enabled:
+                self._record_event(
+                    connection,
+                    event_type=(
+                        "SYSTEM_ADMINISTRATOR_ASSIGNED"
+                        if enabled
+                        else "SYSTEM_ADMINISTRATOR_REMOVED"
+                    ),
+                    username=target.username,
+                    actor_user_id=actor_user_id,
+                    success=True,
+                    details={"target_user_id": user_id},
+                )
+        return self.require_user(user_id)
+
     def authentication_sources(self) -> dict[int, str]:
         """Classify accounts without exposing password or provider details."""
         with self._database.connect() as connection:
@@ -520,11 +638,34 @@ class AccessControlService:
                         updated_at=now,
                     )
                 )
-                connection.execute(
-                    delete(platform_user_roles).where(
-                        platform_user_roles.c.user_id == user_id
+                system_role = connection.execute(
+                    select(platform_roles.c.role_id)
+                    .join(
+                        platform_user_roles,
+                        platform_user_roles.c.role_id == platform_roles.c.role_id,
                     )
+                    .where(
+                        platform_user_roles.c.user_id == user_id,
+                        platform_roles.c.code
+                        == RoleCode.SYSTEM_ADMINISTRATOR.value,
+                    )
+                ).scalar_one_or_none()
+                if (
+                    system_role is not None
+                    and not active
+                    and self._active_system_administrator_count(connection) <= 1
+                ):
+                    raise AccessControlError(
+                        "The last active System Administrator cannot be deactivated."
+                    )
+                role_delete = delete(platform_user_roles).where(
+                    platform_user_roles.c.user_id == user_id
                 )
+                if system_role is not None:
+                    role_delete = role_delete.where(
+                        platform_user_roles.c.role_id != int(system_role)
+                    )
+                connection.execute(role_delete)
                 self._assign_roles(
                     connection,
                     user_id,
@@ -773,6 +914,67 @@ class AccessControlService:
                     ],
                 )
 
+    def _ensure_initial_system_administrator(self) -> None:
+        """Grant the first security role once for an existing installation."""
+        with self._database.begin() as connection:
+            if connection.dialect.name == "postgresql":
+                connection.execute(select(func.pg_advisory_xact_lock(8_237_402)))
+            system_role_id = connection.execute(
+                select(platform_roles.c.role_id).where(
+                    platform_roles.c.code == RoleCode.SYSTEM_ADMINISTRATOR.value
+                )
+            ).scalar_one()
+            existing = connection.execute(
+                select(platform_user_roles.c.user_id)
+                .join(
+                    platform_users,
+                    platform_users.c.user_id == platform_user_roles.c.user_id,
+                )
+                .where(
+                    platform_user_roles.c.role_id == system_role_id,
+                    platform_users.c.is_active.is_(True),
+                )
+                .limit(1)
+            ).first()
+            if existing is not None:
+                return
+            candidate = connection.execute(
+                select(platform_users.c.user_id, platform_users.c.username)
+                .join(
+                    platform_user_roles,
+                    platform_user_roles.c.user_id == platform_users.c.user_id,
+                )
+                .join(
+                    platform_roles,
+                    platform_roles.c.role_id == platform_user_roles.c.role_id,
+                )
+                .where(
+                    platform_users.c.is_active.is_(True),
+                    platform_roles.c.code
+                    == RoleCode.SERVICE_ADMINISTRATOR.value,
+                )
+                .order_by(platform_users.c.created_at, platform_users.c.user_id)
+                .limit(1)
+            ).one_or_none()
+            if candidate is None:
+                return
+            connection.execute(
+                insert(platform_user_roles).values(
+                    user_id=int(candidate.user_id),
+                    role_id=int(system_role_id),
+                    assigned_at=datetime.now(UTC),
+                    assigned_by_user_id=int(candidate.user_id),
+                )
+            )
+            self._record_event(
+                connection,
+                event_type="SYSTEM_ADMINISTRATOR_ASSIGNED",
+                username=str(candidate.username),
+                actor_user_id=int(candidate.user_id),
+                success=True,
+                details={"reason": "INITIAL_SECURITY_ADMINISTRATOR"},
+            )
+
     @staticmethod
     def _validated_identity(
         username: str,
@@ -805,9 +1007,12 @@ class AccessControlService:
         roles: tuple[RoleCode, ...],
     ) -> tuple[RoleCode, ...]:
         normalized = tuple(dict.fromkeys(RoleCode(role) for role in roles))
-        if len(normalized) != 1:
+        business_roles = tuple(
+            role for role in normalized if role != RoleCode.SYSTEM_ADMINISTRATOR
+        )
+        if len(business_roles) != 1:
             raise AccessControlError("Select exactly one platform role.")
-        return normalized
+        return business_roles
 
     @staticmethod
     def _assign_roles(
@@ -853,6 +1058,26 @@ class AccessControlService:
                 platform_users.c.is_active.is_(True),
                 platform_roles.c.code
                 == RoleCode.SERVICE_ADMINISTRATOR.value,
+            )
+        ).scalar_one()
+        return int(row)
+
+    @staticmethod
+    def _active_system_administrator_count(connection) -> int:
+        row = connection.execute(
+            select(func.count(func.distinct(platform_users.c.user_id)))
+            .join(
+                platform_user_roles,
+                platform_user_roles.c.user_id == platform_users.c.user_id,
+            )
+            .join(
+                platform_roles,
+                platform_roles.c.role_id == platform_user_roles.c.role_id,
+            )
+            .where(
+                platform_users.c.is_active.is_(True),
+                platform_roles.c.code
+                == RoleCode.SYSTEM_ADMINISTRATOR.value,
             )
         ).scalar_one()
         return int(row)
