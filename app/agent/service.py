@@ -116,6 +116,7 @@ from app.utils.exceptions import (
 ProviderFactory = Callable[[], AgentProvider]
 
 _ROLE_LABELS = {
+    RoleCode.SYSTEM_ADMINISTRATOR: "System Administrator",
     RoleCode.SERVICE_ADMINISTRATOR: "Service Administrator",
     RoleCode.POWER_USER: "Power User",
     RoleCode.USER: "User",
@@ -133,6 +134,8 @@ _PERMISSION_LABELS = {
     Permission.REPORT_GENERATE: "Generate and export reports",
     Permission.HISTORY_VIEW: "View execution history and evidence",
     Permission.USER_MANAGE: "Manage platform users and access mappings",
+    Permission.SECURITY_AUDIT_VIEW: "Review platform login and session activity",
+    Permission.SESSION_MANAGE: "Revoke and manage platform sessions",
     Permission.CATALOG_MANAGE: "Manage registered Oracle artifact catalogs",
     Permission.AGENT_USE: "Use EPM Assistant",
 }

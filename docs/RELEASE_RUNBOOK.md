@@ -50,9 +50,12 @@ configuration files.
    `RUNTIME_DATA_DIR`, Oracle environment, and application selection.
 5. Confirm that `WEB_SESSION_SECRET` is long, random, and unchanged during a
    rolling deployment unless all browser sessions should be invalidated.
-6. Set `WEB_SECURE_COOKIES=true` whenever the browser reaches the platform over
+6. When the application origin is reachable exclusively through Cloudflare
+   Tunnel, set `TRUST_CLOUDFLARE_HEADERS=true`. Leave it `false` for direct or
+   mixed access so clients cannot spoof `CF-Connecting-IP`.
+7. Set `WEB_SECURE_COOKIES=true` whenever the browser reaches the platform over
    HTTPS.
-7. Build from a clean checkout; do not deploy local `var/`, `logs/`, test
+8. Build from a clean checkout; do not deploy local `var/`, `logs/`, test
    caches, `.env`, or `frontend/node_modules/`.
 
 ## Build and verify

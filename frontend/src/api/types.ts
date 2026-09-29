@@ -375,6 +375,65 @@ export interface AccessControlResponse {
   identity_sync: IdentitySyncStatus;
 }
 
+export interface SecuritySession {
+  session_key: string;
+  user_id: number;
+  username: string;
+  display_name: string;
+  authentication_method: string;
+  login_ip: string | null;
+  current_ip: string | null;
+  country_code: string | null;
+  user_agent: string | null;
+  cloudflare_ray: string | null;
+  started_at: string;
+  last_seen_at: string;
+  expires_at: string;
+  ended_at: string | null;
+  revoked_at: string | null;
+  revoke_reason: string | null;
+  active: boolean;
+  current: boolean;
+}
+
+export interface AuthenticationActivity {
+  event_id: number;
+  event_type: string;
+  username: string;
+  success: boolean;
+  ip_address: string | null;
+  occurred_at: string;
+  details: Record<string, unknown>;
+}
+
+export interface ConcurrentAccount {
+  user_id: number;
+  username: string;
+  display_name: string;
+  session_count: number;
+  ip_addresses: string[];
+}
+
+export interface SystemSecurityResponse {
+  status: string;
+  summary: {
+    active_sessions: number;
+    concurrent_accounts: number;
+    unique_active_ips: number;
+    failed_logins_24h: number;
+  };
+  concurrent_accounts: ConcurrentAccount[];
+  sessions: SecuritySession[];
+  events: AuthenticationActivity[];
+  administrators: Array<{
+    user_id: number;
+    username: string;
+    display_name: string;
+    active: boolean;
+    system_administrator: boolean;
+  }>;
+}
+
 export interface IdentitySyncStatus {
   available: boolean;
   provider_code: string;

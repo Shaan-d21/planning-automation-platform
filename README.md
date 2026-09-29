@@ -59,6 +59,14 @@ live process catalog, PostgreSQL execution history, configured environment, and
 generated report artifacts through application use cases shared with other
 interfaces.
 
+Platform security administration is separated from Oracle EPM operations. A
+dedicated System Administrator role can review retained login activity, see
+concurrent sessions and IP addresses, delegate the security role to another
+existing platform user, and revoke a browser session. Session identifiers are
+stored only as SHA-256 hashes in PostgreSQL. The first existing Service
+Administrator receives the initial System Administrator role during upgrade;
+the two roles can then be assigned to different people.
+
 An optional provider-neutral notification layer sends success and failure
 emails. SMTP is implemented for development; a corporate Microsoft Graph
 provider can be added later without changing the Oracle workflows.
@@ -178,6 +186,8 @@ PLANNING_PROCESS_CATALOG_FILE=config/planning_processes.json
 REPORT_OUTPUT_DIR=reports
 REPORT_CATALOG_FILE=config/reports.json
 WEB_SESSION_SECRET=replace-with-a-long-random-secret
+# Enable only when the origin is reachable exclusively through Cloudflare.
+TRUST_CLOUDFLARE_HEADERS=false
 WEB_SECURE_COOKIES=false
 AGENT_PROVIDER=gemini
 AGENT_ORCHESTRATOR=langgraph

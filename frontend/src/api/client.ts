@@ -85,7 +85,8 @@ import type {
   AutomationSchedulesResponse,
   AutomationScheduleRunsResponse,
   ScheduleMutationResponse,
-  SchedulePreviewResponse
+  SchedulePreviewResponse,
+  SystemSecurityResponse
 } from "./types";
 
 export class ApiError extends Error {
@@ -207,6 +208,19 @@ export const api = {
     ),
   notifications: () => request<NotificationsResponse>("/api/v1/notifications"),
   accessControl: () => request<AccessControlResponse>("/api/v1/access-control"),
+  systemSecurity: () => request<SystemSecurityResponse>(
+    "/api/v1/system-administration/security"
+  ),
+  revokeSession: (sessionKey: string, csrfToken: string) => request<{ status: string; message: string }>(
+    `/api/v1/system-administration/sessions/${encodeURIComponent(sessionKey)}/revoke`,
+    { method: "POST" },
+    csrfToken
+  ),
+  setSystemAdministrator: (userId: number, enabled: boolean, csrfToken: string) => request<{ status: string; message: string }>(
+    `/api/v1/system-administration/users/${userId}/role`,
+    { method: "PATCH", body: JSON.stringify({ enabled }) },
+    csrfToken
+  ),
   previewIdentitySync: (csrfToken: string) => request<IdentitySyncPreviewResponse>(
     "/api/v1/access-control/identity-sync/preview",
     { method: "POST" },

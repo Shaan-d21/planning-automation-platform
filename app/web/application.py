@@ -117,6 +117,7 @@ from app.services.notification_service import create_notification_service
 from app.services.oracle_password_authentication_service import (
     OraclePasswordAuthenticationService,
 )
+from app.services.session_security_service import SessionSecurityService
 from app.utils.exceptions import (
     AgentError,
     AccessControlError,
@@ -306,6 +307,9 @@ def create_app(
         logger=LOGGER.getChild("environment_configuration"),
     )
     app.state.access_control = access_control
+    app.state.session_security = SessionSecurityService(
+        resolved_settings.database_target
+    )
     app.state.federated_authentication = FederatedAuthenticationService(
         resolved_settings.database_target
     )
@@ -574,8 +578,7 @@ def create_app(
         except Exception:
             LOGGER.exception("Oracle OIDC callback failed unexpectedly.")
             return identity_redirect(error="identity_provider_unavailable")
-        _start_user_session(request, user)
-        request.session["authentication_method"] = "oracle_oidc"
+        _start_user_session(request, user, authentication_method="oracle_oidc")
         return identity_redirect()
 
     @app.get("/", include_in_schema=False)
@@ -602,7 +605,7 @@ def create_app(
             )
         except AccessControlError as exc:
             return _access_error(str(exc), status_code=400)
-        _start_user_session(request, user)
+        _start_user_session(request, user, authentication_method="bootstrap")
         return {
             "status": "success",
             "message": "Platform Administrator created.",
@@ -627,7 +630,7 @@ def create_app(
                 "The username or password is incorrect.",
                 status_code=401,
             )
-        _start_user_session(request, user)
+        _start_user_session(request, user, authentication_method="local")
         return {
             "status": "success",
             "message": "Signed in successfully.",
@@ -642,6 +645,11 @@ def create_app(
         if owner:
             request.app.state.upload_store.delete_owner(owner)
         if user is not None:
+            request.app.state.session_security.end(
+                owner,
+                username=user.username,
+                user_id=user.user_id,
+            )
             request.app.state.access_control.record_logout(
                 user,
                 ip_address=_client_ip(request),

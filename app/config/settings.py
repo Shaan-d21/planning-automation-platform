@@ -98,6 +98,7 @@ class Settings:
     oracle_identity_client_id: str | None = None
     oracle_identity_client_secret: str | None = None
     oracle_identity_redirect_uri: str | None = None
+    trust_cloudflare_headers: bool = False
     email_notifications: EmailNotificationSettings = field(
         default_factory=EmailNotificationSettings
     )
@@ -507,6 +508,10 @@ class Settings:
             "ORACLE_PASSWORD_LOGIN_ENABLED",
             os.getenv("ORACLE_PASSWORD_LOGIN_ENABLED", "true"),
         )
+        trust_cloudflare_headers = cls._parse_bool(
+            "TRUST_CLOUDFLARE_HEADERS",
+            os.getenv("TRUST_CLOUDFLARE_HEADERS", "false"),
+        )
         oracle_identity_issuer_url = os.getenv(
             "ORACLE_IDENTITY_ISSUER_URL",
             "",
@@ -627,6 +632,7 @@ class Settings:
             oracle_identity_client_id=oracle_identity_client_id,
             oracle_identity_client_secret=oracle_identity_client_secret,
             oracle_identity_redirect_uri=oracle_identity_redirect_uri,
+            trust_cloudflare_headers=trust_cloudflare_headers,
             email_notifications=email_notifications,
         )
 

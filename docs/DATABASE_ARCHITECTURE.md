@@ -72,6 +72,14 @@ optional actor user, success flag, IP address, timestamp, and JSONB details.
 The username is copied deliberately so the event remains meaningful if the
 account is later renamed.
 
+#### `platform_sessions`
+
+Server-side browser-session registry used for expiry, activity review, and
+immediate revocation. Only a SHA-256 digest of the random cookie session ID is
+stored. Login/current IP, optional trusted Cloudflare country and ray metadata,
+browser user agent, timestamps, and revocation attribution support the System
+Administration workspace without storing credentials.
+
 #### `api_tokens`
 
 Revocable credentials for trusted external clients such as the Excel Pipeline
@@ -218,7 +226,7 @@ documents. Draft records never represent approval or execution.
 ## Complete data dictionary
 
 The following is the production storage contract implemented through Alembic
-revision `0020_execution_identity`. `PK`, `FK`, and `UQ` mean primary key,
+revision `0023_security_administration`. `PK`, `FK`, and `UQ` mean primary key,
 foreign key, and unique constraint/index. Columns are required unless marked
 optional.
 
@@ -255,6 +263,16 @@ optional.
 |  | `ip_address` | `VARCHAR(45)` | Optional IPv4/IPv6 text |
 |  | `occurred_at` | `TIMESTAMPTZ` | Indexed event time |
 |  | `details` | `JSONB` | Default `{}`; non-secret metadata |
+| `platform_sessions` | `session_id_hash` | `VARCHAR(64)` | PK SHA-256 digest; raw cookie ID is never stored |
+|  | `user_id` | `BIGINT` | FK to user; cascade delete |
+|  | `authentication_method` | `VARCHAR(32)` | Local, Oracle credentials, SSO, or bootstrap |
+|  | `login_ip`, `current_ip` | `VARCHAR(45)` | Optional IPv4/IPv6 text |
+|  | `country_code` | `VARCHAR(2)` | Optional trusted Cloudflare country |
+|  | `user_agent`, `cloudflare_ray` | `VARCHAR` | Optional sanitized request metadata |
+|  | `started_at`, `last_seen_at`, `expires_at` | `TIMESTAMPTZ` | Session lifecycle |
+|  | `ended_at`, `revoked_at` | `TIMESTAMPTZ` | Optional terminal timestamps |
+|  | `revoked_by_user_id` | `BIGINT` | Optional System Administrator FK |
+|  | `revoke_reason` | `VARCHAR(255)` | Optional audit explanation |
 | `api_tokens` | `token_id` | `BIGINT IDENTITY` | PK |
 |  | `user_id` | `BIGINT` | FK to `platform_users`; cascade delete |
 |  | `name` | `VARCHAR(120)` | Human-readable client name |
@@ -447,6 +465,7 @@ optional.
 platform_users --< platform_user_roles >-- platform_roles
 platform_roles --< platform_role_permissions
 platform_users --< authentication_events
+platform_users --< platform_sessions
 platform_users --< api_tokens
 
 planning_processes --< planning_process_versions
@@ -475,6 +494,7 @@ agent_messages --< agent_action_drafts
 - Unique `lower(platform_users.username)`.
 - Unique `lower(platform_users.email)` where email is not null.
 - Descending `authentication_events.occurred_at`.
+- Session indexes on user, last-seen time, and current IP.
 - Unique API-token prefix and hash; index on `(user_id, revoked_at)`.
 - `workflow_runs.started_at DESC` and `(status, started_at DESC)`.
 - Partial unique active process version per process.

@@ -178,6 +178,38 @@ authentication_events = Table(
 )
 Index("ix_authentication_events_occurred_at", authentication_events.c.occurred_at.desc())
 
+platform_sessions = Table(
+    "platform_sessions",
+    metadata,
+    Column("session_id_hash", String(64), primary_key=True),
+    Column(
+        "user_id",
+        IDENTITY_BIGINT,
+        ForeignKey("platform_users.user_id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("authentication_method", String(32), nullable=False),
+    Column("login_ip", String(45)),
+    Column("current_ip", String(45)),
+    Column("country_code", String(2)),
+    Column("user_agent", String(512)),
+    Column("cloudflare_ray", String(80)),
+    Column("started_at", UTC_TIMESTAMP, nullable=False),
+    Column("last_seen_at", UTC_TIMESTAMP, nullable=False),
+    Column("expires_at", UTC_TIMESTAMP, nullable=False),
+    Column("ended_at", UTC_TIMESTAMP),
+    Column("revoked_at", UTC_TIMESTAMP),
+    Column(
+        "revoked_by_user_id",
+        IDENTITY_BIGINT,
+        ForeignKey("platform_users.user_id", ondelete="SET NULL"),
+    ),
+    Column("revoke_reason", String(255)),
+)
+Index("ix_platform_sessions_user_id", platform_sessions.c.user_id)
+Index("ix_platform_sessions_last_seen_at", platform_sessions.c.last_seen_at.desc())
+Index("ix_platform_sessions_current_ip", platform_sessions.c.current_ip)
+
 identity_providers = Table(
     "identity_providers",
     metadata,

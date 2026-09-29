@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import secrets
+import ipaddress
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
@@ -10,6 +11,7 @@ from fastapi.responses import RedirectResponse
 
 from app.models.access_control import Permission, UserAccount
 from app.models.api_token import ApiTokenScope, AuthenticatedApiToken
+from app.services.session_security_service import ClientContext
 from app.utils.exceptions import ApiTokenError
 
 
@@ -23,6 +25,14 @@ def current_user(request: Request) -> UserAccount | None:
     except (TypeError, ValueError):
         user = None
     if user is None or not user.active:
+        request.session.clear()
+        return None
+    session_id = str(request.session.get("session_id", "")).strip()
+    if not session_id or not request.app.state.session_security.validate_and_touch(
+        session_id,
+        user_id=user.user_id,
+        client=client_context(request),
+    ):
         request.session.clear()
         return None
     request.state.current_user = user
@@ -137,17 +147,66 @@ def require_bearer_token(
     return authenticated
 
 
-def start_user_session(request: Request, user: UserAccount) -> None:
+def start_user_session(
+    request: Request,
+    user: UserAccount,
+    *,
+    authentication_method: str = "local",
+) -> None:
     """Rotate the signed browser session after successful authentication."""
     request.session.clear()
     request.session["user_id"] = user.user_id
-    request.session["session_id"] = uuid4().hex
+    session_id = uuid4().hex
+    request.session["session_id"] = session_id
     request.session["csrf_token"] = secrets.token_urlsafe(32)
+    request.session["authentication_method"] = authentication_method
+    request.app.state.session_security.start(
+        session_id,
+        user_id=user.user_id,
+        username=user.username,
+        authentication_method=authentication_method,
+        client=client_context(request),
+    )
+
+
+def client_context(request: Request) -> ClientContext:
+    """Return trusted, sanitized client metadata for security auditing."""
+    direct_ip = request.client.host if request.client else None
+    trust_cloudflare = bool(
+        getattr(request.app.state.settings, "trust_cloudflare_headers", False)
+    )
+    forwarded_ip = (
+        str(request.headers.get("CF-Connecting-IP", "")).strip()
+        if trust_cloudflare
+        else ""
+    )
+    selected_ip = forwarded_ip or direct_ip
+    try:
+        normalized_ip = str(ipaddress.ip_address(selected_ip)) if selected_ip else None
+    except ValueError:
+        normalized_ip = direct_ip[:45] if direct_ip else None
+    country = (
+        str(request.headers.get("CF-IPCountry", "")).strip().upper()
+        if trust_cloudflare
+        else ""
+    )
+    if len(country) != 2 or not country.isalpha() or country in {"XX", "T1"}:
+        country = ""
+    return ClientContext(
+        ip_address=normalized_ip,
+        country_code=country or None,
+        user_agent=str(request.headers.get("User-Agent", "")).strip()[:512] or None,
+        cloudflare_ray=(
+            str(request.headers.get("CF-Ray", "")).strip()[:80] or None
+            if trust_cloudflare
+            else None
+        ),
+    )
 
 
 def client_ip(request: Request) -> str | None:
-    """Return a concise direct client address for authentication audit."""
-    return request.client.host if request.client else None
+    """Return the trusted client address for authentication audit."""
+    return client_context(request).ip_address
 
 
 def required_permissions(
@@ -181,6 +240,10 @@ def required_permissions(
         return (Permission.PROCESS_DESIGN,)
     if path.startswith("/api/v1/access-control"):
         return (Permission.USER_MANAGE,)
+    if path.startswith("/api/v1/system-administration"):
+        return (
+            Permission.SESSION_MANAGE if mutation else Permission.SECURITY_AUDIT_VIEW,
+        )
     if path == "/api/operations/oracle-catalog/sync" and mutation:
         return (Permission.CATALOG_MANAGE,)
     if (
