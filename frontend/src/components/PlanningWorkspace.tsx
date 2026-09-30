@@ -1,11 +1,12 @@
 import { useMemo, useState } from "react";
 
-import type { PlanningCycle, PlanningTask, PlanningWorkResponse, TaskStatus } from "../api/types";
+import type { HomeResponse, PlanningCycle, PlanningTask, PlanningWorkResponse, RecentActivity, TaskStatus } from "../api/types";
 import { Icon } from "./Icon";
 import { PlanningTaskCard, taskOrder } from "./PlanningTaskCard";
 
 interface PlanningWorkspaceProps {
   work: PlanningWorkResponse;
+  home: HomeResponse;
   busyTaskId: number | null;
   onTaskStatus: (taskId: number, status: TaskStatus) => Promise<void>;
   onSubmitApproval: (taskId: number) => Promise<void>;
@@ -13,7 +14,7 @@ interface PlanningWorkspaceProps {
 
 type WorkFilter = "ALL" | "READY" | "WAITING" | "IN_PROGRESS" | "BLOCKED" | "COMPLETED";
 
-export function PlanningWorkspace({ work, busyTaskId, onTaskStatus, onSubmitApproval }: PlanningWorkspaceProps) {
+export function PlanningWorkspace({ work, home, busyTaskId, onTaskStatus, onSubmitApproval }: PlanningWorkspaceProps) {
   const [cycleId, setCycleId] = useState<string>("");
   const [filter, setFilter] = useState<WorkFilter>("ALL");
   const [search, setSearch] = useState("");
@@ -62,8 +63,38 @@ export function PlanningWorkspace({ work, busyTaskId, onTaskStatus, onSubmitAppr
           <DependencyGuide tasks={scopedTasks} />
         </aside>
       </div>
+
+      <RecentExecutionActivity activity={home.recent_activity} />
     </div>
   );
+}
+
+function RecentExecutionActivity({ activity }: { activity: RecentActivity[] }) {
+  return (
+    <section className="panel activity-panel work-activity-panel">
+      <header className="work-list-heading"><div><span className="eyebrow">Recent activity</span><h2>Execution history in your scope</h2><p>Running and completed Planning automations visible to your role appear here.</p></div></header>
+      {activity.length ? (
+        <div className="activity-table" role="table" aria-label="Recent Planning activity">
+          <div className="activity-row activity-row--head" role="row"><span>Activity</span><span>Started</span><span>Triggered by</span><span>Status</span></div>
+          {activity.map((item) => (
+            <div className="activity-row" role="row" key={item.execution_id}>
+              <span><strong>{item.name}</strong><small>{item.trigger_source.toLowerCase()}</small></span>
+              <span>{formatDateTime(item.started_at)}</span>
+              <span>{item.initiated_by}</span>
+              <span><StatusBadge status={item.status} /></span>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="work-empty work-empty--compact"><span><Icon name="activity" /></span><h2>No recent activity</h2><p>Running and completed automations will appear here when work begins.</p></div>
+      )}
+    </section>
+  );
+}
+
+function StatusBadge({ status }: { status: string }) {
+  const normalized = status.toLowerCase();
+  return <span className={`status-badge status-${normalized}`}>{normalized.replaceAll("_", " ")}</span>;
 }
 
 function WorkSummary({ tasks }: { tasks: PlanningTask[] }) {
@@ -123,4 +154,8 @@ function matchesFilter(task: PlanningTask, filter: WorkFilter) {
 
 function formatDate(value: string) {
   return new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short", year: "numeric" }).format(new Date(`${value}T00:00:00`));
+}
+
+function formatDateTime(value: string) {
+  return new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }).format(new Date(value));
 }

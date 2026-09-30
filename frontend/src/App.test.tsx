@@ -123,21 +123,25 @@ describe("App", () => {
     }));
   });
 
-  it("shows the planner's priorities and active cycle", async () => {
+  it("introduces the AI-first Planning experience and previews My Work", async () => {
     render(<App />);
 
-    expect(await screen.findByText("What needs your attention")).toBeTruthy();
-    expect(screen.getByText("Review revenue assumptions")).toBeTruthy();
-    expect(screen.getAllByText("August Forecast").length).toBeGreaterThan(0);
+    expect(await screen.findByRole("heading", { name: /Planning work, made simpler with AI/i })).toBeTruthy();
+    expect(document.querySelector("main.page--home")).toBeTruthy();
+    expect(screen.getByText("Tell the Assistant what you need.")).toBeTruthy();
+    expect(screen.getByText("1 item requires attention")).toBeTruthy();
+    expect(screen.queryByText("Review revenue assumptions")).toBeNull();
   });
 
-  it("starts a ready task and refreshes the homepage", async () => {
+  it("starts a ready task from My Work and refreshes the live work data", async () => {
+    window.location.hash = "#tasks";
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
       if (url === "/api/v1/bootstrap") return response(bootstrap);
       if (url === "/api/v1/home") return response(home);
       if (url === "/api/v1/notifications") return response(notificationInbox);
+      if (url === "/api/v1/planning-tasks") return response({ status: "success", cycles: home.cycles, tasks: home.tasks });
       if (url === "/api/v1/planning-tasks/31/status") return response({ status: "ok" });
       return response({ detail: "Unexpected request" }, 404);
     });
@@ -149,6 +153,32 @@ describe("App", () => {
       "/api/v1/planning-tasks/31/status",
       expect.objectContaining({ method: "PATCH" })
     ));
+  });
+
+  it("carries a Home example request into the existing Assistant composer", async () => {
+    const assistantBootstrap = {
+      ...bootstrap,
+      navigation: [
+        ...bootstrap.navigation,
+        { code: "assistant", label: "EPM Assistant", path: "#assistant", group: "Workspace" }
+      ]
+    } satisfies BootstrapResponse;
+    vi.mocked(fetch).mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/v1/bootstrap") return response(assistantBootstrap);
+      if (url === "/api/v1/home") return response(home);
+      if (url === "/api/v1/notifications") return response(notificationInbox);
+      if (url === "/api/agent/status") return response({ enabled: true, configured: true, provider: "test", model: "test", mode: "langgraph", message: "Ready" });
+      if (url === "/api/agent/conversations") return response({ status: "success", conversations: [] });
+      return response({ detail: "Unexpected request" }, 404);
+    });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Run forecast seeding" }));
+
+    const composer = await screen.findByLabelText("Message the EPM Assistant") as HTMLTextAreaElement;
+    expect(composer.value).toBe("Run forecast seeding");
+    expect(window.location.hash).toBe("#assistant");
   });
 
   it("opens the consolidated My Work workspace", async () => {
@@ -2225,6 +2255,29 @@ describe("App", () => {
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "Welcome back" })).toBeTruthy();
-    expect(screen.getByLabelText("Local platform username")).toBeTruthy();
+    expect(screen.getByLabelText("Username")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Sign in" })).toBeTruthy();
+  });
+
+  it("keeps Oracle authentication optional when platform sign-in is available", async () => {
+    vi.mocked(fetch).mockImplementation(() => response({
+      ...bootstrap,
+      authenticated: false,
+      user: null,
+      identity_authentication: {
+        ...bootstrap.identity_authentication,
+        oracle_credentials_enabled: true
+      }
+    }));
+    render(<App />);
+
+    expect(await screen.findByLabelText("Username")).toBeTruthy();
+    const oracleDetails = screen.getByText("Use Oracle sign-in").closest("details");
+    expect(oracleDetails?.open).toBe(false);
+
+    fireEvent.click(screen.getByText("Use Oracle sign-in"));
+
+    expect(oracleDetails?.open).toBe(true);
+    expect(screen.getByLabelText("Oracle EPM username")).toBeTruthy();
   });
 });
