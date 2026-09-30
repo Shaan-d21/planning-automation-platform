@@ -13,6 +13,7 @@ from app.application.automation_schedule_targets import (
     AutomationScheduleCoordinator,
     PipelineScheduleTargetAdapter,
     RTPRegistrySyncScheduleTargetAdapter,
+    build_schedule_target_adapters,
 )
 from app.application.automation_scheduling import (
     AutomationScheduleApplicationService,
@@ -86,6 +87,20 @@ def _preview() -> PipelineOperationPreview:
             ),
         ),
     )
+
+
+def test_shared_schedule_target_registry_enables_pipeline_and_rtp_sync(
+    tmp_path: Path,
+) -> None:
+    adapters = build_schedule_target_adapters(
+        _settings(tmp_path),
+        catalog=Mock(),
+    )
+
+    assert {adapter.target_type for adapter in adapters} == {
+        AutomationTargetType.ORACLE_PIPELINE,
+        AutomationTargetType.RTP_REGISTRY_SYNC,
+    }
 
 
 def _input(

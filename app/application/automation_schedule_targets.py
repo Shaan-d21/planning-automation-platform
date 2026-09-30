@@ -309,6 +309,23 @@ class RTPRegistrySyncScheduleTargetAdapter:
             self._exporter.delete(snapshot.snapshot_name)
 
 
+def build_schedule_target_adapters(
+    settings: Settings,
+    *,
+    catalog: OperationCatalogService | None = None,
+) -> tuple[AutomationScheduleTargetAdapter, ...]:
+    """Build the complete allowlisted scheduler target registry.
+
+    Both the web process and the durable worker must use this factory. Keeping
+    target registration in one place prevents a schedule from passing web
+    validation but failing later because the worker does not know its target.
+    """
+    return (
+        PipelineScheduleTargetAdapter(settings, catalog=catalog),
+        RTPRegistrySyncScheduleTargetAdapter(settings),
+    )
+
+
 class AutomationScheduleCoordinator:
     """Validate schedule definitions and dispatch their due occurrences."""
 
