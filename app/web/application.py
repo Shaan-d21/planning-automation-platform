@@ -36,8 +36,7 @@ from app.application.automation_schedule_manager import (
 )
 from app.application.automation_schedule_targets import (
     AutomationScheduleCoordinator,
-    PipelineScheduleTargetAdapter,
-    RTPRegistrySyncScheduleTargetAdapter,
+    build_schedule_target_adapters,
 )
 from app.application.automation_scheduling import (
     AutomationScheduleApplicationService,
@@ -231,12 +230,9 @@ def create_app(
     automation_schedule_coordinator = AutomationScheduleCoordinator(
         automation_schedule_service,
         operation_manager,
-        (
-            PipelineScheduleTargetAdapter(
-                resolved_settings,
-                catalog=operation_catalog,
-            ),
-            RTPRegistrySyncScheduleTargetAdapter(resolved_settings),
+        build_schedule_target_adapters(
+            resolved_settings,
+            catalog=operation_catalog,
         ),
         notification_service=create_notification_service(
             resolved_settings.email_notifications,

@@ -450,6 +450,7 @@ The web application includes:
   states
 - Mobile navigation and keyboard-accessible controls
 
+
 To run a configured process:
 
 1. Open **Planning Processes** and select **Prepare run**.
