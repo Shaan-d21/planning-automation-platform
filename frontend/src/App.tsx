@@ -1,7 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 
 import { api, ApiError } from "./api/client";
-import type { AccessControlResponse, BootstrapResponse, EnvironmentHealth, HomeResponse, IdentityMappingCatalogResponse, IdentityProvisioningPreview, IdentitySyncPreview, InitialAdministratorInput, JobActivityDetail, JobsActivityResponse, NotificationsResponse, OperationsResponse, PlanningApprovalsResponse, PlanningCycleAdministrationResponse, PlanningCycleCreateInput, PlanningWorkResponse, PlatformRoleCode, PlatformUserCreateInput, PlatformUserEditInput, SystemSecurityResponse, TaskStatus } from "./api/types";
+import type { AccessControlResponse, BootstrapResponse, HomeResponse, IdentityMappingCatalogResponse, IdentityProvisioningPreview, IdentitySyncPreview, InitialAdministratorInput, JobActivityDetail, JobsActivityResponse, NotificationsResponse, OperationsResponse, PlanningApprovalsResponse, PlanningCycleAdministrationResponse, PlanningCycleCreateInput, PlanningWorkResponse, PlatformRoleCode, PlatformUserCreateInput, PlatformUserEditInput, SystemSecurityResponse, TaskStatus } from "./api/types";
 import { AppShell } from "./components/AppShell";
 import { Dashboard } from "./components/Dashboard";
 import { FullPageLoading, ToastMessage, UnavailableState, WorkspaceLoading } from "./components/Feedback";
@@ -52,8 +52,7 @@ export function App() {
   const [busyExecutionId, setBusyExecutionId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [health, setHealth] = useState<EnvironmentHealth | null>(null);
-  const [healthBusy, setHealthBusy] = useState(false);
+  const [assistantPrefill, setAssistantPrefill] = useState("");
   const [scheduleRefreshKey, setScheduleRefreshKey] = useState(0);
 
   const load = useCallback(async () => {
@@ -573,39 +572,9 @@ export function App() {
     }
   }
 
-  async function checkHealth() {
-    setHealthBusy(true);
-    let environmentApplication = bootstrap?.environment?.application_name;
-    let deploymentMode = bootstrap?.environment?.deployment_mode;
-    try {
-      const configuration = await api.environmentConfiguration().catch(() => null);
-      environmentApplication = configuration?.selected_application
-        ?? configuration?.active_application
-        ?? environmentApplication;
-      deploymentMode = configuration?.deployment_mode ?? deploymentMode;
-      const result = await api.health();
-      setHealth({
-        ...result,
-        application: result.application ?? environmentApplication,
-        deployment_mode: result.deployment_mode ?? deploymentMode
-      });
-    } catch (reason) {
-      setHealth({
-        status: "unavailable",
-        application: environmentApplication,
-        active_application: bootstrap?.environment?.application_name,
-        restart_required: Boolean(
-          environmentApplication
-          && bootstrap?.environment?.application_name
-          && environmentApplication.toLowerCase()
-            !== bootstrap.environment.application_name.toLowerCase()
-        ),
-        deployment_mode: deploymentMode,
-        details: message(reason)
-      });
-    } finally {
-      setHealthBusy(false);
-    }
+  function startAssistant(prompt = "") {
+    setAssistantPrefill(prompt);
+    window.location.hash = "#assistant";
   }
 
   if (loading) return <FullPageLoading />;
@@ -621,7 +590,7 @@ export function App() {
       {error && <ToastMessage tone="error" message={error} onDismiss={() => setError(null)} />}
       {activeView === "tasks" ? (
         work
-          ? <PlanningWorkspace work={work} busyTaskId={busyTaskId} onTaskStatus={updateTask} onSubmitApproval={submitForApproval} />
+          ? <PlanningWorkspace work={work} home={home} busyTaskId={busyTaskId} onTaskStatus={updateTask} onSubmitApproval={submitForApproval} />
           : <WorkspaceLoading />
       ) : activeView === "cycles" ? (
         cycleAdministration
@@ -665,17 +634,12 @@ export function App() {
       ) : activeView === "reports" ? (
         <ReportGenerationRunner csrfToken={bootstrap.csrf_token} onBack={() => { window.location.hash = "#home"; }} />
       ) : activeView === "assistant" ? (
-        <EpmAssistantWorkspace csrfToken={bootstrap.csrf_token} />
+        <EpmAssistantWorkspace csrfToken={bootstrap.csrf_token} initialPrompt={assistantPrefill} onInitialPromptConsumed={() => setAssistantPrefill("")} />
       ) : (
         <Dashboard
           bootstrap={bootstrap}
           home={home}
-          busyTaskId={busyTaskId}
-          health={health}
-          healthBusy={healthBusy}
-          onCheckHealth={checkHealth}
-          onTaskStatus={updateTask}
-          onSubmitApproval={submitForApproval}
+          onStartAssistant={startAssistant}
         />
       )}
     </AppShell>

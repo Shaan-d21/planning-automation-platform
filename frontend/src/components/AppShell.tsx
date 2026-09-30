@@ -88,7 +88,7 @@ export function AppShell({
             <button className="signout-button" onClick={onLogout} disabled={busy}><Icon name="signout" /> Sign out</button>
           </div>
         </header>
-        <main className="page" id={activeView}>{children}</main>
+        <main className={`page${activeView === "home" ? " page--home" : ""}`} id={activeView}>{children}</main>
       </div>
     </div>
   );

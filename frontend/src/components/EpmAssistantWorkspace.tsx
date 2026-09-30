@@ -44,7 +44,7 @@ const suggestedPrompts = [
 ] as const;
 const AGENT_DATA_REVIEW_HANDOFF_KEY = "bisp-epm-agent-data-review-handoff";
 
-export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
+export function EpmAssistantWorkspace({ csrfToken, initialPrompt = "", onInitialPromptConsumed }: { csrfToken: string; initialPrompt?: string; onInitialPromptConsumed?: () => void }) {
   const [status, setStatus] = useState<AgentStatusResponse | null>(null);
   const [conversations, setConversations] = useState<AgentConversation[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -92,6 +92,14 @@ export function EpmAssistantWorkspace({ csrfToken }: { csrfToken: string }) {
   }, []);
 
   useEffect(() => () => sendRequest.current?.abort(), []);
+
+  useEffect(() => {
+    const prepared = initialPrompt.trim();
+    if (!prepared) return;
+    setContent(prepared);
+    window.requestAnimationFrame(() => composer.current?.focus());
+    onInitialPromptConsumed?.();
+  }, [initialPrompt, onInitialPromptConsumed]);
 
   useEffect(() => {
     const viewport = messageViewport.current;
