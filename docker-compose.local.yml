@@ -1,0 +1,4 @@
+services:
+  web:
+    environment:
+      WEB_SECURE_COOKIES: "false"

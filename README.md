@@ -59,6 +59,14 @@ live process catalog, PostgreSQL execution history, configured environment, and
 generated report artifacts through application use cases shared with other
 interfaces.
 
+Platform security administration is separated from Oracle EPM operations. A
+dedicated System Administrator role can review retained login activity, see
+concurrent sessions and IP addresses, delegate the security role to another
+existing platform user, and revoke a browser session. Session identifiers are
+stored only as SHA-256 hashes in PostgreSQL. The first existing Service
+Administrator receives the initial System Administrator role during upgrade;
+the two roles can then be assigned to different people.
+
 An optional provider-neutral notification layer sends success and failure
 emails. SMTP is implemented for development; a corporate Microsoft Graph
 provider can be added later without changing the Oracle workflows.
@@ -70,9 +78,18 @@ Conversations, messages, tool activity, action drafts, input snapshots, and
 human approval decisions use the existing PostgreSQL application tables;
 LangGraph checkpoints use separate PostgreSQL-managed checkpoint tables.
 
+Before tool selection, the assistant builds a provider-independent business-task
+context for Month Close, Metadata Load, Data Load, Forecast Seeding, Variance
+Reporting, Business Rules, Data Integrations, Pipelines, job status, and
+cancellation. It retains collected values across short follow-up answers and
+corrections, resolves common month expressions, and asks only the first missing
+question. This context is checkpoint-safe and contains no Oracle credentials.
+Live Oracle discovery and the existing governed input and approval flows still
+validate every artifact and executable value before submission.
+
 Agent releases also have a versioned deterministic evaluation gate covering
-least-privilege routing, governed preparation, safety boundaries, and
-conservative Oracle artifact matching. Run it with
+least-privilege routing, conversational task continuity, governed preparation,
+safety boundaries, and conservative Oracle artifact matching. Run it with
 `python -m app.agent.evaluation --fail-on-threshold`; see
 [Agent Evaluation and Release Gate](docs/AGENT_EVALUATION.md) for the suite,
 threshold policy, CI evidence, and separate live-provider UAT requirements.
@@ -169,6 +186,8 @@ PLANNING_PROCESS_CATALOG_FILE=config/planning_processes.json
 REPORT_OUTPUT_DIR=reports
 REPORT_CATALOG_FILE=config/reports.json
 WEB_SESSION_SECRET=replace-with-a-long-random-secret
+# Enable only when the origin is reachable exclusively through Cloudflare.
+TRUST_CLOUDFLARE_HEADERS=false
 WEB_SECURE_COOKIES=false
 AGENT_PROVIDER=gemini
 AGENT_ORCHESTRATOR=langgraph
@@ -430,6 +449,7 @@ The web application includes:
 - Consistent badges, progress, dialogs, toasts, loading states, and empty
   states
 - Mobile navigation and keyboard-accessible controls
+
 
 To run a configured process:
 
@@ -1797,7 +1817,7 @@ process, or error-handling logic.
 ## Excel Pipeline Runner
 
 The first governed Excel interface is available under
-`outputs/excel_pipeline_runner`. It invokes an existing Oracle Pipeline through
+`integrations/excel_pipeline_runner`. It invokes an existing Oracle Pipeline through
 the FastAPI backend; it does not connect to Oracle or store Oracle credentials
 inside the workbook.
 
@@ -1812,6 +1832,6 @@ The integration provides:
 
 Apply migration `0003_external_api_tokens`, create the token with
 `python -m app.cli.api_tokens`, and follow the complete beginner instructions
-in `outputs/excel_pipeline_runner/README.md`. The workbook contains no
+in `integrations/excel_pipeline_runner/README.md`. The workbook contains no
 automatic `Workbook_Open` execution and this version does not upload local
 files from Excel.

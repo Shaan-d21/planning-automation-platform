@@ -131,6 +131,35 @@ def test_groq_tool_schema_uses_official_function_shape() -> None:
     }
 
 
+def test_groq_can_require_one_structured_interpretation_tool() -> None:
+    completions = _Completions((_response(content="Recorded."),))
+    provider = GroqAgentProvider(
+        api_key="test-key",
+        model="openai/gpt-oss-120b",
+        client=SimpleNamespace(chat=SimpleNamespace(completions=completions)),
+    )
+    tool = AgentToolDefinition(
+        name="record_task_interpretation",
+        description="Record structured task semantics.",
+        parameters_schema={"type": "object", "properties": {}},
+    )
+
+    provider.generate(
+        messages=(),
+        system_instruction="Return structured semantics only.",
+        tools=(tool,),
+        provider_exchange=(),
+        required_tool_name="record_task_interpretation",
+    )
+
+    call = completions.calls[0]
+    assert call["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "record_task_interpretation"},
+    }
+    assert call["parallel_tool_calls"] is False
+
+
 def test_groq_compacts_old_history_and_caps_completion() -> None:
     completions = _Completions((_response(content="Ready."),))
     provider = GroqAgentProvider(

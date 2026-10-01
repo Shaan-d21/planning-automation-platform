@@ -52,6 +52,7 @@ class FileService:
         *,
         replace_existing: bool = True,
         target_file_name: str | None = None,
+        upload_directory: str | None = None,
     ) -> FileUploadResult:
         """Upload a supported file, optionally replacing an existing file.
 
@@ -62,6 +63,7 @@ class FileService:
         file_name = self._validate_target_file_name(
             target_file_name or path.name
         )
+        directory = self._validate_upload_directory(upload_directory)
         encoded_file_name = quote(file_name, safe="")
         endpoint = (
             f"interop/rest/{self._UPLOAD_API_VERSION}/"
@@ -73,7 +75,12 @@ class FileService:
             file_name,
             path.stat().st_size,
         )
-        result = self._upload_once(path, endpoint, file_name)
+        result = self._upload_once(
+            path,
+            endpoint,
+            file_name,
+            upload_directory=directory,
+        )
         if (
             not result.is_successful
             and replace_existing
@@ -84,11 +91,15 @@ class FileService:
                 "be replaced: '%s'.",
                 file_name,
             )
-            self._delete_from_inbox(file_name)
+            repository_name = (
+                f"{directory}/{file_name}" if directory else file_name
+            )
+            self._delete_from_inbox(repository_name)
             retried_result = self._upload_once(
                 path,
                 endpoint,
                 file_name,
+                upload_directory=directory,
             )
             result = FileUploadResult(
                 file_name=retried_result.file_name,
@@ -183,15 +194,42 @@ class FileService:
             )
         return normalized
 
+    @staticmethod
+    def _validate_upload_directory(value: str | None) -> str | None:
+        """Return a safe Data Integration Inbox directory."""
+        if value is None or not str(value).strip():
+            return None
+        normalized = str(value).strip().replace("\\", "/").strip("/")
+        parts = normalized.split("/")
+        if (
+            not parts
+            or parts[0].casefold() != "inbox"
+            or any(part in {"", ".", ".."} for part in parts)
+        ):
+            raise FileUploadError(
+                "Data Integration upload directory must be 'inbox' or a "
+                "safe folder below it."
+            )
+        return "/".join(parts)
+
     def _upload_once(
         self,
         path: Path,
         endpoint: str,
         target_file_name: str,
+        *,
+        upload_directory: str | None = None,
     ) -> FileUploadResult:
         try:
             with path.open("rb") as content:
-                response = self._client.post_binary(endpoint, content)
+                if upload_directory:
+                    response = self._client.post_binary(
+                        endpoint,
+                        content,
+                        params={"extDirPath": upload_directory},
+                    )
+                else:
+                    response = self._client.post_binary(endpoint, content)
         except OSError as exc:
             raise FileUploadError(
                 f"Unable to read upload file '{path}': {exc}"

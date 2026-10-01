@@ -1,7 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 
 import { api, ApiError } from "./api/client";
-import type { AccessControlResponse, BootstrapResponse, EnvironmentHealth, HomeResponse, IdentityMappingCatalogResponse, IdentityProvisioningPreview, IdentitySyncPreview, InitialAdministratorInput, JobActivityDetail, JobsActivityResponse, NotificationsResponse, OperationsResponse, PlanningApprovalsResponse, PlanningCycleAdministrationResponse, PlanningCycleCreateInput, PlanningWorkResponse, PlatformRoleCode, PlatformUserCreateInput, PlatformUserEditInput, TaskStatus } from "./api/types";
+import type { AccessControlResponse, BootstrapResponse, HomeResponse, IdentityMappingCatalogResponse, IdentityProvisioningPreview, IdentitySyncPreview, InitialAdministratorInput, JobActivityDetail, JobsActivityResponse, NotificationsResponse, OperationsResponse, PlanningApprovalsResponse, PlanningCycleAdministrationResponse, PlanningCycleCreateInput, PlanningWorkResponse, PlatformRoleCode, PlatformUserCreateInput, PlatformUserEditInput, SystemSecurityResponse, TaskStatus } from "./api/types";
 import { AppShell } from "./components/AppShell";
 import { Dashboard } from "./components/Dashboard";
 import { FullPageLoading, ToastMessage, UnavailableState, WorkspaceLoading } from "./components/Feedback";
@@ -16,13 +16,14 @@ import { OperationsWorkspace } from "./components/OperationsWorkspace";
 import { DataReviewWorkspace } from "./components/DataReviewWorkspace";
 import { ReportGenerationRunner } from "./components/ReportGenerationRunner";
 import { EpmAssistantWorkspace } from "./components/EpmAssistantWorkspace";
+import { SystemAdministrationWorkspace } from "./components/SystemAdministrationWorkspace";
 
 const SchedulingWorkspace = lazy(async () => {
   const module = await import("./components/SchedulingWorkspace");
   return { default: module.SchedulingWorkspace };
 });
 
-type AppView = "home" | "tasks" | "cycles" | "approvals" | "notifications" | "access" | "jobs" | "operations" | "schedules" | "data-review" | "reports" | "assistant";
+type AppView = "home" | "tasks" | "cycles" | "approvals" | "notifications" | "access" | "system-administration" | "jobs" | "operations" | "schedules" | "data-review" | "reports" | "assistant";
 
 export function App() {
   const [bootstrap, setBootstrap] = useState<BootstrapResponse | null>(null);
@@ -32,6 +33,9 @@ export function App() {
   const [approvals, setApprovals] = useState<PlanningApprovalsResponse | null>(null);
   const [notifications, setNotifications] = useState<NotificationsResponse | null>(null);
   const [accessControl, setAccessControl] = useState<AccessControlResponse | null>(null);
+  const [systemSecurity, setSystemSecurity] = useState<SystemSecurityResponse | null>(null);
+  const [busySessionKey, setBusySessionKey] = useState<string | null>(null);
+  const [busySystemUserId, setBusySystemUserId] = useState<number | null>(null);
   const [jobsActivity, setJobsActivity] = useState<JobsActivityResponse | null>(null);
   const [operations, setOperations] = useState<OperationsResponse | null>(null);
   const [jobDetail, setJobDetail] = useState<JobActivityDetail | null>(null);
@@ -48,8 +52,7 @@ export function App() {
   const [busyExecutionId, setBusyExecutionId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [health, setHealth] = useState<EnvironmentHealth | null>(null);
-  const [healthBusy, setHealthBusy] = useState(false);
+  const [assistantPrefill, setAssistantPrefill] = useState("");
   const [scheduleRefreshKey, setScheduleRefreshKey] = useState(0);
 
   const load = useCallback(async () => {
@@ -67,6 +70,7 @@ export function App() {
       setApprovals(null);
       setNotifications(null);
       setAccessControl(null);
+      setSystemSecurity(null);
       setIdentityMappings(null);
       setIdentitySyncPreview(null);
       setIdentityProvisioningPreview(null);
@@ -124,6 +128,11 @@ export function App() {
       }
     }).catch((reason: unknown) => setError(message(reason)));
   }, [activeView, bootstrap, accessControl]);
+
+  useEffect(() => {
+    if (activeView !== "system-administration" || !bootstrap?.authenticated || systemSecurity) return;
+    api.systemSecurity().then(setSystemSecurity).catch((reason: unknown) => setError(message(reason)));
+  }, [activeView, bootstrap, systemSecurity]);
 
   useEffect(() => {
     if (activeView !== "jobs" || !bootstrap?.authenticated || jobsActivity) return;
@@ -237,6 +246,7 @@ export function App() {
       else if (activeView === "cycles") setCycleAdministration(await api.cycleAdministration());
       else if (activeView === "approvals") setApprovals(await api.approvals());
       else if (activeView === "access") setAccessControl(await api.accessControl());
+      else if (activeView === "system-administration") setSystemSecurity(await api.systemSecurity());
       else if (activeView === "jobs") setJobsActivity(await api.jobsActivity());
       else if (activeView === "operations") setOperations(await api.operations());
       else if (activeView === "schedules") setScheduleRefreshKey((current) => current + 1);
@@ -393,6 +403,38 @@ export function App() {
     }
   }
 
+  async function revokePlatformSession(sessionKey: string) {
+    if (!bootstrap) return;
+    setBusySessionKey(sessionKey);
+    setError(null);
+    try {
+      const result = await api.revokeSession(sessionKey, bootstrap.csrf_token);
+      setSystemSecurity(await api.systemSecurity());
+      setNotice(result.message);
+      window.setTimeout(() => setNotice(null), 3500);
+    } catch (reason) {
+      setError(message(reason));
+    } finally {
+      setBusySessionKey(null);
+    }
+  }
+
+  async function changeSystemAdministrator(userId: number, enabled: boolean) {
+    if (!bootstrap) return;
+    setBusySystemUserId(userId);
+    setError(null);
+    try {
+      const result = await api.setSystemAdministrator(userId, enabled, bootstrap.csrf_token);
+      setSystemSecurity(await api.systemSecurity());
+      setNotice(result.message);
+      window.setTimeout(() => setNotice(null), 3500);
+    } catch (reason) {
+      setError(message(reason));
+    } finally {
+      setBusySystemUserId(null);
+    }
+  }
+
   async function previewOracleIdentitySync() {
     if (!bootstrap) return;
     setIdentitySyncBusy(true);
@@ -530,39 +572,9 @@ export function App() {
     }
   }
 
-  async function checkHealth() {
-    setHealthBusy(true);
-    let environmentApplication = bootstrap?.environment?.application_name;
-    let deploymentMode = bootstrap?.environment?.deployment_mode;
-    try {
-      const configuration = await api.environmentConfiguration().catch(() => null);
-      environmentApplication = configuration?.selected_application
-        ?? configuration?.active_application
-        ?? environmentApplication;
-      deploymentMode = configuration?.deployment_mode ?? deploymentMode;
-      const result = await api.health();
-      setHealth({
-        ...result,
-        application: result.application ?? environmentApplication,
-        deployment_mode: result.deployment_mode ?? deploymentMode
-      });
-    } catch (reason) {
-      setHealth({
-        status: "unavailable",
-        application: environmentApplication,
-        active_application: bootstrap?.environment?.application_name,
-        restart_required: Boolean(
-          environmentApplication
-          && bootstrap?.environment?.application_name
-          && environmentApplication.toLowerCase()
-            !== bootstrap.environment.application_name.toLowerCase()
-        ),
-        deployment_mode: deploymentMode,
-        details: message(reason)
-      });
-    } finally {
-      setHealthBusy(false);
-    }
+  function startAssistant(prompt = "") {
+    setAssistantPrefill(prompt);
+    window.location.hash = "#assistant";
   }
 
   if (loading) return <FullPageLoading />;
@@ -578,7 +590,7 @@ export function App() {
       {error && <ToastMessage tone="error" message={error} onDismiss={() => setError(null)} />}
       {activeView === "tasks" ? (
         work
-          ? <PlanningWorkspace work={work} busyTaskId={busyTaskId} onTaskStatus={updateTask} onSubmitApproval={submitForApproval} />
+          ? <PlanningWorkspace work={work} home={home} busyTaskId={busyTaskId} onTaskStatus={updateTask} onSubmitApproval={submitForApproval} />
           : <WorkspaceLoading />
       ) : activeView === "cycles" ? (
         cycleAdministration
@@ -596,6 +608,10 @@ export function App() {
         accessControl
           ? <AccessControlWorkspace data={accessControl} busyUserId={busyUserId} identitySyncBusy={identitySyncBusy} identitySyncPreview={identitySyncPreview} identityMappings={identityMappings} identityProvisioningPreview={identityProvisioningPreview} onCreate={createPlatformUser} onUpdate={updatePlatformUser} onResetPassword={resetPlatformPassword} onPreviewIdentitySync={previewOracleIdentitySync} onApplyIdentitySync={applyOracleIdentitySync} onCancelIdentitySync={() => setIdentitySyncPreview(null)} onSetIdentityMapping={setOracleIdentityMapping} onPreviewProvisioning={previewOracleProvisioning} onApplyProvisioning={applyOracleProvisioning} onCancelProvisioning={() => setIdentityProvisioningPreview(null)} />
           : <WorkspaceLoading label="Access Control" message="Preparing users and role assignments…" />
+      ) : activeView === "system-administration" ? (
+        systemSecurity
+          ? <SystemAdministrationWorkspace data={systemSecurity} busySessionKey={busySessionKey} onRevoke={revokePlatformSession} busyUserId={busySystemUserId} onAdministratorChange={changeSystemAdministrator} />
+          : <WorkspaceLoading label="System Administration" message="Preparing login activity and session controls…" />
       ) : activeView === "jobs" ? (
         jobsActivity
           ? <JobsActivityWorkspace data={jobsActivity} detail={jobDetail} busyExecutionId={busyExecutionId} csrfToken={bootstrap.csrf_token} allowRecovery={Boolean(bootstrap.user?.permissions.includes("operation.execute"))} onInspect={inspectJob} onRecoveryStarted={openRecoveredExecution} onCloseDetail={() => setJobDetail(null)} />
@@ -606,7 +622,6 @@ export function App() {
               data={operations}
               csrfToken={bootstrap.csrf_token}
               canManageCatalog={bootstrap.user?.permissions.includes("catalog.manage") ?? false}
-              currentUsername={bootstrap.user?.username ?? ""}
               canManageUsers={bootstrap.user?.permissions.includes("user.manage") ?? false}
             />
           : <WorkspaceLoading label="Operations" message="Preparing your available Oracle EPM services..." />
@@ -619,17 +634,11 @@ export function App() {
       ) : activeView === "reports" ? (
         <ReportGenerationRunner csrfToken={bootstrap.csrf_token} onBack={() => { window.location.hash = "#home"; }} />
       ) : activeView === "assistant" ? (
-        <EpmAssistantWorkspace csrfToken={bootstrap.csrf_token} />
+        <EpmAssistantWorkspace csrfToken={bootstrap.csrf_token} initialPrompt={assistantPrefill} onInitialPromptConsumed={() => setAssistantPrefill("")} />
       ) : (
         <Dashboard
           bootstrap={bootstrap}
-          home={home}
-          busyTaskId={busyTaskId}
-          health={health}
-          healthBusy={healthBusy}
-          onCheckHealth={checkHealth}
-          onTaskStatus={updateTask}
-          onSubmitApproval={submitForApproval}
+          onStartAssistant={startAssistant}
         />
       )}
     </AppShell>
@@ -648,6 +657,7 @@ function viewFromHash(): AppView {
   if (hash === "#approvals") return "approvals";
   if (hash === "#notifications") return "notifications";
   if (hash === "#access") return "access";
+  if (hash === "#system-administration") return "system-administration";
   if (hash === "#jobs") return "jobs";
   if (hash === "#operations") return "operations";
   if (hash === "#schedules") return "schedules";

@@ -485,6 +485,11 @@ class IdentityDirectoryService:
         """Map one live Oracle entitlement to one platform role explicitly."""
         provider = self.require_provider(provider_code)
         normalized_role = RoleCode(role)
+        if normalized_role == RoleCode.SYSTEM_ADMINISTRATOR:
+            raise IdentitySynchronizationError(
+                "System Administrator cannot be granted from an Oracle role "
+                "mapping. Use the System Administration workspace."
+            )
         now = datetime.now(UTC)
         with self._database.begin() as connection:
             if connection.dialect.name == "postgresql":

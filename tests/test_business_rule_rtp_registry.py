@@ -12,6 +12,7 @@ import pytest
 from app.agent.capabilities import AgentCapabilityGateway
 from app.agent.checkpoints import AgentCheckpointStore
 from app.agent.graph import AgentGraphOrchestrator
+from app.agent.task_state import AgentTaskInterpreter
 from app.agent.models import (
     AgentMessage,
     AgentMessageRole,
@@ -30,6 +31,12 @@ RULE_XML = b"""<?xml version="1.0" encoding="UTF-8"?>
        dimension="Year" required="true" order="1" />
   <runtimePrompt name="Scenario" type="MEMBER" dimension="Scenario"
        default="Forecast" required="true" order="2" />
+</businessRule>
+"""
+
+SINGLE_RTP_XML = b"""<?xml version="1.0" encoding="UTF-8"?>
+<businessRule name="Calculate Revenue" cube="Plan1">
+  <rtp name="Amount" label="Amount" type="NUMERIC" required="true" />
 </businessRule>
 """
 
@@ -417,3 +424,113 @@ def test_agent_prefills_only_explicit_registered_rtp_values() -> None:
     )
 
     assert values == {"Year": "FY27", "Scenario": "Forecast"}
+
+
+@pytest.mark.parametrize(
+    ("xml", "expected_prefill"),
+    (
+        (SINGLE_RTP_XML, {"Amount": "10"}),
+        (RULE_XML, None),
+    ),
+)
+def test_rule_selection_prefills_only_unambiguous_unnamed_rtp(
+    tmp_path: Path,
+    xml: bytes,
+    expected_prefill: dict[str, str] | None,
+) -> None:
+    settings = _settings(tmp_path)
+    registry = BusinessRuleRTPRegistryService(settings)
+    registry.import_package("rules.xml", xml)
+    gateway = AgentCapabilityGateway(
+        settings,
+        control_center=object(),
+        data_review=object(),
+        operation_catalog=_RuleCatalog(),
+        business_rule_rtps=registry,
+    )
+    graph = AgentGraphOrchestrator(
+        provider_factory=_RuleProvider,
+        gateway=gateway,
+        checkpointer=AgentCheckpointStore(settings.database_target),
+        system_instruction="Read only.",
+        max_tool_rounds=2,
+        environment_key="example|Vision",
+    )
+    conversation_id = "unnamed-rtp-selection"
+    message = AgentMessage(
+        message_id=1,
+        conversation_id=conversation_id,
+        role=AgentMessageRole.USER,
+        content="run revenue rule with rtp 10",
+        created_at=datetime.now(UTC),
+    )
+    initial = graph.invoke(
+        conversation_id=conversation_id,
+        user_id=7,
+        messages=(message,),
+        task_context=AgentTaskInterpreter.interpret((message,)).to_payload(),
+    )
+    assert initial.clarification_request is not None
+    selected = graph.resume_clarification(
+        conversation_id=conversation_id,
+        user_id=7,
+        request_id=initial.clarification_request.request_id,
+        value="Calculate Revenue",
+    )
+    assert selected.input_request is not None
+    if expected_prefill is None:
+        assert selected.input_request.context["prefill"] == {
+            "runtime_prompt_mode": "Provide runtime prompt values",
+        }
+        assert "could not safely identify" in selected.input_request.description
+    else:
+        assert selected.input_request.context["prefill"] == {
+            "runtime_prompt_mode": "Provide runtime prompt values",
+            "runtime_prompts": expected_prefill,
+        }
+
+
+@pytest.mark.parametrize(
+    ("prompt", "expected"),
+    (
+        ("Run revenue rule with rtp 10", {"Amount": "10"}),
+        ("Run revenue rule with runtime prompt value 10", {"Amount": "10"}),
+        ("Run revenue rule with Amount 10", {"Amount": "10"}),
+        ("Run revenue rule with Amount=10", {"Amount": "10"}),
+    ),
+)
+def test_single_registered_rtp_accepts_named_or_unnamed_prompt_value(
+    prompt: str,
+    expected: dict[str, str],
+) -> None:
+    definition = {
+        "rule_name": "Revenue Rule",
+        "prompts": [{"name": "Amount", "label": "Amount", "hidden": False}],
+    }
+    assert AgentGraphOrchestrator._business_rule_rtp_prefill(
+        prompt, definition
+    ) == expected
+
+
+def test_unnamed_rtp_is_not_guessed_when_rule_has_multiple_prompts() -> None:
+    definition = {
+        "prompts": [
+            {"name": "Amount", "hidden": False},
+            {"name": "Scenario", "hidden": False},
+        ]
+    }
+    assert AgentGraphOrchestrator._business_rule_rtp_prefill(
+        "Run revenue rule with rtp 10", definition
+    ) == {}
+
+
+def test_unregistered_rule_prefills_only_explicit_rtp_name_value_pairs() -> None:
+    assert AgentGraphOrchestrator._business_rule_rtp_prefill(
+        "Run revenue rule with RTP Amount=10 and Scenario=Actual", {}
+    ) == {"Amount": "10", "Scenario": "Actual"}
+    assert AgentGraphOrchestrator._business_rule_rtp_prefill(
+        "Run revenue rule with rtp 10", {}
+    ) == {}
+    assert AgentGraphOrchestrator._unnamed_business_rule_rtp_value(
+        "Run revenue rule with RTP Amount=10"
+    ) is None

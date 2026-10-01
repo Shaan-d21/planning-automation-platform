@@ -119,6 +119,33 @@ def test_manager_persists_standalone_flow_before_worker_execution(
     manager.shutdown()
 
 
+def test_manager_cancels_a_queued_standalone_flow_before_worker_claim(
+    tmp_path: Path,
+) -> None:
+    manager = OperationExecutionManager(_settings(tmp_path))
+    execution = manager.submit_flow(_flow())
+
+    stopped = manager.request_flow_stop(
+        execution.execution_id,
+        requested_by="planner",
+    )
+
+    assert stopped.status is OperationExecutionStatus.CANCELLED
+    assert stopped.cancellation_requested_by == "planner"
+    retained = manager.get_workflow(execution.execution_id)
+    assert retained is not None
+    assert retained.status is WorkflowStatus.CANCELLED
+    assert all(
+        step.status is WorkflowStepStatus.SKIPPED for step in retained.steps
+    )
+    with pytest.raises(OperationError, match="already cancelled"):
+        manager.request_flow_stop(
+            execution.execution_id,
+            requested_by="planner",
+        )
+    manager.shutdown()
+
+
 def test_standalone_flow_stops_after_first_failed_operation(
     tmp_path: Path,
 ) -> None:
@@ -186,6 +213,51 @@ def test_standalone_flow_stops_after_first_failed_operation(
     assert retained.steps[2].details["artifact_name"] == "Should Not Run"
     assert retained.steps[2].details["reason"] == (
         "A previous flow step failed."
+    )
+
+
+def test_standalone_flow_safe_stop_finishes_current_step_and_skips_later_steps(
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+    stop = False
+
+    class Executor:
+        def execute(self, operation_input, *, execution_id, log_file, actor=None):
+            nonlocal stop
+            name = (
+                operation_input.rule_name
+                if isinstance(operation_input, BusinessRuleOperationInput)
+                else operation_input.data_map_name
+            )
+            calls.append(name)
+            stop = True
+            return WorkflowRun(
+                execution_id=execution_id,
+                workflow_name=name,
+                status=WorkflowStatus.SUCCESS,
+                started_at=datetime.now(UTC),
+                completed_at=datetime.now(UTC),
+            )
+
+    result = StandaloneFlowCommandExecutor(
+        _settings(tmp_path),
+        operation_executor_factory=lambda *_args, **_kwargs: Executor(),
+    ).execute(
+        _flow(),
+        execution_id="flow-cancelled",
+        log_file=tmp_path / "flow.log",
+        stop_requested=lambda: stop,
+    )
+
+    assert calls == ["Calculate Forecast"]
+    assert result.status is WorkflowStatus.CANCELLED
+    assert [step.status for step in result.steps] == [
+        WorkflowStepStatus.SUCCESS,
+        WorkflowStepStatus.SKIPPED,
+    ]
+    assert result.steps[1].details["reason"] == (
+        "Stopped by the user before this step started."
     )
 
 

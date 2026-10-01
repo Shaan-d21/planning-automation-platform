@@ -161,14 +161,22 @@ class DataReviewWorkspaceService:
                     for item in ApplicationService(client).get_plan_types()
                 )
             except APIRequestError as exc:
-                if exc.status_code != 404:
-                    raise
+                compatibility_failure = exc.status_code in {
+                    400,
+                    404,
+                    405,
+                    501,
+                }
                 if client.is_cloud_environment:
-                    raise DataValidationError(
-                        "Oracle did not expose any Planning cubes through "
-                        "Get Plan Types, substitution-variable scopes, or "
-                        "job definitions for this application and user."
-                    ) from exc
+                    if exc.status_code == 404:
+                        raise DataValidationError(
+                            "Oracle did not expose any Planning cubes through "
+                            "Get Plan Types, substitution-variable scopes, or "
+                            "job definitions for this application and user."
+                        ) from exc
+                    raise
+                if not compatibility_failure:
+                    raise
                 self._logger.warning(
                     "Oracle Get Plan Types is unavailable; using cubes "
                     "from registered Data Review definitions."
@@ -181,6 +189,13 @@ class DataReviewWorkspaceService:
                     "configured application and user."
                 )
             return cubes
+        if cubes:
+            # Saved views are not yet environment-scoped. Once live on-prem
+            # discovery succeeds, do not mix cube names saved for a previous
+            # Oracle application into the current environment's picker.
+            return tuple(
+                sorted(cubes, key=lambda item: item.name.casefold())
+            )
         configured = tuple(
             DataReviewCube(
                 name=name,
@@ -196,18 +211,14 @@ class DataReviewWorkspaceService:
                 key=str.casefold,
             )
         )
-        combined = {
-            cube.name.casefold(): cube
-            for cube in (*configured, *cubes)
-        }
-        if not combined:
+        if not configured:
             raise DataValidationError(
                 "Oracle cube discovery is unavailable in this environment "
                 "and no registered Data Review definitions were found. "
                 "Register a data-slice report definition first."
             )
         return tuple(
-            sorted(combined.values(), key=lambda item: item.name.casefold())
+            sorted(configured, key=lambda item: item.name.casefold())
         )
 
     def list_dimensions(self, cube: str) -> tuple[DimensionInfo, ...]:
@@ -647,7 +658,20 @@ class DataReviewWorkspaceService:
         try:
             plan_types = application.get_plan_types()
         except APIRequestError as exc:
-            if not allow_unlisted or exc.status_code != 404:
+            compatibility_failure = exc.status_code in {
+                400,
+                404,
+                405,
+                501,
+            }
+            if (
+                not allow_unlisted
+                or not compatibility_failure
+                or (
+                    client.is_cloud_environment
+                    and exc.status_code != 404
+                )
+            ):
                 raise
             plan_types = ()
         plan_type = next(

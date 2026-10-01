@@ -46,6 +46,18 @@ def test_execution_diagnostics_exposes_evidence_without_preparation() -> None:
     assert "prepare_operation_action" not in decision.tool_names
 
 
+def test_short_why_followup_requires_execution_context() -> None:
+    without_run = AgentIntentRouter.route("why?", ALL_TOOLS)
+    with_run = AgentIntentRouter.route(
+        "why?", ALL_TOOLS, has_execution_context=True
+    )
+
+    assert without_run.intent is AgentIntent.GENERAL_GUIDANCE
+    assert with_run.intent is AgentIntent.HISTORY_REVIEW
+    assert "get_execution_evidence" in with_run.tool_names
+    assert "prepare_operation_action" not in with_run.tool_names
+
+
 def test_last_run_statistics_do_not_expose_preparation_tools() -> None:
     decision = AgentIntentRouter.route(
         "How many records were processed in the last run?",
@@ -131,6 +143,30 @@ def test_explicit_operation_still_routes_governed_with_review_context() -> None:
     assert "prepare_operation_action" in decision.tool_names
 
 
+def test_calculation_request_overrides_old_data_review_context() -> None:
+    decision = AgentIntentRouter.route(
+        "Calculate Actual product revenue",
+        ALL_TOOLS,
+        has_data_review_context=True,
+        task_intent="RUN_BUSINESS_RULE",
+    )
+
+    assert decision.intent is AgentIntent.OPERATION_PREPARATION
+    assert "prepare_operation_action" in decision.tool_names
+
+
+def test_forecast_seed_request_overrides_old_data_review_context() -> None:
+    decision = AgentIntentRouter.route(
+        "Run forecast seeding",
+        ALL_TOOLS,
+        has_data_review_context=True,
+        task_intent="FORECAST_SEEDING",
+    )
+
+    assert "prepare_operation_action" in decision.tool_names
+    assert "list_operation_artifacts" in decision.tool_names
+
+
 def test_schedule_intent_exposes_only_governed_schedule_preparation() -> None:
     decision = AgentIntentRouter.route(
         "Schedule the monthly forecast Pipeline to run every week.",
@@ -139,4 +175,73 @@ def test_schedule_intent_exposes_only_governed_schedule_preparation() -> None:
 
     assert decision.intent is AgentIntent.SCHEDULING
     assert "prepare_schedule_action" in decision.tool_names
+    assert "prepare_operation_action" not in decision.tool_names
+
+
+def test_short_follow_up_retains_tools_for_active_business_task() -> None:
+    decision = AgentIntentRouter.route(
+        "Account",
+        ALL_TOOLS,
+        task_intent="METADATA_LOAD",
+    )
+
+    assert decision.intent is AgentIntent.OPERATION_PREPARATION
+    assert "prepare_operation_action" in decision.tool_names
+
+
+def test_cube_refresh_confirmation_retains_preparation_tool() -> None:
+    decision = AgentIntentRouter.route(
+        "yes",
+        ALL_TOOLS,
+        task_intent="RUN_CUBE_REFRESH",
+    )
+
+    assert decision.intent is AgentIntent.OPERATION_PREPARATION
+    assert "prepare_operation_action" in decision.tool_names
+
+
+def test_planning_year_setting_overrides_old_data_review_context() -> None:
+    decision = AgentIntentRouter.route(
+        "Change the planning year to FY28",
+        ALL_TOOLS,
+        has_data_review_context=True,
+    )
+
+    assert decision.intent is AgentIntent.OPERATION_PREPARATION
+    assert "prepare_operation_action" in decision.tool_names
+    assert "review_data_slice" not in decision.tool_names
+
+
+def test_cube_refresh_does_not_expose_data_slice_tools() -> None:
+    decision = AgentIntentRouter.route(
+        "Refresh the planning cube",
+        ALL_TOOLS,
+        task_intent="RUN_CUBE_REFRESH",
+    )
+
+    assert decision.intent is AgentIntent.OPERATION_PREPARATION
+    assert "prepare_operation_action" in decision.tool_names
+    assert "review_data_slice" not in decision.tool_names
+
+
+def test_canonical_semantics_expose_operation_tools_without_phrase_rules() -> None:
+    decision = AgentIntentRouter.route(
+        "FY27 ke liye iska hisaab chala do",
+        ALL_TOOLS,
+        canonical_capability="business_rule.run",
+        action_mode="execute",
+    )
+
+    assert decision.intent is AgentIntent.OPERATION_PREPARATION
+    assert "prepare_operation_action" in decision.tool_names
+
+
+def test_canonical_negated_explanation_does_not_expose_preparation_tools() -> None:
+    decision = AgentIntentRouter.route(
+        "Explain it but do not run it",
+        ALL_TOOLS,
+        canonical_capability="business_rule.run",
+        action_mode="explain",
+    )
+
     assert "prepare_operation_action" not in decision.tool_names

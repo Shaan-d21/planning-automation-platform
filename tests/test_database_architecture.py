@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import inspect
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -44,6 +46,7 @@ EXPECTED_TABLES = {
     "platform_role_permissions",
     "platform_user_roles",
     "authentication_events",
+    "platform_sessions",
     "identity_providers",
     "external_identities",
     "external_entitlements",
@@ -79,6 +82,28 @@ EXPECTED_TABLES = {
     "agent_action_drafts",
     "agent_action_decisions",
 }
+
+
+def test_worker_imports_in_a_fresh_process() -> None:
+    """Protect worker startup from package-initialization import cycles."""
+    project_root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "from app.application.execution_worker "
+                "import DurableExecutionWorker; "
+                "from app.application.operations "
+                "import BusinessRuleOperationInput"
+            ),
+        ],
+        cwd=project_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_schema_contains_only_documented_tables() -> None:
@@ -124,7 +149,7 @@ def test_alembic_has_one_production_head() -> None:
     scripts = ScriptDirectory.from_config(
         Config(str(project_root / "alembic.ini"))
     )
-    assert scripts.get_heads() == ["0020_execution_identity"]
+    assert scripts.get_heads() == ["0023_security_administration"]
     assert all(len(revision.revision) <= 32 for revision in scripts.walk_revisions())
 
 

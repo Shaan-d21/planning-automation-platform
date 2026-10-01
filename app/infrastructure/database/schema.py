@@ -178,6 +178,38 @@ authentication_events = Table(
 )
 Index("ix_authentication_events_occurred_at", authentication_events.c.occurred_at.desc())
 
+platform_sessions = Table(
+    "platform_sessions",
+    metadata,
+    Column("session_id_hash", String(64), primary_key=True),
+    Column(
+        "user_id",
+        IDENTITY_BIGINT,
+        ForeignKey("platform_users.user_id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("authentication_method", String(32), nullable=False),
+    Column("login_ip", String(45)),
+    Column("current_ip", String(45)),
+    Column("country_code", String(2)),
+    Column("user_agent", String(512)),
+    Column("cloudflare_ray", String(80)),
+    Column("started_at", UTC_TIMESTAMP, nullable=False),
+    Column("last_seen_at", UTC_TIMESTAMP, nullable=False),
+    Column("expires_at", UTC_TIMESTAMP, nullable=False),
+    Column("ended_at", UTC_TIMESTAMP),
+    Column("revoked_at", UTC_TIMESTAMP),
+    Column(
+        "revoked_by_user_id",
+        IDENTITY_BIGINT,
+        ForeignKey("platform_users.user_id", ondelete="SET NULL"),
+    ),
+    Column("revoke_reason", String(255)),
+)
+Index("ix_platform_sessions_user_id", platform_sessions.c.user_id)
+Index("ix_platform_sessions_last_seen_at", platform_sessions.c.last_seen_at.desc())
+Index("ix_platform_sessions_current_ip", platform_sessions.c.current_ip)
+
 identity_providers = Table(
     "identity_providers",
     metadata,
@@ -665,13 +697,15 @@ execution_queue = Table(
     Column("heartbeat_at", UTC_TIMESTAMP),
     Column("completed_at", UTC_TIMESTAMP),
     Column("error_message", Text),
+    Column("cancellation_requested_at", UTC_TIMESTAMP),
+    Column("cancellation_requested_by", String(80)),
     CheckConstraint(
         "job_type IN ('OPERATION', 'PROCESS', 'STANDALONE_FLOW')",
         name="job_type",
     ),
     CheckConstraint(
         "status IN ('QUEUED', 'RUNNING', 'SUCCESS', 'FAILED', "
-        "'RECOVERY_REQUIRED')",
+        "'RECOVERY_REQUIRED', 'CANCELLED')",
         name="status",
     ),
     CheckConstraint("attempt_count >= 0", name="attempt_nonnegative"),
@@ -1321,6 +1355,9 @@ agent_action_decisions = Table(
     Column("failure_summary", Text),
     Column("decided_at", UTC_TIMESTAMP, nullable=False),
     Column("finalized_at", UTC_TIMESTAMP),
+    Column("completion_status", String(30)),
+    Column("completion_message_id", IDENTITY_BIGINT),
+    Column("completion_notified_at", UTC_TIMESTAMP),
     CheckConstraint(
         "decision IN ('APPROVE', 'REJECT')",
         name="decision",
@@ -1329,6 +1366,11 @@ agent_action_decisions = Table(
         "outcome_status IN ('PROCESSING', 'SUBMITTED', 'APPROVED', "
         "'REJECTED', 'FAILED')",
         name="outcome",
+    ),
+    CheckConstraint(
+        "completion_status IS NULL OR completion_status IN "
+        "('SUCCESS', 'FAILED', 'RECOVERY_REQUIRED', 'CANCELLED')",
+        name="completion_status",
     ),
 )
 Index(

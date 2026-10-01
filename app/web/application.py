@@ -36,8 +36,7 @@ from app.application.automation_schedule_manager import (
 )
 from app.application.automation_schedule_targets import (
     AutomationScheduleCoordinator,
-    PipelineScheduleTargetAdapter,
-    RTPRegistrySyncScheduleTargetAdapter,
+    build_schedule_target_adapters,
 )
 from app.application.automation_scheduling import (
     AutomationScheduleApplicationService,
@@ -74,6 +73,9 @@ from app.application.standalone_flow_recovery import (
     StandaloneFlowRecoveryService,
 )
 from app.application.user_variables import UserVariableApplicationService
+from app.services.oracle_user_variable_identity import (
+    OracleUserVariableIdentityResolver,
+)
 from app.application.reports import ReportWorkspaceService
 from app.config.settings import PROJECT_ROOT, Settings
 from app.infrastructure.database.migration import assert_schema_current
@@ -114,6 +116,7 @@ from app.services.notification_service import create_notification_service
 from app.services.oracle_password_authentication_service import (
     OraclePasswordAuthenticationService,
 )
+from app.services.session_security_service import SessionSecurityService
 from app.utils.exceptions import (
     AgentError,
     AccessControlError,
@@ -175,6 +178,7 @@ from app.web.security import (
 )
 
 WEB_ROOT = Path(__file__).resolve().parent
+FRONTEND_DIST_ROOT = PROJECT_ROOT / "frontend" / "dist"
 LOGGER = logging.getLogger("oracle_planning_automation.web")
 
 
@@ -226,12 +230,9 @@ def create_app(
     automation_schedule_coordinator = AutomationScheduleCoordinator(
         automation_schedule_service,
         operation_manager,
-        (
-            PipelineScheduleTargetAdapter(
-                resolved_settings,
-                catalog=operation_catalog,
-            ),
-            RTPRegistrySyncScheduleTargetAdapter(resolved_settings),
+        build_schedule_target_adapters(
+            resolved_settings,
+            catalog=operation_catalog,
         ),
         notification_service=create_notification_service(
             resolved_settings.email_notifications,
@@ -286,7 +287,7 @@ def create_app(
             application.state.agent_service.shutdown()
 
     app = FastAPI(
-        title="BISP Solutions Oracle EPM Automation",
+        title="EPM AI Assistant",
         version=__version__,
         docs_url=None,
         redoc_url=None,
@@ -302,6 +303,9 @@ def create_app(
         logger=LOGGER.getChild("environment_configuration"),
     )
     app.state.access_control = access_control
+    app.state.session_security = SessionSecurityService(
+        resolved_settings.database_target
+    )
     app.state.federated_authentication = FederatedAuthenticationService(
         resolved_settings.database_target
     )
@@ -348,6 +352,10 @@ def create_app(
         resolved_settings,
         logger=LOGGER.getChild("user_variables"),
     )
+    app.state.user_variable_identity = OracleUserVariableIdentityResolver(
+        resolved_settings,
+        logger=LOGGER.getChild("user_variable_identity"),
+    )
     app.state.report_workspace = ReportWorkspaceService(
         resolved_settings,
         logger=LOGGER.getChild("report_workspace"),
@@ -382,6 +390,7 @@ def create_app(
         ),
         operation_manager=app.state.operation_manager,
         schedule_service=app.state.automation_schedule_service,
+        user_variable_identity=app.state.user_variable_identity,
         schedule_coordinator=app.state.automation_schedule_coordinator,
         logger=LOGGER.getChild("agent"),
     )
@@ -406,6 +415,13 @@ def create_app(
         StaticFiles(directory=WEB_ROOT / "static"),
         name="static",
     )
+    frontend_assets = FRONTEND_DIST_ROOT / "assets"
+    if frontend_assets.is_dir():
+        app.mount(
+            "/assets",
+            StaticFiles(directory=frontend_assets),
+            name="frontend-assets",
+        )
     app.include_router(v1_router)
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
@@ -481,7 +497,7 @@ def create_app(
         )
         query_string = f"?{urlencode(query)}" if query else ""
         if frontend_url is None:
-            frontend_index = PROJECT_ROOT / "frontend" / "dist" / "index.html"
+            frontend_index = FRONTEND_DIST_ROOT / "index.html"
             if view == "home" and frontend_index.is_file():
                 return FileResponse(frontend_index)
             if not frontend_index.is_file():
@@ -558,8 +574,7 @@ def create_app(
         except Exception:
             LOGGER.exception("Oracle OIDC callback failed unexpectedly.")
             return identity_redirect(error="identity_provider_unavailable")
-        _start_user_session(request, user)
-        request.session["authentication_method"] = "oracle_oidc"
+        _start_user_session(request, user, authentication_method="oracle_oidc")
         return identity_redirect()
 
     @app.get("/", include_in_schema=False)
@@ -586,7 +601,7 @@ def create_app(
             )
         except AccessControlError as exc:
             return _access_error(str(exc), status_code=400)
-        _start_user_session(request, user)
+        _start_user_session(request, user, authentication_method="bootstrap")
         return {
             "status": "success",
             "message": "Platform Administrator created.",
@@ -611,7 +626,7 @@ def create_app(
                 "The username or password is incorrect.",
                 status_code=401,
             )
-        _start_user_session(request, user)
+        _start_user_session(request, user, authentication_method="local")
         return {
             "status": "success",
             "message": "Signed in successfully.",
@@ -626,6 +641,11 @@ def create_app(
         if owner:
             request.app.state.upload_store.delete_owner(owner)
         if user is not None:
+            request.app.state.session_security.end(
+                owner,
+                username=user.username,
+                user_id=user.user_id,
+            )
             request.app.state.access_control.record_logout(
                 user,
                 ip_address=_client_ip(request),
@@ -655,7 +675,7 @@ def create_app(
                 status_code=503,
                 content={
                     "status": "unavailable",
-                    "product": "Oracle EPM Automation Platform",
+                    "product": "EPM AI Assistant",
                     "application": health_settings.application_name,
                     "active_application": active_application,
                     "restart_required": restart_required,
@@ -664,7 +684,7 @@ def create_app(
             )
         return {
             "status": "ok",
-            "product": "Oracle EPM Automation Platform",
+            "product": "EPM AI Assistant",
             "application": result.application_name,
             "active_application": active_application,
             "restart_required": restart_required,
@@ -2262,8 +2282,9 @@ def create_app(
         require_api_session(request)
         user = _current_user(request)
         assert user is not None
-        target_user = str(user_name or user.username).strip()
-        _require_user_variable_target(user, target_user)
+        assigned_user = request.app.state.user_variable_identity.resolve(user)
+        target_user = str(user_name or assigned_user).strip()
+        _require_user_variable_target(user, target_user, assigned_user)
         try:
             catalog = await run_in_threadpool(
                 request.app.state.user_variables.discover,
@@ -3520,7 +3541,12 @@ def create_app(
         require_api_session(request)
         user = _current_user(request)
         assert user is not None
-        _require_user_variable_target(user, payload.user_name)
+        assigned_user = request.app.state.user_variable_identity.resolve(user)
+        _require_user_variable_target(
+            user,
+            payload.user_name,
+            assigned_user,
+        )
         try:
             task_link = (
                 _planning_task_link_callback(
@@ -3591,6 +3617,37 @@ def create_app(
         if payload is None:
             raise HTTPException(status_code=404, detail="Execution not found.")
         return payload
+
+    @app.post("/api/operations/runs/{execution_id}/stop")
+    async def stop_standalone_flow(request: Request, execution_id: str):
+        """Stop a flow before start or after its currently active Oracle step."""
+        _require_operation_execution_access(request, execution_id)
+        user = _current_user(request)
+        assert user is not None
+        try:
+            execution = await run_in_threadpool(
+                request.app.state.operation_manager.request_flow_stop,
+                execution_id,
+                requested_by=user.username,
+            )
+        except EPMError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        queued_cancel = execution.status.value == "CANCELLED"
+        return {
+            "status": "cancelled" if queued_cancel else "stop_requested",
+            "execution_id": execution.execution_id,
+            "execution_status": execution.status.value,
+            "cancellation_requested_at": (
+                execution.cancellation_requested_at.isoformat()
+                if execution.cancellation_requested_at
+                else None
+            ),
+            "message": (
+                "The standalone flow was cancelled before any Oracle step started."
+                if queued_cancel
+                else "The current Oracle step will finish; later flow steps will not start."
+            ),
+        }
 
     @app.get("/api/operations/runs/{execution_id}/recovery")
     async def get_standalone_flow_recovery(
@@ -3880,6 +3937,14 @@ def _execution_payload(manager, execution_id: str, settings: Settings):
         "started_at": started_at,
         "completed_at": completed_at,
         "error_message": error_message,
+        "cancellation_requested_at": (
+            managed.cancellation_requested_at.isoformat()
+            if managed is not None and managed.cancellation_requested_at
+            else None
+        ),
+        "cancellation_requested_by": (
+            managed.cancellation_requested_by if managed is not None else None
+        ),
         "initiated_by": initiated_by,
         "trigger_source": trigger_source,
         "executed_by": executed_by,
@@ -3892,7 +3957,8 @@ def _execution_payload(manager, execution_id: str, settings: Settings):
             if managed is not None and managed.log_file.is_file()
             else None
         ),
-        "terminal": status in {"SUCCESS", "FAILED", "RECOVERY_REQUIRED"},
+        "terminal": status
+        in {"SUCCESS", "FAILED", "RECOVERY_REQUIRED", "CANCELLED"},
     }
 
 
@@ -4531,15 +4597,22 @@ def _request_actor(request: Request) -> ExecutionActor:
     )
 
 
-def _require_user_variable_target(user: UserAccount, target_user: str) -> None:
-    """Allow ordinary users to manage only their own Oracle assignment."""
-    if target_user.casefold() == user.username.casefold():
+def _require_user_variable_target(
+    user: UserAccount,
+    target_user: str,
+    assigned_oracle_user: str,
+) -> None:
+    """Allow ordinary users to manage only their resolved Oracle identity."""
+    if target_user.casefold() == assigned_oracle_user.casefold():
         return
     if user.has_permission(Permission.USER_MANAGE):
         return
     raise HTTPException(
         status_code=403,
-        detail="Your platform role can update only your own user variables.",
+        detail=(
+            "Your platform role can update only the Oracle user-variable "
+            "identity assigned to your session."
+        ),
     )
 
 
@@ -4713,7 +4786,9 @@ def _agent_tool_activity_payload(
             "list_cube_dimensions",
             "search_dimension_members",
             "list_data_explorer_views",
+            "list_variance_views",
             "review_saved_data_view",
+            "review_saved_variance",
             "review_data_slice",
             "compare_data_slices",
             "plan_multi_step_request",

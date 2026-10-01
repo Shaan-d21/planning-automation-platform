@@ -24,6 +24,7 @@ class ExecutionJobStatus(StrEnum):
     SUCCESS = "SUCCESS"
     FAILED = "FAILED"
     RECOVERY_REQUIRED = "RECOVERY_REQUIRED"
+    CANCELLED = "CANCELLED"
 
     @property
     def terminal(self) -> bool:
@@ -31,6 +32,7 @@ class ExecutionJobStatus(StrEnum):
             self.SUCCESS,
             self.FAILED,
             self.RECOVERY_REQUIRED,
+            self.CANCELLED,
         }
 
 
@@ -53,6 +55,8 @@ class ExecutionJob:
     heartbeat_at: datetime | None = None
     completed_at: datetime | None = None
     error_message: str | None = None
+    cancellation_requested_at: datetime | None = None
+    cancellation_requested_by: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

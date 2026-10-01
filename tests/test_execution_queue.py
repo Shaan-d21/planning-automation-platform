@@ -94,6 +94,48 @@ def test_queue_prevents_duplicate_active_target(tmp_path: Path) -> None:
         repository.enqueue(replace(first, execution_id="run-2"))
 
 
+def test_queue_cancels_unclaimed_work_and_requests_safe_stop_for_running_work(
+    tmp_path: Path,
+) -> None:
+    repository = SQLExecutionQueueRepository(_settings(tmp_path).database_target)
+    queued = ExecutionJobSubmission(
+        execution_id="queued-flow",
+        job_type=ExecutionJobType.STANDALONE_FLOW,
+        target_key="STANDALONE_FLOW:Month Close",
+        payload={"version": 1},
+    )
+    running = replace(
+        queued,
+        execution_id="running-flow",
+        target_key="STANDALONE_FLOW:Forecast Seed",
+    )
+    repository.enqueue(queued)
+    repository.enqueue(running)
+    repository.claim(
+        "running-flow",
+        worker_id="worker-a",
+        lease_seconds=60,
+    )
+
+    cancelled = repository.request_cancellation(
+        "queued-flow",
+        requested_by="planner",
+    )
+    stop_requested = repository.request_cancellation(
+        "running-flow",
+        requested_by="planner",
+    )
+
+    assert cancelled.status is ExecutionJobStatus.CANCELLED
+    assert cancelled.status.terminal is True
+    assert stop_requested.status is ExecutionJobStatus.RUNNING
+    assert stop_requested.cancellation_requested_at is not None
+    assert stop_requested.cancellation_requested_by == "planner"
+    assert repository.cancellation_requested("running-flow") is True
+    repository.cancel_claimed("running-flow", worker_id="worker-a")
+    assert repository.get("running-flow").status is ExecutionJobStatus.CANCELLED
+
+
 def test_expired_lease_requires_review_instead_of_automatic_retry(
     tmp_path: Path,
 ) -> None:
@@ -183,10 +225,12 @@ def test_web_runtime_queues_without_executing_and_worker_completes(
                 completed_at=datetime.now(UTC),
             )
 
+    notified: list[str] = []
     worker = DurableExecutionWorker(
         settings,
         worker_id="worker-1",
         process_executor_factory=lambda *_args, **_kwargs: Executor(),
+        completion_notifier=notified.append,
     )
     assert worker.run_once()
     assert manager.get(submitted.execution_id).status.value == "SUCCESS"
@@ -196,3 +240,4 @@ def test_web_runtime_queues_without_executing_and_worker_completes(
         .status
         is WorkflowStatus.SUCCESS
     )
+    assert notified == [submitted.execution_id]

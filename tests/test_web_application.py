@@ -11,10 +11,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, Mock, call
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.exc import OperationalError
 
-from app.agent.models import AgentMessageRole
+from app.agent.models import AgentMessageRole, AgentToolActivity
 from app.agent.repository import SQLiteAgentRepository
 from app.application.connection import ConnectionResult
 from app.models.environment import ApplicationInfo
@@ -48,6 +49,7 @@ from app.application.planning_process import PlanningProcessPreflight
 from app.application.substitution_variables import (
     SubstitutionVariableCatalog,
 )
+from app.application.user_variables import UserVariableCatalog
 from app.application.reports import (
     ReportCatalogItem,
     ReportPreflight,
@@ -62,6 +64,7 @@ from app.models.workflow import (
     WorkflowStepResult,
     WorkflowStepStatus,
 )
+from app.models.user_variable import UserVariableDefinition, UserVariableValue
 from app.services.workflow_repository import SQLWorkflowRepository
 from app.models.data_validation import (
     DataComparisonCell,
@@ -95,7 +98,30 @@ from app.models.automation_schedule import (
 )
 from app.models.substitution_variable import SubstitutionVariable
 from app.utils.exceptions import AuthenticationError
-from app.web.application import create_app
+from app.web import application as web_application
+from app.web.application import _agent_tool_activity_payload, create_app
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    ("list_variance_views", "review_saved_variance"),
+)
+def test_variance_tool_results_are_exposed_to_the_agent_workspace(
+    tool_name: str,
+) -> None:
+    result = {"purpose": "variance", "views": [], "count": 0, "total_count": 0}
+
+    payload = _agent_tool_activity_payload(
+        AgentToolActivity(
+            name=tool_name,
+            arguments={},
+            status="SUCCESS",
+            summary="Variance review completed.",
+            result=result,
+        )
+    )
+
+    assert payload["result"] == result
 
 
 def test_failed_flow_recovery_requires_review_and_queues_new_execution(
@@ -156,6 +182,30 @@ def test_failed_flow_recovery_requires_review_and_queues_new_execution(
     )
     actor = app.state.operation_manager.submit_flow.call_args.kwargs["actor"]
     assert actor.trigger_source is TriggerSource.MANUAL
+
+
+def test_standalone_flow_stop_requests_safe_worker_boundary(
+    tmp_path: Path,
+) -> None:
+    app = create_app(_settings(tmp_path), session_secret="test-secret")
+    client = TestClient(app)
+    _login(client)
+    app.state.operation_manager = Mock()
+    app.state.operation_manager.request_flow_stop.return_value = SimpleNamespace(
+        execution_id="active-flow",
+        status=OperationExecutionStatus.RUNNING,
+        cancellation_requested_at=datetime(2026, 9, 17, 9, 30, tzinfo=UTC),
+    )
+
+    response = client.post("/api/v1/operations/runs/active-flow/stop")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "stop_requested"
+    assert "current Oracle step will finish" in response.json()["message"]
+    app.state.operation_manager.request_flow_stop.assert_called_once_with(
+        "active-flow",
+        requested_by="admin",
+    )
 
 
 class _SuccessfulConnection:
@@ -227,6 +277,29 @@ def _settings(tmp_path: Path) -> Settings:
     )
 
 
+@pytest.fixture(autouse=True)
+def _install_frontend_test_build(tmp_path: Path, monkeypatch) -> None:
+    """Provide the browser-entry assets without relying on ignored build output."""
+    frontend_root = tmp_path / "frontend-dist"
+    assets_root = frontend_root / "assets"
+    assets_root.mkdir(parents=True)
+    (frontend_root / "index.html").write_text(
+        """<!doctype html>
+<html>
+  <head><link rel="stylesheet" href="/assets/index.css"></head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/assets/index.js"></script>
+  </body>
+</html>
+""",
+        encoding="utf-8",
+    )
+    (assets_root / "index.css").write_text("body {}\n", encoding="utf-8")
+    (assets_root / "index.js").write_text("export {};\n", encoding="utf-8")
+    monkeypatch.setattr(web_application, "FRONTEND_DIST_ROOT", frontend_root)
+
+
 def _csrf(response) -> str:
     payload = response.json()
     token = str(payload.get("csrf_token", "")).strip()
@@ -278,7 +351,8 @@ def test_environment_configuration_exposes_only_non_secret_selection(
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["base_url"] == "http://epm.internal/HyperionPlanning"
+    assert "base_url" not in payload
+    assert "epm.internal" not in response.text
     assert payload["active_application"] == "Vision"
     assert payload["selected_application"] == "Vision"
     assert payload["selection_source"] == "ENVIRONMENT"
@@ -344,6 +418,19 @@ def test_react_entry_is_available_before_authentication(tmp_path: Path) -> None:
     assert '<div id="root"></div>' in response.text
 
 
+def test_react_entry_serves_its_compiled_assets(tmp_path: Path) -> None:
+    app = create_app(_settings(tmp_path), session_secret="test-secret")
+    client = TestClient(app)
+
+    entry = client.get("/app", follow_redirects=False)
+    asset_paths = re.findall(r'(?:src|href)="([^"]*/assets/[^"]+)"', entry.text)
+
+    assert asset_paths
+    for asset_path in asset_paths:
+        response = client.get(asset_path)
+        assert response.status_code == 200
+
+
 def test_legacy_agent_page_redirects_to_react_workspace(
     tmp_path: Path,
 ) -> None:
@@ -402,7 +489,7 @@ def test_v1_bootstrap_supports_an_independent_unauthenticated_client(
     assert response.status_code == 200
     payload = response.json()
     assert payload["product"] == {
-        "name": "Oracle EPM Automation Platform",
+        "name": "EPM AI Assistant",
         "company": "BISP Solutions",
         "api_version": "v1",
     }
@@ -481,13 +568,13 @@ def test_v1_bootstrap_returns_effective_user_and_navigation(
     assert payload["environment"] == {
         "application_name": "Vision",
         "deployment_mode": "on_premises",
-        "base_url": "http://epm.internal/HyperionPlanning",
         "configured": True,
         "execution_account": "administrator",
     }
     assert payload["user"]["username"] == "admin"
     assert payload["user"]["platform_roles"] == [
-        "SERVICE_ADMINISTRATOR"
+        "SERVICE_ADMINISTRATOR",
+        "SYSTEM_ADMINISTRATOR",
     ]
     assert payload["user"]["persona"] == "SERVICE_ADMINISTRATOR"
     assert payload["user"]["persona_label"] == "Service Administrator"
@@ -499,6 +586,7 @@ def test_v1_bootstrap_returns_effective_user_and_navigation(
         "jobs",
         "operations",
         "access-control",
+        "system-administration",
     }
     assert "process-designer" not in {
         item["code"] for item in payload["navigation"]
@@ -592,6 +680,57 @@ def test_v1_session_login_and_logout_rotate_browser_security_state(
     assert payload["csrf_token"] != anonymous["csrf_token"]
     assert payload["user"]["username"] == "admin"
     assert client.get("/api/v1/bootstrap").json()["authenticated"] is True
+
+
+def test_system_administration_lists_concurrent_sessions_and_revokes_one(
+    tmp_path: Path,
+) -> None:
+    app = create_app(_settings(tmp_path), session_secret="test-secret")
+    first = TestClient(app)
+    _login(first)
+    second = TestClient(app)
+    anonymous = second.get("/api/v1/bootstrap").json()
+    signed_in = second.post(
+        "/api/v1/session",
+        headers={"X-CSRF-Token": anonymous["csrf_token"]},
+        json={"username": "admin", "password": "Test password 123!"},
+    )
+    assert signed_in.status_code == 200
+
+    security = first.get("/api/v1/system-administration/security")
+    assert security.status_code == 200
+    payload = security.json()
+    assert payload["summary"]["active_sessions"] == 2
+    assert payload["summary"]["concurrent_accounts"] == 1
+    target = next(item for item in payload["sessions"] if not item["current"])
+
+    revoked = first.post(
+        f"/api/v1/system-administration/sessions/{target['session_key']}/revoke"
+    )
+    assert revoked.status_code == 200
+    assert second.get("/api/v1/bootstrap").json()["authenticated"] is False
+
+
+def test_cloudflare_client_ip_is_used_only_when_explicitly_trusted(
+    tmp_path: Path,
+) -> None:
+    settings = replace(_settings(tmp_path), trust_cloudflare_headers=True)
+    app = create_app(settings, session_secret="test-secret")
+    client = TestClient(app)
+    client.headers.update(
+        {
+            "CF-Connecting-IP": "203.0.113.42",
+            "CF-IPCountry": "IN",
+            "CF-Ray": "trusted-ray",
+        }
+    )
+    _login(client)
+
+    payload = client.get("/api/v1/system-administration/security").json()
+    current = next(item for item in payload["sessions"] if item["current"])
+    assert current["current_ip"] == "203.0.113.42"
+    assert current["country_code"] == "IN"
+    assert current["cloudflare_ray"] == "trusted-ray"
 
 
 def test_oracle_credentials_are_advertised_and_start_a_platform_session(
@@ -3072,6 +3211,37 @@ def test_substitution_variable_catalog_and_update_start(
         action_type="UPDATE_SUBSTITUTION_VARIABLE",
         actor=ANY,
     )
+
+
+def test_user_variable_catalog_defaults_to_oracle_service_identity(
+    tmp_path: Path,
+) -> None:
+    app = create_app(
+        _settings(tmp_path),
+        session_secret="test-secret",
+        connection_use_case_factory=lambda settings: _SuccessfulConnection(),
+    )
+    app.state.user_variables = Mock()
+    app.state.user_variables.discover.return_value = UserVariableCatalog(
+        user_name="administrator",
+        definitions=(UserVariableDefinition("MyEntity", "Entity"),),
+        values=(
+            UserVariableValue(
+                user_name="administrator",
+                name="MyEntity",
+                dimension="Entity",
+                member="Sales East",
+            ),
+        ),
+    )
+    client = TestClient(app)
+    _login(client)
+
+    response = client.get("/api/user-variables/catalog")
+
+    assert response.status_code == 200
+    assert response.json()["catalog"]["user_name"] == "administrator"
+    app.state.user_variables.discover.assert_called_once_with("administrator")
 
 
 def test_cube_refresh_catalog_and_start_use_targeted_discovery(

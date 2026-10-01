@@ -76,6 +76,7 @@ class GroqAgentProvider:
         system_instruction: str,
         tools: Sequence[AgentToolDefinition],
         provider_exchange: Sequence[dict[str, Any]],
+        required_tool_name: str | None = None,
     ) -> AgentProviderTurn:
         """Generate exactly one Groq model turn without executing tools."""
         tool_payloads = [self._tool(item) for item in tools]
@@ -126,8 +127,14 @@ class GroqAgentProvider:
                 model=self._model,
                 messages=request_messages,
                 tools=tool_payloads,
-                tool_choice="auto",
-                parallel_tool_calls=True,
+                tool_choice=(
+                    {
+                        "type": "function",
+                        "function": {"name": required_tool_name},
+                    }
+                    if required_tool_name else "auto"
+                ),
+                parallel_tool_calls=not bool(required_tool_name),
                 temperature=0.2,
                 max_completion_tokens=self._max_completion_tokens,
                 **request_options,

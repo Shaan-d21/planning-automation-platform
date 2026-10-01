@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import Mock
 
+import pytest
+
 from app.clients.epm_client import EPMClient
 from app.services.application_service import ApplicationService
 from app.utils.exceptions import APIRequestError
@@ -119,6 +121,46 @@ def test_get_plan_types_uses_live_legacy_application_sources() -> None:
     ]
     assert all(item.dimension_count is None for item in result)
     assert client.get.call_args_list[1].kwargs["params"] == {"limit": -1}
+
+
+def test_on_prem_plan_types_support_legacy_status_and_response_shapes() -> None:
+    client = _client()
+    client.is_cloud_environment = False
+    client.get.side_effect = (
+        APIRequestError("Method Not Allowed", status_code=405),
+        APIRequestError("Unsupported query parameter", status_code=400),
+        {
+            "substitutionVariables": [
+                {"name": "CurYr", "planType": "Plan2"},
+            ]
+        },
+        {
+            "jobDefinitions": [
+                {"jobName": "Rule", "planTypeName": "Plan1"},
+                {"jobName": "Legacy", "planType": 1},
+            ]
+        },
+    )
+
+    result = ApplicationService(client).get_plan_types()
+
+    assert [item.name for item in result] == ["Plan1", "Plan2"]
+    assert client.get.call_args_list[1].kwargs["params"] == {"limit": -1}
+    assert client.get.call_args_list[2].kwargs == {}
+
+
+def test_cloud_plan_type_permission_or_method_errors_are_not_hidden() -> None:
+    client = _client()
+    client.is_cloud_environment = True
+    client.get.side_effect = APIRequestError(
+        "Method Not Allowed",
+        status_code=405,
+    )
+
+    with pytest.raises(APIRequestError, match="Method Not Allowed"):
+        ApplicationService(client).get_plan_types()
+
+    client.get.assert_called_once()
 
 
 def test_get_dimension_members_flattens_oracle_hierarchy() -> None:

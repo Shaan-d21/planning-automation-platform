@@ -22,11 +22,14 @@ class Permission(StrEnum):
     USER_MANAGE = "user.manage"
     CATALOG_MANAGE = "catalog.manage"
     AGENT_USE = "agent.use"
+    SECURITY_AUDIT_VIEW = "security_audit.view"
+    SESSION_MANAGE = "session.manage"
 
 
 class RoleCode(StrEnum):
-    """Stable codes for the four business-facing platform roles."""
+    """Stable codes for business and security-administration roles."""
 
+    SYSTEM_ADMINISTRATOR = "SYSTEM_ADMINISTRATOR"
     SERVICE_ADMINISTRATOR = "SERVICE_ADMINISTRATOR"
     POWER_USER = "POWER_USER"
     USER = "USER"

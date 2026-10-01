@@ -39,8 +39,18 @@ def aggregate_record_statistics(
             dict(item) for item in raw_details if isinstance(item, Mapping)
         )
 
+    sources = {
+        str(item.get("source") or "ORACLE_JOB_DETAILS")
+        for item in statistics
+    }
+    source = (
+        next(iter(sources))
+        if len(sources) == 1
+        else "ORACLE_COMBINED_EVIDENCE"
+    )
+
     return {
-        "source": "ORACLE_JOB_DETAILS",
+        "source": source,
         "records_read": sum(
             _counter(item.get("records_read")) for item in statistics
         ),
@@ -343,7 +353,8 @@ def _agent_record_statistics(
                 }
             )
     return {
-        "source": "ORACLE_JOB_DETAILS",
+        "source": _safe_text(value.get("source"), limit=80)
+        or "ORACLE_JOB_DETAILS",
         "records_read": _counter(value.get("records_read")),
         "records_processed": _counter(value.get("records_processed")),
         "records_rejected": _counter(value.get("records_rejected")),
@@ -384,6 +395,11 @@ def _execution_diagnosis(
         return "Completed successfully."
     if run.status is WorkflowStatus.RUNNING:
         return "Execution is still running."
+    if run.status is WorkflowStatus.CANCELLED:
+        return (
+            _safe_text(run.error_message)
+            or "Stopped safely; remaining workflow steps were not started."
+        )
     return "Execution is queued and has not started yet."
 
 

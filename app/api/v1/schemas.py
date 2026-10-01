@@ -53,7 +53,6 @@ class EnvironmentSummary(BaseModel):
 
     application_name: str
     deployment_mode: str
-    base_url: str
     configured: bool
     execution_account: str
 
@@ -71,7 +70,6 @@ class EnvironmentConfigurationResponse(BaseModel):
     """Non-secret persisted connection configuration for administrators."""
 
     status: str = "success"
-    base_url: str
     deployment_mode: str
     active_application: str | None
     selected_application: str | None
@@ -261,6 +259,12 @@ class PlatformPasswordChangeRequest(BaseModel):
 
     password: str = Field(min_length=12, max_length=256)
     password_confirmation: str = Field(min_length=12, max_length=256)
+
+
+class SystemAdministratorRoleRequest(BaseModel):
+    """Grant or remove the separate platform-security role."""
+
+    enabled: bool
 
 
 class IdentitySynchronizationRequest(BaseModel):

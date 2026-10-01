@@ -82,7 +82,7 @@ export function EnvironmentSetupDialog({
 
         <div className="environment-setup-body">
           <section className="environment-setup-connection">
-            <span><small>Oracle environment</small><strong>{configuration?.base_url ?? "Reading configuration…"}</strong></span>
+            <span><small>Oracle connection</small><strong>{configuration ? "Configured securely" : "Reading configuration…"}</strong></span>
             <span><small>Deployment</small><strong>{configuration?.deployment_mode ?? "—"}</strong></span>
             <button type="button" className="button button--quiet" disabled={busy} onClick={() => void discover()}>{busy ? <span className="spinner spinner--dark" /> : <Icon name="refresh" />} Refresh from Oracle</button>
           </section>

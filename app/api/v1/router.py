@@ -35,6 +35,7 @@ from app.api.v1.schemas import (
     ProductSummary,
     SessionLoginRequest,
     SessionResponse,
+    SystemAdministratorRoleRequest,
 )
 from app.models.planning_workflow import (
     CycleStageDraft,
@@ -152,6 +153,13 @@ _NAVIGATION = (
         "administration",
         (Permission.USER_MANAGE,),
     ),
+    _NavigationDefinition(
+        "system-administration",
+        "System Administration",
+        "#system-administration",
+        "administration",
+        (Permission.SECURITY_AUDIT_VIEW,),
+    ),
 )
 
 
@@ -165,7 +173,7 @@ async def frontend_bootstrap(request: Request) -> FrontendBootstrapResponse:
     )
     return FrontendBootstrapResponse(
         product=ProductSummary(
-            name="Oracle EPM Automation Platform",
+            name="EPM AI Assistant",
             company="BISP Solutions",
             api_version="v1",
         ),
@@ -187,7 +195,6 @@ async def frontend_bootstrap(request: Request) -> FrontendBootstrapResponse:
             EnvironmentSummary(
                 application_name=settings.application_name,
                 deployment_mode=settings.resolved_deployment_mode,
-                base_url=settings.epm_base_url,
                 configured=bool(settings.application_name),
                 execution_account=settings.oracle_execution_username,
             )
@@ -280,7 +287,7 @@ async def create_session(
             status_code=401,
             detail="The username or password is incorrect.",
         )
-    start_user_session(request, user)
+    start_user_session(request, user, authentication_method="local")
     return SessionResponse(
         status="success",
         message="Signed in successfully.",
@@ -322,8 +329,7 @@ async def create_oracle_session(
                 "environment and Access Control integration account are available."
             ),
         ) from exc
-    start_user_session(request, user)
-    request.session["authentication_method"] = "oracle_basic"
+    start_user_session(request, user, authentication_method="oracle_basic")
     return SessionResponse(
         status="success",
         message="Signed in with Oracle EPM successfully.",
@@ -350,7 +356,7 @@ async def bootstrap_administrator(
         )
     except AccessControlError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    start_user_session(request, user)
+    start_user_session(request, user, authentication_method="bootstrap")
     return SessionResponse(
         status="success",
         message="Platform Administrator created.",
@@ -366,6 +372,11 @@ async def delete_session(request: Request) -> SessionResponse:
     user = current_user(request)
     request.app.state.upload_store.delete_owner(owner)
     if user is not None:
+        request.app.state.session_security.end(
+            owner,
+            username=user.username,
+            user_id=user.user_id,
+        )
         request.app.state.access_control.record_logout(
             user,
             ip_address=client_ip(request),
@@ -944,6 +955,83 @@ async def access_control_workspace(request: Request) -> dict[str, object]:
     }
 
 
+@router.get("/system-administration/security")
+async def system_security_workspace(request: Request) -> dict[str, object]:
+    """Return retained login activity and revocable browser sessions."""
+    require_api_session(request)
+    user = current_user(request)
+    if user is None or not user.has_permission(Permission.SECURITY_AUDIT_VIEW):
+        raise HTTPException(
+            status_code=403,
+            detail="System Administrator access is required.",
+        )
+    payload = request.app.state.session_security.dashboard(
+        current_session_id=str(request.session.get("session_id", "")) or None,
+    )
+    system_ids = request.app.state.access_control.system_administrator_ids()
+    payload["administrators"] = [
+        {
+            "user_id": account.user_id,
+            "username": account.username,
+            "display_name": account.display_name,
+            "active": account.active,
+            "system_administrator": account.user_id in system_ids,
+        }
+        for account in request.app.state.access_control.list_users()
+    ]
+    return payload
+
+
+@router.post("/system-administration/sessions/{session_key}/revoke")
+async def revoke_platform_session(
+    request: Request,
+    session_key: str,
+) -> dict[str, object]:
+    """Revoke one browser session without exposing its cookie secret."""
+    require_api_session(request)
+    user = current_user(request)
+    if user is None or not user.has_permission(Permission.SESSION_MANAGE):
+        raise HTTPException(
+            status_code=403,
+            detail="System Administrator access is required.",
+        )
+    try:
+        request.app.state.session_security.revoke(
+            session_key,
+            actor_user_id=user.user_id,
+        )
+    except AccessControlError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"status": "success", "message": "The selected session was revoked."}
+
+
+@router.patch("/system-administration/users/{user_id}/role")
+async def change_system_administrator_role(
+    request: Request,
+    user_id: int,
+    payload: SystemAdministratorRoleRequest,
+) -> dict[str, object]:
+    """Manage security administrators without changing business roles."""
+    require_api_session(request)
+    actor = current_user(request)
+    if actor is None or not actor.has_permission(Permission.SESSION_MANAGE):
+        raise HTTPException(status_code=403, detail="System Administrator access is required.")
+    try:
+        user = request.app.state.access_control.set_system_administrator(
+            user_id,
+            enabled=payload.enabled,
+            actor_user_id=actor.user_id,
+        )
+    except AccessControlError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "status": "success",
+        "message": (
+            f"System Administrator access was {'granted to' if payload.enabled else 'removed from'} {user.display_name}."
+        ),
+    }
+
+
 @router.post("/access-control/identity-sync/preview")
 async def preview_identity_synchronization(
     request: Request,
@@ -1213,7 +1301,6 @@ def _environment_configuration_payload(
     else:
         message = "Discover the Planning applications available in Oracle."
     return EnvironmentConfigurationResponse(
-        base_url=settings.epm_base_url,
         deployment_mode=settings.resolved_deployment_mode,
         active_application=active,
         selected_application=selected,

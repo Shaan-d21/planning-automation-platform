@@ -125,6 +125,7 @@ class StandaloneFlowCommandExecutor:
         execution_id: str,
         log_file: Path,
         actor: ExecutionActor | None = None,
+        stop_requested: Callable[[], bool] | None = None,
     ) -> WorkflowRun:
         """Run every configured step, stopping immediately on failure."""
         if not flow_input.steps:
@@ -151,6 +152,8 @@ class StandaloneFlowCommandExecutor:
         )
         self._repository.save(run)
         for index, step in enumerate(flow_input.steps, start=1):
+            if stop_requested is not None and stop_requested():
+                return self._stop_before_step(run, results, index)
             child_id = f"{execution_id}-step-{index}"
             step_started = datetime.now(UTC)
             current = results[index - 1]
@@ -245,6 +248,42 @@ class StandaloneFlowCommandExecutor:
         )
         self._repository.save(completed)
         return completed
+
+    def _stop_before_step(
+        self,
+        run: WorkflowRun,
+        results: tuple[WorkflowStepResult, ...],
+        next_sequence: int,
+    ) -> WorkflowRun:
+        """Stop the flow without interrupting an already submitted Oracle job."""
+        completed_at = datetime.now(UTC)
+        stopped = tuple(
+            replace(
+                result,
+                status=WorkflowStepStatus.SKIPPED,
+                completed_at=completed_at,
+                details={
+                    **result.details,
+                    "reason": "Stopped by the user before this step started.",
+                },
+            )
+            if position >= next_sequence - 1
+            and result.status is WorkflowStepStatus.PENDING
+            else result
+            for position, result in enumerate(results)
+        )
+        cancelled = replace(
+            run,
+            status=WorkflowStatus.CANCELLED,
+            completed_at=completed_at,
+            steps=stopped,
+            error_message=(
+                "The user requested a safe stop. Completed Oracle steps were "
+                "retained and remaining steps were not started."
+            ),
+        )
+        self._repository.save(cancelled)
+        return cancelled
 
     @staticmethod
     def _child_details(

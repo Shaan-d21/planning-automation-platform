@@ -60,6 +60,7 @@ import type {
   OperationExecution,
   StandaloneFlowRecoveryAccepted,
   StandaloneFlowRecoveryResponse,
+  StandaloneFlowStopResponse,
   DataReviewCubesResponse,
   DataReviewDimensionsResponse,
   DataReviewMembersResponse,
@@ -84,7 +85,8 @@ import type {
   AutomationSchedulesResponse,
   AutomationScheduleRunsResponse,
   ScheduleMutationResponse,
-  SchedulePreviewResponse
+  SchedulePreviewResponse,
+  SystemSecurityResponse
 } from "./types";
 
 export class ApiError extends Error {
@@ -206,6 +208,19 @@ export const api = {
     ),
   notifications: () => request<NotificationsResponse>("/api/v1/notifications"),
   accessControl: () => request<AccessControlResponse>("/api/v1/access-control"),
+  systemSecurity: () => request<SystemSecurityResponse>(
+    "/api/v1/system-administration/security"
+  ),
+  revokeSession: (sessionKey: string, csrfToken: string) => request<{ status: string; message: string }>(
+    `/api/v1/system-administration/sessions/${encodeURIComponent(sessionKey)}/revoke`,
+    { method: "POST" },
+    csrfToken
+  ),
+  setSystemAdministrator: (userId: number, enabled: boolean, csrfToken: string) => request<{ status: string; message: string }>(
+    `/api/v1/system-administration/users/${userId}/role`,
+    { method: "PATCH", body: JSON.stringify({ enabled }) },
+    csrfToken
+  ),
   previewIdentitySync: (csrfToken: string) => request<IdentitySyncPreviewResponse>(
     "/api/v1/access-control/identity-sync/preview",
     { method: "POST" },
@@ -287,10 +302,15 @@ export const api = {
     request<AgentMessagesResponse>(
       `/api/agent/conversations/${encodeURIComponent(conversationId)}/messages`
     ),
-  sendAgentMessage: (conversationId: string, content: string, csrfToken: string) =>
+  sendAgentMessage: (
+    conversationId: string,
+    content: string,
+    csrfToken: string,
+    signal?: AbortSignal
+  ) =>
     request<AgentSendResponse>(
       `/api/agent/conversations/${encodeURIComponent(conversationId)}/messages`,
-      { method: "POST", body: JSON.stringify({ content }) },
+      { method: "POST", body: JSON.stringify({ content }), signal },
       csrfToken
     ),
   resolveAgentApproval: (
@@ -586,6 +606,12 @@ export const api = {
     ),
   operationRun: (executionId: string) =>
       request<OperationExecution>(`/api/operations/runs/${encodeURIComponent(executionId)}`),
+    stopStandaloneFlow: (executionId: string, csrfToken: string) =>
+      request<StandaloneFlowStopResponse>(
+        `/api/operations/runs/${encodeURIComponent(executionId)}/stop`,
+        { method: "POST" },
+        csrfToken
+      ),
     standaloneFlowRecovery: (executionId: string) =>
       request<StandaloneFlowRecoveryResponse>(`/api/operations/runs/${encodeURIComponent(executionId)}/recovery`),
     retryStandaloneFlow: (

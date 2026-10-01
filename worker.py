@@ -16,7 +16,7 @@ from app.application.automation_schedule_manager import (
 )
 from app.application.automation_schedule_targets import (
     AutomationScheduleCoordinator,
-    PipelineScheduleTargetAdapter,
+    build_schedule_target_adapters,
 )
 from app.application.automation_scheduling import (
     AutomationScheduleApplicationService,
@@ -57,11 +57,9 @@ def main() -> int:
     automation_schedule_coordinator = AutomationScheduleCoordinator(
         AutomationScheduleApplicationService(settings.database_target),
         operation_manager,
-        (
-            PipelineScheduleTargetAdapter(
-                settings,
-                catalog=operation_catalog,
-            ),
+        build_schedule_target_adapters(
+            settings,
+            catalog=operation_catalog,
         ),
         notification_service=create_notification_service(
             settings.email_notifications,

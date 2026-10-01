@@ -54,11 +54,35 @@ def test_get_plan_types_falls_back_when_endpoint_is_unavailable() -> None:
                 }
             ]
         },
+        {"items": []},
     ]
 
     plan_types = SubstitutionVariableService(client).get_plan_types()
 
     assert [item.cube_name for item in plan_types] == ["Plan1"]
+
+
+def test_get_plan_types_uses_job_definitions_for_on_prem_cubes() -> None:
+    client = _client()
+    client.is_cloud_environment = False
+    client.get.side_effect = [
+        APIRequestError("Not Found", status_code=404),
+        {
+            "items": [
+                {"name": "CurPeriod", "value": "Jan", "planType": "ALL"},
+            ]
+        },
+        {
+            "items": [
+                {"jobName": "Rule 1", "planTypeName": "Plan1"},
+                {"jobName": "Rule 2", "planTypeName": "Plan2"},
+            ]
+        },
+    ]
+
+    plan_types = SubstitutionVariableService(client).get_plan_types()
+
+    assert [item.cube_name for item in plan_types] == ["Plan1", "Plan2"]
 
 
 def test_build_updates_refuses_to_create_undiscovered_variable() -> None:

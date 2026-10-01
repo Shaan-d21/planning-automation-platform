@@ -114,6 +114,59 @@ class SQLExecutionQueueRepository:
             )
         return result.rowcount == 1
 
+    def request_cancellation(
+        self,
+        execution_id: str,
+        *,
+        requested_by: str,
+        now: datetime | None = None,
+    ) -> ExecutionJob:
+        """Cancel queued work or request a safe stop after the active step."""
+        current = _utc(now)
+        actor = " ".join(str(requested_by or "").split())[:80] or "unknown"
+        with self._database.begin() as connection:
+            statement = select(execution_queue).where(
+                execution_queue.c.execution_id == execution_id
+            )
+            if connection.dialect.name == "postgresql":
+                statement = statement.with_for_update()
+            row = connection.execute(statement).mappings().one_or_none()
+            if row is None:
+                raise ExecutionQueueError(
+                    f"Execution '{execution_id}' was not found."
+                )
+            status = ExecutionJobStatus(str(row["status"]))
+            if status.terminal:
+                return _job(row)
+            values: dict[str, object] = {
+                "cancellation_requested_at": current,
+                "cancellation_requested_by": actor,
+            }
+            if status is ExecutionJobStatus.QUEUED:
+                values.update(
+                    status=ExecutionJobStatus.CANCELLED.value,
+                    completed_at=current,
+                    error_message=(
+                        "Cancelled before a worker started the execution."
+                    ),
+                )
+            connection.execute(
+                update(execution_queue)
+                .where(execution_queue.c.execution_id == execution_id)
+                .values(**values)
+            )
+            refreshed = connection.execute(statement).mappings().one()
+        return _job(refreshed)
+
+    def cancellation_requested(self, execution_id: str) -> bool:
+        with self._database.connect() as connection:
+            value = connection.execute(
+                select(execution_queue.c.cancellation_requested_at).where(
+                    execution_queue.c.execution_id == execution_id
+                )
+            ).scalar_one_or_none()
+        return value is not None
+
     def claim_next(
         self,
         *,
@@ -263,6 +316,21 @@ class SQLExecutionQueueRepository:
             now=now,
         )
 
+    def cancel_claimed(
+        self,
+        execution_id: str,
+        *,
+        worker_id: str,
+        now: datetime | None = None,
+    ) -> None:
+        self._finish(
+            execution_id,
+            worker_id=worker_id,
+            status=ExecutionJobStatus.CANCELLED,
+            error_message="Stopped safely after the active Oracle step completed.",
+            now=now,
+        )
+
     def _finish(
         self,
         execution_id: str,
@@ -361,6 +429,10 @@ def _job(row) -> ExecutionJob:
         heartbeat_at=utc_datetime(row["heartbeat_at"]),
         completed_at=utc_datetime(row["completed_at"]),
         error_message=row["error_message"],
+        cancellation_requested_at=utc_datetime(
+            row["cancellation_requested_at"]
+        ),
+        cancellation_requested_by=row["cancellation_requested_by"],
     )
 
 

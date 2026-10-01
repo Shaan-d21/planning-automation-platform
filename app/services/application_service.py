@@ -20,6 +20,8 @@ from app.utils.exceptions import APIRequestError
 class ApplicationService:
     """Fetch application metadata exposed by the connected Planning version."""
 
+    _COMPATIBILITY_STATUS_CODES = frozenset({400, 404, 405, 501})
+
     def __init__(
         self,
         client: EPMClient,
@@ -82,7 +84,7 @@ class ApplicationService:
             response = self._client.get(endpoint)
             items = self._items(response, "plan types")
         except APIRequestError as exc:
-            if exc.status_code != 404:
+            if not self._can_use_legacy_discovery(exc):
                 raise
             plan_types = self._discover_legacy_plan_types()
             if not plan_types:
@@ -122,35 +124,44 @@ class ApplicationService:
                 f"{self._applications_endpoint}/"
                 f"{quote(self._client.application_name, safe='')}/"
                 "substitutionvariables",
-                "planType",
+                ("planType", "planTypeName", "cubeName"),
+                ("items", "substitutionVariables"),
             ),
             (
                 f"{self._applications_endpoint}/"
                 f"{quote(self._client.application_name, safe='')}/"
                 "jobdefinitions",
-                "planTypeName",
+                ("planTypeName", "cubeName", "planType"),
+                ("items", "jobDefinitions"),
             ),
         )
-        for endpoint, field in sources:
+        for endpoint, fields, collection_names in sources:
             try:
-                response = self._client.get(
+                items = self._legacy_items(
                     endpoint,
-                    params={"limit": -1},
+                    collection_names=collection_names,
                 )
-                items = self._items(response, "cube discovery")
             except APIRequestError as exc:
                 self._logger.warning(
                     "Oracle cube-discovery source '%s' was unavailable: %s",
-                    field,
+                    endpoint.rsplit("/", 1)[-1],
                     exc,
                 )
                 continue
             for item in items:
                 if not isinstance(item, Mapping):
                     continue
-                name = str(item.get(field, "")).strip()
+                name = next(
+                    (
+                        str(item.get(field, "")).strip()
+                        for field in fields
+                        if str(item.get(field, "")).strip()
+                    ),
+                    "",
+                )
                 if (
                     not name
+                    or name.isdecimal()
                     or name.casefold()
                     in {
                         "all",
@@ -162,6 +173,49 @@ class ApplicationService:
         return tuple(
             PlanTypeInfo(name=name, cube_name=name)
             for name in sorted(names.values(), key=str.casefold)
+        )
+
+    def _legacy_items(
+        self,
+        endpoint: str,
+        *,
+        collection_names: tuple[str, ...],
+    ) -> list:
+        """Read one legacy collection across common on-prem response shapes."""
+        try:
+            response = self._client.get(
+                endpoint,
+                params={"limit": -1},
+            )
+        except APIRequestError as exc:
+            if exc.status_code not in {400, 405}:
+                raise
+            # Some older Planning deployments expose the resource but reject
+            # cloud pagination parameters. Retry the same read without them.
+            response = self._client.get(endpoint)
+
+        if isinstance(response, list):
+            return response
+        if not isinstance(response, Mapping):
+            raise APIRequestError(
+                "Oracle Planning returned unexpected cube discovery metadata."
+            )
+        for name in collection_names:
+            items = response.get(name)
+            if isinstance(items, list):
+                return items
+        raise APIRequestError(
+            "Oracle Planning cube discovery response did not contain a "
+            "recognized collection."
+        )
+
+    def _can_use_legacy_discovery(self, error: APIRequestError) -> bool:
+        """Return whether a plan-type failure denotes an older API surface."""
+        if error.status_code == 404:
+            return True
+        return (
+            not bool(self._client.is_cloud_environment)
+            and error.status_code in self._COMPATIBILITY_STATUS_CODES
         )
 
     def get_dimensions(

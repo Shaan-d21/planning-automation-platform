@@ -39,10 +39,6 @@ export function LoginPage({
   const [displayName, setDisplayName] = useState("");
   const [email, setEmail] = useState("");
   const [passwordConfirmation, setPasswordConfirmation] = useState("");
-  const [showLocalLogin, setShowLocalLogin] = useState(
-    !identityAuthentication.federated_enabled
-      && !identityAuthentication.oracle_credentials_enabled
-  );
 
   async function submitLocal(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -65,34 +61,85 @@ export function LoginPage({
     });
   }
 
-  const alternateSignIn = identityAuthentication.federated_enabled
+  const oracleSignInAvailable = identityAuthentication.federated_enabled
     || identityAuthentication.oracle_credentials_enabled;
+  const platformSignInAvailable = identityAuthentication.local_recovery_enabled;
+
+  const oracleSignIn = <>
+    {identityAuthentication.federated_enabled && identityAuthentication.login_url && <div className="federated-login">
+      <a className="button button--quiet button--wide federated-login__button" href={identityAuthentication.login_url}>
+        <Icon name="users" /> Continue with Oracle SSO
+      </a>
+      <p>Oracle opens its secure sign-in page. Your Oracle password is never sent to this platform.</p>
+    </div>}
+    {identityAuthentication.federated_enabled && identityAuthentication.oracle_credentials_enabled && <div className="login-divider"><span>or use Oracle EPM credentials</span></div>}
+    {identityAuthentication.oracle_credentials_enabled && <form className="login-form login-form--oracle" onSubmit={submitOracle}>
+      <label><span>Oracle EPM username</span><input autoComplete="username" autoFocus={!platformSignInAvailable && !identityAuthentication.federated_enabled} value={oracleUsername} onChange={(event) => setOracleUsername(event.target.value)} required /></label>
+      <label><span>Oracle EPM password</span><input type="password" autoComplete="current-password" value={oraclePassword} onChange={(event) => setOraclePassword(event.target.value)} required /></label>
+      <button className="button button--quiet button--wide" disabled={busy}>
+        {busy ? <span className="spinner spinner--blue" /> : null}
+        {busy ? "Verifying with Oracle…" : "Sign in with Oracle EPM"}
+      </button>
+      <p className="login-form-note">Your credentials are validated directly against Oracle EPM and are not stored by this platform.</p>
+    </form>}
+  </>;
 
   return (
     <main className="login-page">
       <section className="login-story" aria-label="Product introduction">
+        <div className="login-story__glow login-story__glow--one" />
+        <div className="login-story__glow login-story__glow--two" />
         <div className="brand brand--inverse">
           <span className="brand-logo"><img src="/static/images/bisp-logo.png" alt="" /></span>
-          <span><strong>{company}</strong><small>EPM Automation</small></span>
+          <span><strong>{company}</strong><small>EPM AI Assistant</small></span>
         </div>
         <div className="login-story__content">
-          <span className="eyebrow eyebrow--light">Planning, orchestrated</span>
-          <h1>Move every Planning cycle forward with clarity.</h1>
-          <p>One governed workspace for Oracle EPM operations, business tasks, cycle progress, and management by exception.</p>
-          <div className="login-benefits">
-            <div><Icon name="tasks" /><span><strong>Know what is next</strong><small>Role-aware priorities and dependencies</small></span></div>
-            <div><Icon name="activity" /><span><strong>See the whole cycle</strong><small>From actual load through reporting</small></span></div>
-            <div><Icon name="check" /><span><strong>Act with confidence</strong><small>Governed execution and durable audit</small></span></div>
+          <div className="login-story__copy">
+            <span className="eyebrow eyebrow--light"><Icon name="sparkle" /> Governed EPM intelligence</span>
+            <h1>Your Planning cycle. <span>Guided by AI.</span></h1>
+            <p>Ask in plain language, work with live Oracle EPM context, and move from recommendation to governed execution—all in one workspace.</p>
+            <div className="login-benefits">
+              <div><Icon name="assistant" /><span><strong>Ask naturally</strong><small>Describe the outcome, not the navigation</small></span></div>
+              <div><Icon name="data" /><span><strong>Use live context</strong><small>Grounded in your Planning environment</small></span></div>
+              <div><Icon name="check" /><span><strong>Stay in control</strong><small>Review and approve before anything runs</small></span></div>
+            </div>
+          </div>
+
+          <div className="login-ai-map" aria-hidden="true">
+            <span className="login-ai-ring login-ai-ring--outer" />
+            <span className="login-ai-ring login-ai-ring--inner" />
+            <span className="login-ai-path login-ai-path--one" />
+            <span className="login-ai-path login-ai-path--two" />
+            <span className="login-ai-path login-ai-path--three" />
+
+            <div className="login-ai-core">
+              <span className="login-ai-core__pulse" />
+              <span className="login-ai-core__icon"><Icon name="assistant" /></span>
+              <strong>EPM Assistant</strong>
+              <small>Understanding your request</small>
+            </div>
+
+            <div className="login-ai-node login-ai-node--data"><Icon name="data" /><span>Live data</span></div>
+            <div className="login-ai-node login-ai-node--tasks"><Icon name="tasks" /><span>Cycle tasks</span></div>
+            <div className="login-ai-node login-ai-node--automation"><Icon name="automation" /><span>Oracle operations</span></div>
+            <div className="login-ai-node login-ai-node--governance"><Icon name="check" /><span>Approval</span></div>
+
+            <div className="login-ai-status"><Icon name="sparkle" /><span><small>AI recommendation</small><strong>Governed action ready</strong></span></div>
           </div>
         </div>
-        <p className="login-story__footer">Built by BISP Solutions</p>
+        <p className="login-story__footer"><span /> Secure by design · Built by BISP Solutions</p>
       </section>
 
       <section className="login-panel">
         <div className="login-card">
-          <span className="eyebrow">Secure platform access</span>
-          <h2>Welcome back</h2>
-          <p className="muted">Sign in to continue to {productName}.</p>
+          <div className="login-card__intro">
+            <span className="login-card__assistant"><Icon name="assistant" /></span>
+            <div>
+              <span className="eyebrow">Secure AI workspace</span>
+              <h2>Welcome back</h2>
+              <p className="muted">Sign in to continue to {productName}.</p>
+            </div>
+          </div>
 
           {requiresBootstrap ? (
             <div className="setup-state">
@@ -116,33 +163,21 @@ export function LoginPage({
             </div>
           ) : <>
             {error && <div className="inline-error login-error" role="alert">{error}</div>}
-            {identityAuthentication.federated_enabled && identityAuthentication.login_url && <div className="federated-login">
-              <a className="button button--primary button--wide federated-login__button" href={identityAuthentication.login_url}>
-                <Icon name="users" /> Sign in with Oracle SSO
-              </a>
-              <p>Oracle opens its secure sign-in page. Your Oracle password is never sent to this platform.</p>
-            </div>}
-            {identityAuthentication.federated_enabled && identityAuthentication.oracle_credentials_enabled && <div className="login-divider"><span>or use Oracle EPM credentials</span></div>}
-            {identityAuthentication.oracle_credentials_enabled && <form className="login-form" onSubmit={submitOracle}>
-              <label><span>Oracle EPM username</span><input autoComplete="username" autoFocus={!identityAuthentication.federated_enabled} value={oracleUsername} onChange={(event) => setOracleUsername(event.target.value)} required /></label>
-              <label><span>Oracle EPM password</span><input type="password" autoComplete="current-password" value={oraclePassword} onChange={(event) => setOraclePassword(event.target.value)} required /></label>
+            {platformSignInAvailable && <form className="login-form login-form--primary" onSubmit={submitLocal}>
+              <label><span>Username</span><input autoComplete="username" autoFocus value={localUsername} onChange={(event) => setLocalUsername(event.target.value)} required /></label>
+              <label><span>Password</span><input type="password" autoComplete="current-password" value={localPassword} onChange={(event) => setLocalPassword(event.target.value)} required /></label>
               <button className="button button--primary button--wide" disabled={busy}>
                 {busy ? <span className="spinner" /> : null}
-                {busy ? "Verifying with Oracle…" : "Sign in with Oracle EPM"}
+                {busy ? "Signing in…" : "Sign in"}
               </button>
-              <p className="login-form-note">Credentials are validated directly against the connected Oracle EPM environment and are never stored by this platform.</p>
+              <p className="login-form-note">Use the platform account provided by your administrator.</p>
             </form>}
-            {alternateSignIn && identityAuthentication.local_recovery_enabled && <div className="login-divider"><span>Recovery sign-in</span></div>}
-            {alternateSignIn && identityAuthentication.local_recovery_enabled && !showLocalLogin && <button type="button" className="button button--quiet button--wide local-login-toggle" onClick={() => setShowLocalLogin(true)}>Use a local recovery account</button>}
-            {showLocalLogin && <form className="login-form" onSubmit={submitLocal}>
-              <label><span>Local platform username</span><input autoComplete="username" autoFocus={!alternateSignIn} value={localUsername} onChange={(event) => setLocalUsername(event.target.value)} required /></label>
-              <label><span>Local platform password</span><input type="password" autoComplete="current-password" value={localPassword} onChange={(event) => setLocalPassword(event.target.value)} required /></label>
-              <button className="button button--primary button--wide" disabled={busy}>
-                {busy ? <span className="spinner" /> : null}
-                {busy ? "Signing in…" : "Sign in with local account"}
-              </button>
-              {alternateSignIn && <p className="login-form-note">Use this only for an existing local recovery account. Do not enter Oracle credentials here.</p>}
-            </form>}
+            {platformSignInAvailable && oracleSignInAvailable && <div className="login-divider"><span>Other sign-in options</span></div>}
+            {platformSignInAvailable && oracleSignInAvailable && <details className="alternate-login">
+              <summary><span><Icon name="users" /> Use Oracle sign-in</span><Icon name="chevron" /></summary>
+              <div className="alternate-login__body">{oracleSignIn}</div>
+            </details>}
+            {!platformSignInAvailable && oracleSignInAvailable && <div className="alternate-login__body alternate-login__body--only">{oracleSignIn}</div>}
           </>}
         </div>
       </section>

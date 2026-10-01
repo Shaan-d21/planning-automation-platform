@@ -143,6 +143,7 @@ class GeminiAgentProvider:
         system_instruction: str,
         tools: Sequence[AgentToolDefinition],
         provider_exchange: Sequence[dict[str, Any]],
+        required_tool_name: str | None = None,
     ) -> AgentProviderTurn:
         """Generate one Gemini turn; application code owns tool execution."""
         try:
@@ -151,10 +152,20 @@ class GeminiAgentProvider:
                 self._deserialize_content(item) for item in provider_exchange
             )
             declarations = [self._function_declaration(tool) for tool in tools]
+            tool_config = (
+                self._types.ToolConfig(
+                    function_calling_config=self._types.FunctionCallingConfig(
+                        mode="ANY",
+                        allowed_function_names=[required_tool_name],
+                    )
+                )
+                if required_tool_name else None
+            )
             config = self._types.GenerateContentConfig(
                 system_instruction=system_instruction,
                 temperature=0.2,
                 tools=[self._types.Tool(function_declarations=declarations)],
+                tool_config=tool_config,
                 automatic_function_calling=(
                     self._types.AutomaticFunctionCallingConfig(disable=True)
                 ),
