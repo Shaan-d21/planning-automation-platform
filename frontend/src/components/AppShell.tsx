@@ -23,7 +23,10 @@ export function AppShell({
   onRefresh
 }: AppShellProps) {
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const user = bootstrap.user!;
+  const isHome = activeView === "home";
+  const platformHref = platformEntryHref(bootstrap);
   const groups = bootstrap.navigation.reduce<Record<string, typeof bootstrap.navigation>>(
     (result, item) => {
       (result[item.group] ??= []).push(item);
@@ -33,52 +36,64 @@ export function AppShell({
   );
 
   return (
-    <div className={`app-shell${activeView === "assistant" ? " app-shell--assistant" : ""}`}>
-      <button
-        className="mobile-menu"
-        aria-label="Open navigation"
-        aria-expanded={mobileOpen}
-        onClick={() => setMobileOpen(true)}
-      >
-        <Icon name="menu" />
-      </button>
-      {mobileOpen && <button className="scrim" aria-label="Close navigation" onClick={() => setMobileOpen(false)} />}
-      <aside className={`sidebar${mobileOpen ? " is-open" : ""}`}>
-        <div className="sidebar-brand">
-          <img src="/static/images/bisp-logo.png" alt="BISP Solutions" />
-          <div><strong>EPM AI Assistant</strong><small>Planning workspace</small></div>
-          <button className="sidebar-close" onClick={() => setMobileOpen(false)} aria-label="Close navigation"><Icon name="close" /></button>
-        </div>
-        <nav aria-label="Primary navigation">
-          {Object.entries(groups).map(([group, items]) => (
-            <div className="nav-group" key={group}>
-              <span>{group}</span>
-              {items.map((item) => (
-                <a
-                  className={`nav-link${isActiveNavigation(item.code, activeView) ? " is-active" : ""}`}
-                  href={navigationHref(item.code, item.path)}
-                  key={item.code}
-                  onClick={() => setMobileOpen(false)}
-                >
-                  <span className="nav-icon"><Icon name={navigationIcon(item.code)} /></span>
-                  {item.label}
-                </a>
-              ))}
-            </div>
-          ))}
-        </nav>
-        <div className="sidebar-footer">
-          <span className="environment-dot" />
-          <div><strong>{bootstrap.environment?.application_name}</strong><small>{bootstrap.environment?.deployment_mode} environment</small></div>
-        </div>
-      </aside>
+    <div className={`app-shell${isHome ? " app-shell--home" : ""}${sidebarCollapsed && !isHome ? " app-shell--sidebar-collapsed" : ""}${activeView === "assistant" ? " app-shell--assistant" : ""}`}>
+      {!isHome && <>
+        <button
+          className="mobile-menu"
+          aria-label="Open navigation"
+          aria-expanded={mobileOpen}
+          onClick={() => setMobileOpen(true)}
+        >
+          <Icon name="menu" />
+        </button>
+        {mobileOpen && <button className="scrim" aria-label="Close navigation" onClick={() => setMobileOpen(false)} />}
+        <aside className={`sidebar${mobileOpen ? " is-open" : ""}${sidebarCollapsed ? " is-collapsed" : ""}`}>
+          <div className="sidebar-brand">
+            <img src="/static/images/bisp-logo.png" alt="BISP Solutions" />
+            <div><strong>EPM AI Assistant</strong><small>Planning workspace</small></div>
+            <button
+              className="sidebar-toggle"
+              type="button"
+              aria-label={sidebarCollapsed ? "Expand navigation" : "Collapse navigation"}
+              aria-expanded={!sidebarCollapsed}
+              title={sidebarCollapsed ? "Expand navigation" : "Collapse navigation"}
+              onClick={() => setSidebarCollapsed((collapsed) => !collapsed)}
+            ><Icon name="chevron" /></button>
+            <button className="sidebar-close" onClick={() => setMobileOpen(false)} aria-label="Close navigation"><Icon name="close" /></button>
+          </div>
+          <nav aria-label="Primary navigation">
+            {Object.entries(groups).map(([group, items]) => (
+              <div className="nav-group" key={group}>
+                <span>{group}</span>
+                {items.map((item) => (
+                  <a
+                    className={`nav-link${isActiveNavigation(item.code, activeView) ? " is-active" : ""}`}
+                    href={navigationHref(item.code, item.path)}
+                    key={item.code}
+                    title={sidebarCollapsed ? item.label : undefined}
+                    onClick={() => setMobileOpen(false)}
+                  >
+                    <span className="nav-icon"><Icon name={navigationIcon(item.code)} /></span>
+                    <span className="nav-label">{item.label}</span>
+                  </a>
+                ))}
+              </div>
+            ))}
+          </nav>
+          <div className="sidebar-footer">
+            <span className="environment-dot" />
+            <div><strong>{bootstrap.environment?.application_name}</strong><small>{bootstrap.environment?.deployment_mode} environment</small></div>
+          </div>
+        </aside>
+      </>}
 
-      <div className={`workspace${activeView === "assistant" ? " workspace--assistant" : ""}`}>
+      <div className={`workspace${isHome ? " workspace--home" : ""}${activeView === "assistant" ? " workspace--assistant" : ""}`}>
         <header className="topbar">
           <div className="topbar-context">
             <span>Oracle EPM</span><Icon name="chevron" /><strong>{viewLabel(activeView)}</strong>
           </div>
           <div className="topbar-actions">
+            {isHome && platformHref && <a className="topbar-enter-platform" href={platformHref}>Enter platform <Icon name="arrow" /></a>}
             <a className="icon-button notification-button" aria-label={`${unreadNotifications} unread notifications`} href="#notifications"><Icon name="bell" />{unreadNotifications > 0 && <span>{unreadNotifications > 9 ? "9+" : unreadNotifications}</span>}</a>
             <button className="icon-button" aria-label={`Refresh ${viewLabel(activeView)}`} onClick={onRefresh} disabled={busy}><Icon name="refresh" /></button>
             <div className="user-summary">
@@ -139,6 +154,14 @@ function navigationHref(code: string, fallback: string) {
   };
   if (reactViews[code]) return `#${reactViews[code]}`;
   return fallback;
+}
+
+function platformEntryHref(bootstrap: BootstrapResponse) {
+  const preferredCodes = ["tasks", "assistant", "operations", "data-review", "jobs", "schedules"];
+  const destination = preferredCodes
+    .map((code) => bootstrap.navigation.find((item) => item.code === code))
+    .find(Boolean) ?? bootstrap.navigation.find((item) => item.code !== "home");
+  return destination ? navigationHref(destination.code, destination.path) : null;
 }
 
 function viewLabel(view: AppShellProps["activeView"]) {
