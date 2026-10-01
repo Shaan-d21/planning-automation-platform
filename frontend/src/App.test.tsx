@@ -123,14 +123,41 @@ describe("App", () => {
     }));
   });
 
-  it("introduces the AI-first Planning experience and previews My Work", async () => {
+  it("introduces the AI-first Planning experience without duplicating My Work", async () => {
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: /Planning work, made simpler with AI/i })).toBeTruthy();
     expect(document.querySelector("main.page--home")).toBeTruthy();
-    expect(screen.getByText("Tell the Assistant what you need.")).toBeTruthy();
-    expect(screen.getByText("1 item requires attention")).toBeTruthy();
+    expect(document.querySelector(".app-shell--home")).toBeTruthy();
+    expect(screen.queryByRole("navigation", { name: "Primary navigation" })).toBeNull();
+    expect(screen.getAllByRole("link", { name: /Enter platform/i })[0].getAttribute("href")).toBe("#tasks");
+    expect(screen.getByText("Start with everyday Planning work")).toBeTruthy();
+    expect(screen.getByText("AI assists. You remain in control.")).toBeTruthy();
+    expect(screen.queryByText("1 item requires attention")).toBeNull();
+    expect(screen.getByRole("button", { name: "Load: Load September actuals." }).getAttribute("aria-expanded")).toBe("true");
     expect(screen.queryByText("Review revenue assumptions")).toBeNull();
+  });
+
+  it("lets users collapse and expand the platform navigation", async () => {
+    window.location.hash = "#tasks";
+    vi.mocked(fetch).mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/v1/bootstrap") return response(bootstrap);
+      if (url === "/api/v1/home") return response(home);
+      if (url === "/api/v1/notifications") return response(notificationInbox);
+      if (url === "/api/v1/planning-tasks") return response({ status: "success", cycles: home.cycles, tasks: home.tasks });
+      return response({ detail: "Unexpected request" }, 404);
+    });
+    render(<App />);
+
+    const collapse = await screen.findByRole("button", { name: "Collapse navigation" });
+    fireEvent.click(collapse);
+
+    expect(document.querySelector(".app-shell--sidebar-collapsed")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Expand navigation" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand navigation" }));
+    expect(document.querySelector(".app-shell--sidebar-collapsed")).toBeNull();
   });
 
   it("starts a ready task from My Work and refreshes the live work data", async () => {
@@ -174,10 +201,10 @@ describe("App", () => {
     });
     render(<App />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Run forecast seeding" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Run sales forecast" }));
 
     const composer = await screen.findByLabelText("Message the EPM Assistant") as HTMLTextAreaElement;
-    expect(composer.value).toBe("Run forecast seeding");
+    expect(composer.value).toBe("Run sales forecast");
     expect(window.location.hash).toBe("#assistant");
   });
 

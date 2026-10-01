@@ -536,11 +536,6 @@ export function EpmAssistantWorkspace({ csrfToken, initialPrompt = "", onInitial
   if (loading) return <WorkspaceLoading label="EPM Assistant" message="Preparing your governed conversations…" />;
 
   return <section className="assistant-workspace">
-    <header className="page-intro assistant-intro">
-      <div><span className="eyebrow">Planning copilot</span><h1>EPM Assistant</h1><p>Ask questions, inspect Planning, or prepare a governed action.</p></div>
-      <div className="assistant-intro__status"><span className={`assistant-status${status?.enabled ? " is-ready" : " is-warning"}`}><i />{status?.enabled ? "Ready" : "Configuration required"}</span></div>
-    </header>
-
     {error && <FeedbackBanner tone="error" title="The assistant could not complete that request" message={error} onDismiss={() => setError(null)} />}
     {!status?.enabled && <div className="assistant-configuration"><Icon name="settings" /><div><strong>EPM Assistant needs a model provider</strong><p>{status?.message} All other Planning workspaces remain available.</p></div></div>}
 

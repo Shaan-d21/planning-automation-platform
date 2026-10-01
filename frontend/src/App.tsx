@@ -638,7 +638,6 @@ export function App() {
       ) : (
         <Dashboard
           bootstrap={bootstrap}
-          home={home}
           onStartAssistant={startAssistant}
         />
       )}
