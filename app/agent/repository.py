@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from sqlalchemy import delete, insert, select, update
@@ -16,6 +16,8 @@ from app.agent.models import (
     AgentMessage,
     AgentMessageRole,
     AgentToolActivity,
+    AgentTurn,
+    AgentTurnStatus,
 )
 from app.infrastructure.database.engine import (
     DatabaseTarget,
@@ -28,6 +30,7 @@ from app.infrastructure.database.schema import (
     agent_conversations,
     agent_messages,
     agent_tool_activities,
+    agent_turns,
 )
 from app.utils.exceptions import AgentConversationError
 
@@ -113,6 +116,266 @@ class SQLAgentRepository:
                 select(recent).order_by(recent.c.message_id)
             ).mappings().all()
         return tuple(self._message(row) for row in rows)
+
+    def get_message(
+        self,
+        *,
+        conversation_id: str,
+        user_id: int,
+        message_id: int,
+    ) -> AgentMessage | None:
+        self._require_conversation(conversation_id, user_id)
+        with self._database.connect() as connection:
+            row = connection.execute(
+                select(agent_messages).where(
+                    agent_messages.c.conversation_id == conversation_id,
+                    agent_messages.c.message_id == message_id,
+                )
+            ).mappings().one_or_none()
+        return self._message(row) if row is not None else None
+
+    def reserve_turn(
+        self,
+        *,
+        conversation_id: str,
+        user_id: int,
+        client_message_id: str,
+    ) -> tuple[AgentTurn, bool]:
+        """Atomically reserve the only active turn for one conversation."""
+        self._require_conversation(conversation_id, user_id)
+        # The client-generated UUID is also the public turn identifier. This
+        # lets the browser request cancellation before the original HTTP call
+        # has returned, while the unique constraint still provides replay
+        # protection.
+        turn_id = client_message_id
+        now = datetime.now(UTC)
+        try:
+            with self._database.begin() as connection:
+                # A process can terminate after reserving a turn. Expire only
+                # clearly abandoned reservations so one crash cannot lock a
+                # conversation forever; normal provider calls retain a wide
+                # execution window.
+                connection.execute(
+                    update(agent_turns)
+                    .where(
+                        agent_turns.c.conversation_id == conversation_id,
+                        agent_turns.c.status.in_(
+                            (
+                                AgentTurnStatus.RUNNING.value,
+                                AgentTurnStatus.CANCEL_REQUESTED.value,
+                            )
+                        ),
+                        agent_turns.c.started_at
+                        < now - timedelta(minutes=30),
+                    )
+                    .values(
+                        status=AgentTurnStatus.FAILED.value,
+                        error_summary=(
+                            "Agent process ended before this turn completed."
+                        ),
+                        finished_at=now,
+                    )
+                )
+                connection.execute(
+                    insert(agent_turns).values(
+                        turn_id=turn_id,
+                        conversation_id=conversation_id,
+                        user_id=user_id,
+                        client_message_id=client_message_id,
+                        status=AgentTurnStatus.RUNNING.value,
+                        created_at=now,
+                        started_at=now,
+                    )
+                )
+        except IntegrityError:
+            existing = self.get_turn_by_client_message(
+                conversation_id=conversation_id,
+                user_id=user_id,
+                client_message_id=client_message_id,
+            )
+            if existing is not None:
+                return existing, False
+            raise AgentConversationError(
+                "Another assistant response is already being prepared for "
+                "this conversation. Wait for it to finish or cancel it."
+            ) from None
+        turn = self.get_turn(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            turn_id=turn_id,
+        )
+        assert turn is not None
+        return turn, True
+
+    def get_turn(
+        self,
+        *,
+        conversation_id: str,
+        user_id: int,
+        turn_id: str,
+    ) -> AgentTurn | None:
+        self._require_conversation(conversation_id, user_id)
+        with self._database.connect() as connection:
+            row = connection.execute(
+                select(agent_turns).where(
+                    agent_turns.c.turn_id == turn_id,
+                    agent_turns.c.conversation_id == conversation_id,
+                    agent_turns.c.user_id == user_id,
+                )
+            ).mappings().one_or_none()
+        return self._turn(row) if row is not None else None
+
+    def get_turn_by_client_message(
+        self,
+        *,
+        conversation_id: str,
+        user_id: int,
+        client_message_id: str,
+    ) -> AgentTurn | None:
+        self._require_conversation(conversation_id, user_id)
+        with self._database.connect() as connection:
+            row = connection.execute(
+                select(agent_turns).where(
+                    agent_turns.c.conversation_id == conversation_id,
+                    agent_turns.c.user_id == user_id,
+                    agent_turns.c.client_message_id == client_message_id,
+                )
+            ).mappings().one_or_none()
+        return self._turn(row) if row is not None else None
+
+    def active_turn(
+        self, conversation_id: str, user_id: int
+    ) -> AgentTurn | None:
+        self._require_conversation(conversation_id, user_id)
+        with self._database.connect() as connection:
+            row = connection.execute(
+                select(agent_turns)
+                .where(
+                    agent_turns.c.conversation_id == conversation_id,
+                    agent_turns.c.user_id == user_id,
+                    agent_turns.c.status.in_(
+                        (
+                            AgentTurnStatus.RUNNING.value,
+                            AgentTurnStatus.CANCEL_REQUESTED.value,
+                        )
+                    ),
+                )
+                .order_by(agent_turns.c.created_at.desc())
+                .limit(1)
+            ).mappings().one_or_none()
+        return self._turn(row) if row is not None else None
+
+    def attach_turn_user_message(
+        self, *, turn_id: str, user_id: int, message_id: int
+    ) -> None:
+        with self._database.begin() as connection:
+            connection.execute(
+                update(agent_turns)
+                .where(
+                    agent_turns.c.turn_id == turn_id,
+                    agent_turns.c.user_id == user_id,
+                    agent_turns.c.status.in_(
+                        (
+                            AgentTurnStatus.RUNNING.value,
+                            AgentTurnStatus.CANCEL_REQUESTED.value,
+                        )
+                    ),
+                )
+                .values(user_message_id=message_id)
+            )
+
+    def request_turn_cancellation(
+        self, *, conversation_id: str, user_id: int, turn_id: str
+    ) -> AgentTurn:
+        turn = self.get_turn(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            turn_id=turn_id,
+        )
+        if turn is None:
+            raise AgentConversationError("Agent turn was not found.")
+        if turn.status is AgentTurnStatus.RUNNING:
+            now = datetime.now(UTC)
+            with self._database.begin() as connection:
+                connection.execute(
+                    update(agent_turns)
+                    .where(
+                        agent_turns.c.turn_id == turn_id,
+                        agent_turns.c.user_id == user_id,
+                        agent_turns.c.status == AgentTurnStatus.RUNNING.value,
+                    )
+                    .values(
+                        status=AgentTurnStatus.CANCEL_REQUESTED.value,
+                        cancel_requested_at=now,
+                    )
+                )
+            turn = self.get_turn(
+                conversation_id=conversation_id,
+                user_id=user_id,
+                turn_id=turn_id,
+            )
+            assert turn is not None
+        return turn
+
+    def turn_cancellation_requested(
+        self, *, conversation_id: str, user_id: int, turn_id: str
+    ) -> bool:
+        turn = self.get_turn(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            turn_id=turn_id,
+        )
+        return (
+            turn is not None
+            and turn.status is AgentTurnStatus.CANCEL_REQUESTED
+        )
+
+    def finish_turn(
+        self,
+        *,
+        conversation_id: str,
+        user_id: int,
+        turn_id: str,
+        status: AgentTurnStatus,
+        assistant_message_id: int | None = None,
+        error_summary: str | None = None,
+    ) -> AgentTurn:
+        if status not in {
+            AgentTurnStatus.COMPLETED,
+            AgentTurnStatus.FAILED,
+            AgentTurnStatus.CANCELLED,
+        }:
+            raise ValueError("Agent turn must finish in a terminal state.")
+        now = datetime.now(UTC)
+        with self._database.begin() as connection:
+            connection.execute(
+                update(agent_turns)
+                .where(
+                    agent_turns.c.turn_id == turn_id,
+                    agent_turns.c.conversation_id == conversation_id,
+                    agent_turns.c.user_id == user_id,
+                    agent_turns.c.status.in_(
+                        (
+                            AgentTurnStatus.RUNNING.value,
+                            AgentTurnStatus.CANCEL_REQUESTED.value,
+                        )
+                    ),
+                )
+                .values(
+                    status=status.value,
+                    assistant_message_id=assistant_message_id,
+                    error_summary=error_summary,
+                    finished_at=now,
+                )
+            )
+        turn = self.get_turn(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            turn_id=turn_id,
+        )
+        if turn is None:
+            raise AgentConversationError("Agent turn was not found.")
+        return turn
 
     def add_message(
         self,
@@ -689,6 +952,32 @@ class SQLAgentRepository:
             role=AgentMessageRole(str(row["role"])),
             content=str(row["content"]),
             created_at=utc_datetime(row["created_at"]),
+        )
+
+    @staticmethod
+    def _turn(row) -> AgentTurn:
+        return AgentTurn(
+            turn_id=str(row["turn_id"]),
+            conversation_id=str(row["conversation_id"]),
+            user_id=int(row["user_id"]),
+            client_message_id=str(row["client_message_id"]),
+            status=AgentTurnStatus(str(row["status"])),
+            user_message_id=(
+                int(row["user_message_id"])
+                if row["user_message_id"] is not None else None
+            ),
+            assistant_message_id=(
+                int(row["assistant_message_id"])
+                if row["assistant_message_id"] is not None else None
+            ),
+            error_summary=(
+                str(row["error_summary"])
+                if row["error_summary"] is not None else None
+            ),
+            created_at=utc_datetime(row["created_at"]),
+            started_at=utc_datetime(row["started_at"]),
+            finished_at=utc_datetime(row["finished_at"]),
+            cancel_requested_at=utc_datetime(row["cancel_requested_at"]),
         )
 
     @staticmethod

@@ -61,7 +61,21 @@ expected result. Supported kinds are:
 - `intent_route` for intent and exact least-privilege tool exposure;
 - `task_understanding` for business intent, phase, collected parameters, and
   missing-parameter behavior across one or more conversation turns; and
-- `artifact_ranking` for conservative Oracle artifact recommendation.
+- `artifact_ranking` for conservative Oracle artifact recommendation;
+- `canonical_context` for task identity, parameter provenance, and safe
+  context inheritance;
+- `entity_resolution` for exact, ambiguous, unavailable, and unverified
+  Oracle-object outcomes;
+- `clarification_resolution` for exact-name and ordinal card selections;
+- `follow_up_resolution` for status, failure explanation, repetition, and
+  repetition with changed parameters; and
+- `parameter_delta` for corrections, contradictions, and range-versus-target
+  distinctions.
+
+Agent lifecycle transitions are also emitted as structured
+`agent_task_transition` log events. These contain state names, identifiers,
+and changed parameter names only. Prompts, parameter values, credentials,
+Oracle payloads, and artifact candidate names are excluded.
 
 Do not add customer credentials, exported metadata, real member data, or other
 sensitive Oracle content to an evaluation case. Use representative synthetic

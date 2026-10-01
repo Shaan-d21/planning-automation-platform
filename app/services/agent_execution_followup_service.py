@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from app.agent.repository import SQLAgentRepository
+from app.agent.observability import log_agent_transition
 from app.application.execution_evidence import agent_execution_evidence
 from app.infrastructure.database.engine import DatabaseTarget
 from app.models.execution_queue import ExecutionJobStatus
@@ -66,6 +67,43 @@ class AgentExecutionFollowUpService:
             content=content,
         )
         if message is not None:
+            snapshot = (
+                dict(decision.payload_snapshot)
+                if isinstance(decision.payload_snapshot, dict)
+                else {}
+            )
+            task_id = str(snapshot.get("task_id") or "")
+            capability = str(
+                snapshot.get("canonical_capability") or "unknown"
+            )
+            terminal_phase = (
+                "COMPLETED"
+                if job.status is ExecutionJobStatus.SUCCESS
+                else "CANCELLED"
+                if job.status is ExecutionJobStatus.CANCELLED
+                else "FAILED"
+            )
+            log_agent_transition(
+                self._logger,
+                conversation_id=message.conversation_id,
+                user_id=decision.actor_user_id,
+                previous_context={
+                    "task_id": task_id,
+                    "phase": "WAITING_FOR_ORACLE",
+                    "canonical_capability": capability,
+                },
+                current_context={
+                    "task_id": task_id,
+                    "phase": terminal_phase,
+                    "canonical_capability": capability,
+                    "current_execution": {
+                        "execution_id": job.execution_id,
+                        "status": job.status.value,
+                    },
+                },
+                trigger="oracle_execution_completed",
+                execution_id=job.execution_id,
+            )
             self._logger.info(
                 "Agent execution follow-up published: execution_id='%s', "
                 "conversation_id='%s', status='%s'.",

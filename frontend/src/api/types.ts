@@ -1578,6 +1578,23 @@ export interface AgentConversationsResponse {
   conversations: AgentConversation[];
 }
 
+export type AgentTurnStatus = "RUNNING" | "CANCEL_REQUESTED" | "COMPLETED" | "FAILED" | "CANCELLED";
+
+export interface AgentTurn {
+  turn_id: string;
+  conversation_id: string;
+  user_id: number;
+  client_message_id: string;
+  status: AgentTurnStatus;
+  user_message_id: number | null;
+  assistant_message_id: number | null;
+  error_summary: string | null;
+  created_at: string;
+  started_at: string;
+  finished_at: string | null;
+  cancel_requested_at: string | null;
+}
+
 export interface AgentMessagesResponse {
   status: string;
   messages: AgentMessage[];
@@ -1586,6 +1603,7 @@ export interface AgentMessagesResponse {
   clarification_request: AgentClarificationRequest | null;
   input_request: AgentInputRequest | null;
   data_review_context?: AgentDataReviewContext | null;
+  active_turn?: AgentTurn | null;
 }
 
 export interface AgentDataReviewContext {
@@ -1604,6 +1622,7 @@ export interface AgentSendResponse {
   execution?: AgentApprovedExecution | null;
   schedule?: AutomationSchedule | null;
   decision?: AgentActionDecision | null;
+  turn?: AgentTurn | null;
 }
 
 export interface AgentClarificationRefreshResponse {

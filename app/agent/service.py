@@ -11,6 +11,7 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path, PurePath
 from urllib.parse import urlparse
+from uuid import UUID, uuid4
 
 from app.agent.capabilities import (
     AgentCapabilityGateway,
@@ -25,12 +26,22 @@ from app.agent.checkpoints import AgentCheckpointStore
 from app.agent.context import AgentContextResolver
 from app.agent.canonical import recognize_explicit_capability
 from app.agent.graph import AgentGraphOrchestrator
+from app.agent.followups import AgentFollowUpResolver
+from app.agent.clarification import (
+    ClarificationChoiceResolver,
+    ClarificationChoiceStatus,
+)
 from app.agent.intent import AgentIntentRouter
+from app.agent.parameter_updates import AgentParameterDeltaResolver
 from app.agent.semantic_interpreter import (
     AgentSemanticInterpreter,
     semantic_task_understanding,
 )
 from app.agent.task_state import AgentTaskIntent, AgentTaskInterpreter
+from app.agent.task_lifecycle import (
+    context_needs_focused_reply,
+    reconcile_task_context,
+)
 from app.agent.models import (
     AgentActionDecision,
     AgentApprovalRequest,
@@ -40,8 +51,10 @@ from app.agent.models import (
     AgentProviderResult,
     AgentToolActivity,
     AgentToolCall,
+    AgentTurn,
+    AgentTurnStatus,
 )
-from app.agent.observability import log_agent_decision
+from app.agent.observability import log_agent_decision, log_agent_transition
 from app.agent.preflight import AgentActionPreflightService
 from app.agent.provider import AgentProvider
 from app.agent.repository import SQLAgentRepository
@@ -114,6 +127,11 @@ from app.utils.exceptions import (
 
 
 ProviderFactory = Callable[[], AgentProvider]
+
+
+class _AgentTurnCancelled(Exception):
+    """Internal control signal raised before a cancelled turn is persisted."""
+
 
 _ROLE_LABELS = {
     RoleCode.SYSTEM_ADMINISTRATOR: "System Administrator",
@@ -741,6 +759,65 @@ class AgentApplicationService:
         conversation_id: str,
         user: UserAccount,
         content: str,
+        client_message_id: str | None = None,
+    ) -> dict[str, object]:
+        """Run one idempotent, cross-process coordinated agent turn."""
+        self._require_agent_use(user)
+        idempotency_key = str(client_message_id or uuid4()).strip()
+        try:
+            idempotency_key = str(UUID(idempotency_key))
+        except (TypeError, ValueError, AttributeError):
+            raise AgentConfigurationError(
+                "The agent message identifier is invalid."
+            ) from None
+        turn, reserved = self._repository.reserve_turn(
+            conversation_id=conversation_id,
+            user_id=user.user_id,
+            client_message_id=idempotency_key,
+        )
+        if not reserved:
+            return self._replay_turn(turn, user)
+        try:
+            response = self._send_message_once(
+                conversation_id=conversation_id,
+                user=user,
+                content=content,
+                turn_id=turn.turn_id,
+            )
+        except _AgentTurnCancelled:
+            return self._complete_cancelled_turn(turn, user)
+        except Exception as exc:
+            if self._repository.turn_cancellation_requested(
+                conversation_id=conversation_id,
+                user_id=user.user_id,
+                turn_id=turn.turn_id,
+            ):
+                return self._complete_cancelled_turn(turn, user)
+            self._repository.finish_turn(
+                conversation_id=conversation_id,
+                user_id=user.user_id,
+                turn_id=turn.turn_id,
+                status=AgentTurnStatus.FAILED,
+                error_summary=str(exc)[:2_000],
+            )
+            raise
+        finished = self._repository.finish_turn(
+            conversation_id=conversation_id,
+            user_id=user.user_id,
+            turn_id=turn.turn_id,
+            status=AgentTurnStatus.COMPLETED,
+            assistant_message_id=response["message"].message_id,
+        )
+        response["turn"] = finished
+        return response
+
+    def _send_message_once(
+        self,
+        *,
+        conversation_id: str,
+        user: UserAccount,
+        content: str,
+        turn_id: str,
     ) -> dict[str, object]:
         self._require_agent_use(user)
         prompt = content.strip()
@@ -792,10 +869,11 @@ class AgentApplicationService:
                     request_id=pending_input.request_id,
                     values=None,
                 )
-            return self.send_message(
+            return self._send_message_once(
                 conversation_id=conversation_id,
                 user=user,
                 content=next_request,
+                turn_id=turn_id,
             )
         if pending_clarification is not None or pending_input is not None:
             continuation = self._continue_pending_chat_reply(
@@ -804,6 +882,7 @@ class AgentApplicationService:
                 prompt=prompt,
                 clarification=pending_clarification,
                 input_request=pending_input,
+                turn_id=turn_id,
             )
             if continuation is not None:
                 return continuation
@@ -812,17 +891,28 @@ class AgentApplicationService:
                 "Complete or cancel the pending review card before sending "
                 "another message. Chat cannot approve an Oracle operation."
             )
-        self._repository.add_message(
+        user_message = self._repository.add_message(
             conversation_id=conversation_id,
             user_id=user.user_id,
             role=AgentMessageRole.USER,
             content=prompt,
+        )
+        self._repository.attach_turn_user_message(
+            turn_id=turn_id,
+            user_id=user.user_id,
+            message_id=user_message.message_id,
+        )
+        self._raise_if_turn_cancelled(
+            conversation_id=conversation_id,
+            user_id=user.user_id,
+            turn_id=turn_id,
         )
         if self._is_current_user_access_request(prompt):
             return self._persist_agent_result(
                 conversation_id=conversation_id,
                 user=user,
                 result=self._current_user_access_result(user),
+                turn_id=turn_id,
             )
         messages = self._repository.list_messages(
             conversation_id,
@@ -833,33 +923,57 @@ class AgentApplicationService:
             conversation_id,
             user,
         )
-        prior_task_context = (
-            self._graph.current_task_context(
-                conversation_id=conversation_id,
-                user_id=user.user_id,
+        prior_task_context = self._current_task_context(
+            conversation_id,
+            user.user_id,
+        )
+        action_decisions = self._repository.list_action_decisions(
+            conversation_id,
+            user.user_id,
+        )
+        prior_task_context = reconcile_task_context(
+            prior_task_context,
+            action_decisions,
+        )
+        follow_up = AgentFollowUpResolver.resolve(
+            prompt,
+            prior_task_context,
+        )
+        task_understanding = (
+            follow_up.task
+            if follow_up is not None
+            else AgentTaskInterpreter.interpret(
+                messages,
+                prior_context=prior_task_context,
             )
-            if self._graph is not None
-            and callable(getattr(self._graph, "current_task_context", None))
+        )
+        parameter_delta = (
+            AgentParameterDeltaResolver.resolve(
+                prompt,
+                prior_task_context,
+                task_understanding,
+            )
+            if follow_up is None
             else None
         )
-        task_understanding = AgentTaskInterpreter.interpret(
-            messages,
-            prior_context=prior_task_context,
-        )
+        if parameter_delta is not None:
+            task_understanding = parameter_delta.task
         semantic_interpretation = None
         explicit_canonical_interpretation = None
         active_prior_context = (
             isinstance(prior_task_context, dict)
             and str(prior_task_context.get("intent") or "").upper()
             not in {"", "UNKNOWN"}
-            and str(prior_task_context.get("phase") or "").upper()
-            not in {"COMPLETED", "FAILED", "CANCELLED"}
+            and context_needs_focused_reply(prior_task_context, prompt)
         )
         retain_active_context = (
-            task_understanding.intent is AgentTaskIntent.UNKNOWN
+            follow_up is None
+            and task_understanding.intent is AgentTaskIntent.UNKNOWN
             and active_prior_context
         )
         if (
+            follow_up is None
+            and
             task_understanding.intent is AgentTaskIntent.UNKNOWN
             and not retain_active_context
         ):
@@ -892,15 +1006,30 @@ class AgentApplicationService:
                 task_understanding.to_payload(),
                 prior_context=prior_task_context,
                 canonical_override=(
-                    semantic_interpretation.capability
-                    if semantic_interpretation is not None else None
+                    follow_up.capability
+                    if follow_up is not None
+                    else semantic_interpretation.capability
+                    if semantic_interpretation is not None
+                    else None
                 ),
                 action_override=(
-                    semantic_interpretation.action_mode
-                    if semantic_interpretation is not None else None
+                    follow_up.action_mode
+                    if follow_up is not None
+                    else semantic_interpretation.action_mode
+                    if semantic_interpretation is not None
+                    else None
                 ),
             )
             task_context = canonical_context.model_dump(mode="json")
+        task_context = reconcile_task_context(
+            task_context,
+            action_decisions,
+        ) or task_context
+        task_context["turn_id"] = turn_id
+        if follow_up is not None:
+            follow_up.apply(task_context)
+        if parameter_delta is not None:
+            parameter_delta.apply(task_context)
         if semantic_interpretation is not None:
             task_context["execution_requested"] = (
                 semantic_interpretation.execution_requested
@@ -970,6 +1099,15 @@ class AgentApplicationService:
                 routed_intent=intent.intent.value,
                 allowed_tools=intent.tool_names,
             )
+            log_agent_transition(
+                self._logger,
+                conversation_id=conversation_id,
+                user_id=user.user_id,
+                previous_context=prior_task_context,
+                current_context=task_context,
+                trigger="message_interpreted",
+                turn_id=turn_id,
+            )
             result = self._graph.invoke(
                 conversation_id=conversation_id,
                 user_id=user.user_id,
@@ -978,6 +1116,18 @@ class AgentApplicationService:
                 data_review_context=data_review_context,
                 task_context=task_context,
                 authorized_execution_ids=authorized_executions,
+            )
+            log_agent_transition(
+                self._logger,
+                conversation_id=conversation_id,
+                user_id=user.user_id,
+                previous_context=task_context,
+                current_context=self._current_task_context(
+                    conversation_id,
+                    user.user_id,
+                ),
+                trigger="graph_result",
+                turn_id=turn_id,
             )
         else:
             provider = self._provider_factory()
@@ -1003,7 +1153,132 @@ class AgentApplicationService:
             conversation_id=conversation_id,
             user=user,
             result=result,
+            turn_id=turn_id,
         )
+
+    def get_active_turn(
+        self, conversation_id: str, user: UserAccount
+    ) -> AgentTurn | None:
+        self._require_agent_use(user)
+        return self._repository.active_turn(conversation_id, user.user_id)
+
+    def cancel_turn(
+        self, conversation_id: str, turn_id: str, user: UserAccount
+    ) -> AgentTurn:
+        """Request cooperative cancellation of a user-owned active turn."""
+        self._require_agent_use(user)
+        return self._repository.request_turn_cancellation(
+            conversation_id=conversation_id,
+            user_id=user.user_id,
+            turn_id=turn_id,
+        )
+
+    def _raise_if_turn_cancelled(
+        self, *, conversation_id: str, user_id: int, turn_id: str
+    ) -> None:
+        if self._repository.turn_cancellation_requested(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            turn_id=turn_id,
+        ):
+            raise _AgentTurnCancelled
+
+    def _complete_cancelled_turn(
+        self, turn: AgentTurn, user: UserAccount
+    ) -> dict[str, object]:
+        if self._graph is not None:
+            try:
+                self._graph.delete_thread(
+                    conversation_id=turn.conversation_id,
+                    user_id=user.user_id,
+                )
+            except Exception:
+                # Cancellation must still release the durable conversation
+                # lock if checkpoint cleanup encounters a transient failure.
+                self._logger.exception(
+                    "Unable to clear the cancelled LangGraph thread: "
+                    "conversation_id='%s', turn_id='%s'.",
+                    turn.conversation_id,
+                    turn.turn_id,
+                )
+        assistant = self._repository.add_message(
+            conversation_id=turn.conversation_id,
+            user_id=user.user_id,
+            role=AgentMessageRole.ASSISTANT,
+            content=(
+                "This assistant response was cancelled before completion. "
+                "No proposed Oracle action from this turn was saved or run."
+            ),
+        )
+        finished = self._repository.finish_turn(
+            conversation_id=turn.conversation_id,
+            user_id=user.user_id,
+            turn_id=turn.turn_id,
+            status=AgentTurnStatus.CANCELLED,
+            assistant_message_id=assistant.message_id,
+        )
+        return {
+            "message": assistant,
+            "tool_activity": (),
+            "action_drafts": (),
+            "approval_request": None,
+            "clarification_request": None,
+            "input_request": None,
+            "execution": None,
+            "schedule": None,
+            "decision": None,
+            "turn": finished,
+        }
+
+    def _replay_turn(
+        self, turn: AgentTurn, user: UserAccount
+    ) -> dict[str, object]:
+        if turn.status in {
+            AgentTurnStatus.RUNNING,
+            AgentTurnStatus.CANCEL_REQUESTED,
+        }:
+            raise AgentConversationError(
+                "This assistant message is already being processed."
+            )
+        if turn.status is AgentTurnStatus.FAILED:
+            raise AgentConversationError(
+                "The earlier attempt for this message failed. Send it again "
+                "to create a new request."
+            )
+        if turn.assistant_message_id is None:
+            raise AgentConversationError(
+                "The completed assistant response could not be recovered."
+            )
+        assistant = self._repository.get_message(
+            conversation_id=turn.conversation_id,
+            user_id=user.user_id,
+            message_id=turn.assistant_message_id,
+        )
+        if assistant is None:
+            raise AgentConversationError(
+                "The completed assistant response could not be recovered."
+            )
+        action_drafts = tuple(
+            item
+            for item in self.get_action_drafts(turn.conversation_id, user)
+            if item.message_id == assistant.message_id
+        )
+        return {
+            "message": assistant,
+            "tool_activity": (),
+            "action_drafts": action_drafts,
+            "approval_request": self.get_pending_approval(
+                turn.conversation_id, user
+            ),
+            "clarification_request": self.get_pending_clarification(
+                turn.conversation_id, user
+            ),
+            "input_request": self.get_pending_input(turn.conversation_id, user),
+            "execution": None,
+            "schedule": None,
+            "decision": None,
+            "turn": turn,
+        }
 
     def _continue_pending_chat_reply(
         self,
@@ -1013,6 +1288,7 @@ class AgentApplicationService:
         prompt: str,
         clarification: AgentClarificationRequest | None,
         input_request: AgentInputRequest | None,
+        turn_id: str | None = None,
     ) -> dict[str, object] | None:
         """Resume only unambiguous, non-approval interrupt answers from chat."""
         normalized = prompt.strip().casefold()
@@ -1020,27 +1296,68 @@ class AgentApplicationService:
             "cancel", "cancel this", "cancel this task", "never mind", "nevermind"
         }
         if clarification is not None:
-            choice = next(
-                (
-                    option
-                    for option in clarification.options
-                    if option.casefold() == normalized
-                ),
-                None,
+            resolution = ClarificationChoiceResolver.resolve(
+                prompt,
+                clarification,
             )
-            if not cancel and choice is None:
-                return None
-            self._repository.add_message(
+            if cancel:
+                resolution = replace(
+                    resolution,
+                    status=ClarificationChoiceStatus.CANCELLED,
+                    value=None,
+                )
+            user_message = self._repository.add_message(
                 conversation_id=conversation_id,
                 user_id=user.user_id,
                 role=AgentMessageRole.USER,
                 content=prompt,
             )
+            if turn_id is not None:
+                self._repository.attach_turn_user_message(
+                    turn_id=turn_id,
+                    user_id=user.user_id,
+                    message_id=user_message.message_id,
+                )
+            if resolution.status is ClarificationChoiceStatus.UNRESOLVED:
+                labels = [
+                    clarification.option_labels.get(option, option)
+                    for option in clarification.options[:3]
+                ]
+                preview = ", ".join(f"**{item}**" for item in labels)
+                suffix = "" if len(clarification.options) <= 3 else ", or another card option"
+                response_text = (
+                    "There are no selectable Oracle artifacts in this card "
+                    "yet. Use its synchronize or registration controls to "
+                    "recover the catalog. The current task is still waiting; "
+                    "nothing has run."
+                    if not labels
+                    else (
+                        "I couldn't match that reply to one available Oracle "
+                        f"{clarification.display_name} choice. Reply with an "
+                        f"exact name or option number—for example, {preview}"
+                        f"{suffix}. The current task is still waiting; "
+                        "nothing has run."
+                    )
+                )
+                return self._persist_agent_result(
+                    conversation_id=conversation_id,
+                    user=user,
+                    result=AgentProviderResult(
+                        text=response_text,
+                        clarification_request=clarification,
+                    ),
+                    turn_id=turn_id,
+                    response_override=response_text,
+                )
             return self.resolve_clarification(
                 conversation_id=conversation_id,
                 user=user,
                 request_id=clarification.request_id,
-                value=None if cancel else choice,
+                value=(
+                    resolution.value
+                    if resolution.status is ClarificationChoiceStatus.SELECTED
+                    else None
+                ),
             )
         if input_request is None:
             return None
@@ -1257,6 +1574,10 @@ class AgentApplicationService:
         if existing is not None:
             return self._replay_action_decision(existing, user)
 
+        previous_task_context = self._current_task_context(
+            conversation_id,
+            user.user_id,
+        )
         pending = self.get_pending_approval(conversation_id, user)
         if pending is None or pending.request_id != request_id:
             raise AgentConversationError(
@@ -1316,6 +1637,31 @@ class AgentApplicationService:
                 execution_id=execution_id,
             )
             response["decision"] = finalized
+            current_task_context = self._current_task_context(
+                conversation_id,
+                user.user_id,
+            )
+            reconciled = reconcile_task_context(
+                current_task_context,
+                self._repository.list_action_decisions(
+                    conversation_id,
+                    user.user_id,
+                ),
+            )
+            log_agent_transition(
+                self._logger,
+                conversation_id=conversation_id,
+                user_id=user.user_id,
+                previous_context=previous_task_context,
+                current_context=reconciled or current_task_context,
+                trigger=(
+                    "approval_accepted"
+                    if normalized == "approve"
+                    else "approval_rejected"
+                ),
+                request_id=request_id,
+                execution_id=execution_id,
+            )
             return response
         except Exception as exc:
             try:
@@ -1356,11 +1702,31 @@ class AgentApplicationService:
             raise AgentConfigurationError(
                 "Structured clarification requires LangGraph orchestration."
             )
+        previous_task_context = self._current_task_context(
+            conversation_id,
+            user.user_id,
+        )
         result = self._graph.resume_clarification(
             conversation_id=conversation_id,
             user_id=user.user_id,
             request_id=request_id,
             value=value,
+        )
+        log_agent_transition(
+            self._logger,
+            conversation_id=conversation_id,
+            user_id=user.user_id,
+            previous_context=previous_task_context,
+            current_context=self._current_task_context(
+                conversation_id,
+                user.user_id,
+            ),
+            trigger=(
+                "clarification_answered"
+                if value is not None
+                else "clarification_cancelled"
+            ),
+            request_id=request_id,
         )
         return self._persist_agent_result(
             conversation_id=conversation_id,
@@ -1391,6 +1757,10 @@ class AgentApplicationService:
             raise AgentConfigurationError(
                 "Guided operation inputs require LangGraph orchestration."
             )
+        previous_task_context = self._current_task_context(
+            conversation_id,
+            user.user_id,
+        )
         # Preserve ``None`` as the explicit cancellation signal. Converting it
         # to an empty mapping makes LangGraph treat Cancel as a submitted form
         # and run operation-specific validation.
@@ -1405,6 +1775,22 @@ class AgentApplicationService:
             user_id=user.user_id,
             request_id=request_id,
             values=supplied_values,
+        )
+        log_agent_transition(
+            self._logger,
+            conversation_id=conversation_id,
+            user_id=user.user_id,
+            previous_context=previous_task_context,
+            current_context=self._current_task_context(
+                conversation_id,
+                user.user_id,
+            ),
+            trigger=(
+                "guided_input_submitted"
+                if supplied_values is not None
+                else "guided_input_cancelled"
+            ),
+            request_id=request_id,
         )
         return self._persist_agent_result(
             conversation_id=conversation_id,
@@ -1421,8 +1807,16 @@ class AgentApplicationService:
         execute_approved: bool = False,
         operation_uploads: Mapping[str, Path] | None = None,
         operation_cleanup: Callable[[], None] | None = None,
+        turn_id: str | None = None,
+        response_override: str | None = None,
     ) -> dict[str, object]:
         """Persist one completed or interrupted graph response."""
+        if turn_id is not None:
+            self._raise_if_turn_cancelled(
+                conversation_id=conversation_id,
+                user_id=user.user_id,
+                turn_id=turn_id,
+            )
         clarification_request = self._refresh_clarification_catalog(
             result.clarification_request,
             user,
@@ -1487,6 +1881,8 @@ class AgentApplicationService:
                     "Choose its recurrence and unattended inputs below. No "
                     "schedule has been saved and no Pipeline has started."
                 )
+        if response_override is not None:
+            response_text = response_override
         draft_payloads = tuple(
             activity.result["action_draft"]
             for activity in result.tool_activity
@@ -2086,6 +2482,7 @@ class AgentApplicationService:
         approval: AgentApprovalRequest,
     ) -> dict[str, object]:
         return {
+            "task_id": approval.task_id,
             "operation_code": approval.operation_code,
             "display_name": approval.display_name,
             "objective": approval.objective,
@@ -2881,6 +3278,27 @@ class AgentApplicationService:
             and decision.execution_id
             and not decision.execution_id.startswith("schedule:")
         )
+
+    def _current_task_context(
+        self,
+        conversation_id: str,
+        user_id: int,
+    ) -> dict[str, object] | None:
+        """Read checkpoint state when supported by the configured graph.
+
+        Legacy provider adapters and narrow test doubles do not expose graph
+        checkpoint inspection, so those configurations return no snapshot.
+        """
+        if self._graph is None:
+            return None
+        reader = getattr(self._graph, "current_task_context", None)
+        if not callable(reader):
+            return None
+        value = reader(
+            conversation_id=conversation_id,
+            user_id=user_id,
+        )
+        return dict(value) if isinstance(value, dict) else None
 
     def _execute_user_tool(
         self,

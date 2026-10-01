@@ -75,6 +75,7 @@ export function EpmAssistantWorkspace({ csrfToken, initialPrompt = "", onInitial
   const keepConversationAtBottom = useRef(true);
   const activeConversationRef = useRef<string | null>(null);
   const sendRequest = useRef<AbortController | null>(null);
+  const activeTurn = useRef<{ conversationId: string; turnId: string } | null>(null);
   const conversationLoadSequence = useRef(0);
 
   useEffect(() => {
@@ -91,7 +92,11 @@ export function EpmAssistantWorkspace({ csrfToken, initialPrompt = "", onInitial
     return () => { active = false; };
   }, []);
 
-  useEffect(() => () => sendRequest.current?.abort(), []);
+  useEffect(() => () => {
+    const pending = activeTurn.current;
+    if (pending) void api.cancelAgentTurn(pending.conversationId, pending.turnId, csrfToken).catch(() => undefined);
+    sendRequest.current?.abort();
+  }, [csrfToken]);
 
   useEffect(() => {
     const prepared = initialPrompt.trim();
@@ -140,7 +145,44 @@ export function EpmAssistantWorkspace({ csrfToken, initialPrompt = "", onInitial
     }
   }
 
+  async function monitorRecoveredTurn(
+    conversationId: string,
+    turnId: string,
+    loadSequence: number
+  ) {
+    while (
+      activeConversationRef.current === conversationId
+      && activeTurn.current?.turnId === turnId
+      && loadSequence === conversationLoadSequence.current
+    ) {
+      await new Promise((resolve) => window.setTimeout(resolve, 1500));
+      if (
+        activeConversationRef.current !== conversationId
+        || activeTurn.current?.turnId !== turnId
+        || loadSequence !== conversationLoadSequence.current
+      ) return;
+      const response = await api.agentMessages(conversationId).catch(() => null);
+      if (!response) continue;
+      if (response.active_turn?.turn_id === turnId) continue;
+      setMessages(response.messages);
+      setDrafts(response.action_drafts);
+      setApproval(response.approval_request);
+      setClarification(response.clarification_request);
+      setInputRequest(response.input_request);
+      setReviewContext(response.data_review_context ?? null);
+      activeTurn.current = null;
+      setSending(false);
+      await refreshConversations().catch(() => undefined);
+      return;
+    }
+  }
+
   async function openConversation(conversationId: string) {
+    const pending = activeTurn.current;
+    if (pending && pending.conversationId !== conversationId) {
+      await api.cancelAgentTurn(pending.conversationId, pending.turnId, csrfToken).catch(() => undefined);
+      if (activeTurn.current?.turnId === pending.turnId) activeTurn.current = null;
+    }
     sendRequest.current?.abort();
     sendRequest.current = null;
     setSending(false);
@@ -170,6 +212,21 @@ export function EpmAssistantWorkspace({ csrfToken, initialPrompt = "", onInitial
       setReviewContext(response.data_review_context ?? null);
       setApprovedExecution(null);
       setApprovedSchedule(null);
+      if (response.active_turn) {
+        activeTurn.current = {
+          conversationId,
+          turnId: response.active_turn.turn_id
+        };
+        setSending(true);
+        void monitorRecoveredTurn(
+          conversationId,
+          response.active_turn.turn_id,
+          loadSequence
+        );
+      } else if (activeTurn.current?.conversationId === conversationId) {
+        activeTurn.current = null;
+        setSending(false);
+      }
     } catch (reason) {
       if (
         loadSequence === conversationLoadSequence.current
@@ -187,6 +244,11 @@ export function EpmAssistantWorkspace({ csrfToken, initialPrompt = "", onInitial
     setCreating(true);
     setError(null);
     try {
+      const pending = activeTurn.current;
+      if (pending) {
+        await api.cancelAgentTurn(pending.conversationId, pending.turnId, csrfToken).catch(() => undefined);
+        if (activeTurn.current?.turnId === pending.turnId) activeTurn.current = null;
+      }
       const response = await api.createAgentConversation(csrfToken);
       setConversations((current) => [response.conversation, ...current]);
       sendRequest.current?.abort();
@@ -273,11 +335,14 @@ export function EpmAssistantWorkspace({ csrfToken, initialPrompt = "", onInitial
     setMessages((current) => [...current, optimistic]);
     setContent("");
     const controller = new AbortController();
+    const turnId = crypto.randomUUID();
     sendRequest.current = controller;
+    activeTurn.current = { conversationId, turnId };
     try {
       const response = await api.sendAgentMessage(
         conversationId,
         prompt,
+        turnId,
         csrfToken,
         controller.signal
       );
@@ -311,6 +376,7 @@ export function EpmAssistantWorkspace({ csrfToken, initialPrompt = "", onInitial
         sendRequest.current = null;
         setSending(false);
       }
+      if (activeTurn.current?.turnId === turnId) activeTurn.current = null;
     }
   }
 

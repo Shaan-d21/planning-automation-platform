@@ -793,6 +793,75 @@ class _InputCancellationGraph:
         return AgentProviderResult(text="Preparation cancelled.")
 
 
+def test_chat_can_select_a_pending_artifact_by_ordinal() -> None:
+    recorded = []
+    service = SimpleNamespace(
+        _repository=SimpleNamespace(
+            add_message=lambda **kwargs: (
+                recorded.append(kwargs) or SimpleNamespace(message_id=17)
+            )
+        ),
+        resolve_clarification=lambda **kwargs: kwargs,
+    )
+    request = AgentClarificationRequest(
+        request_id="choice-ordinal",
+        operation_code="pipelines",
+        display_name="Pipelines",
+        prompt="Choose a Pipeline.",
+        options=("PIPE_A", "PIPE_B", "PIPE_C"),
+        option_labels={
+            "PIPE_A": "Actual Load",
+            "PIPE_B": "Forecast Load",
+            "PIPE_C": "Reporting Load",
+        },
+    )
+
+    result = AgentApplicationService._continue_pending_chat_reply(
+        service,
+        conversation_id="conversation-1",
+        user=_user(),
+        prompt="run the second one",
+        clarification=request,
+        input_request=None,
+    )
+
+    assert result["value"] == "PIPE_B"
+    assert len(recorded) == 1
+
+
+def test_unmatched_pending_choice_returns_focused_retry_without_resuming() -> None:
+    persisted = []
+    service = SimpleNamespace(
+        _repository=SimpleNamespace(
+            add_message=lambda **_kwargs: SimpleNamespace(message_id=18)
+        ),
+        _persist_agent_result=lambda **kwargs: (
+            persisted.append(kwargs) or {"retry": True}
+        ),
+        resolve_clarification=lambda **_kwargs: pytest.fail("unexpected resume"),
+    )
+    request = AgentClarificationRequest(
+        request_id="choice-retry",
+        operation_code="business-rules",
+        display_name="Business Rules",
+        prompt="Choose a rule.",
+        options=("Revenue Calc", "Revenue Seed"),
+    )
+
+    result = AgentApplicationService._continue_pending_chat_reply(
+        service,
+        conversation_id="conversation-1",
+        user=_user(),
+        prompt="use something else",
+        clarification=request,
+        input_request=None,
+    )
+
+    assert result == {"retry": True}
+    assert "couldn't match" in persisted[0]["response_override"]
+    assert persisted[0]["result"].clarification_request == request
+
+
 def test_chat_can_fill_one_registered_numeric_rtp_without_approval() -> None:
     recorded = []
     service = SimpleNamespace(

@@ -39,6 +39,34 @@ class AgentConversation:
     updated_at: datetime
 
 
+class AgentTurnStatus(StrEnum):
+    """Durable lifecycle states for one user-initiated agent turn."""
+
+    RUNNING = "RUNNING"
+    CANCEL_REQUESTED = "CANCEL_REQUESTED"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
+@dataclass(frozen=True, slots=True)
+class AgentTurn:
+    """One idempotent, cross-process coordinated conversation turn."""
+
+    turn_id: str
+    conversation_id: str
+    user_id: int
+    client_message_id: str
+    status: AgentTurnStatus
+    user_message_id: int | None
+    assistant_message_id: int | None
+    error_summary: str | None
+    created_at: datetime
+    started_at: datetime
+    finished_at: datetime | None
+    cancel_requested_at: datetime | None
+
+
 @dataclass(frozen=True, slots=True)
 class AgentToolDefinition:
     """Provider-independent function declaration exposed to an LLM."""
@@ -91,6 +119,7 @@ class AgentApprovalRequest:
     route: str
     effect: str = "Prepare a governed handoff; no Oracle action will run."
     input_values: dict[str, Any] = field(default_factory=dict)
+    task_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

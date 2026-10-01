@@ -52,7 +52,7 @@ class CanonicalTaskContext(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    context_schema_version: int = 1
+    context_schema_version: int = 2
     task_id: str
     intent: str
     canonical_capability: CanonicalCapability
@@ -67,6 +67,9 @@ class CanonicalTaskContext(BaseModel):
     clarification_prompt: str | None = None
     objective: str = ""
     recent_references: dict[str, str] = Field(default_factory=dict)
+    pending_interaction: dict[str, Any] | None = None
+    previous_action: dict[str, Any] | None = None
+    current_execution: dict[str, Any] | None = None
 
 
 _INTENT_CAPABILITIES: dict[str, CanonicalCapability] = {
@@ -157,7 +160,9 @@ class AgentContextResolver:
             if missing
             else None
         )
-        entity = cls._entity(prior.get("resolved_entity")) if compatible else None
+        entity = cls._entity(current.get("resolved_entity"))
+        if entity is None and compatible:
+            entity = cls._entity(prior.get("resolved_entity"))
         if entity is None:
             entity = ResolvedEntity()
 
@@ -166,7 +171,11 @@ class AgentContextResolver:
             if compatible
             else ""
         ) or str(uuid4())
-        recent = prior.get("recent_references") if compatible else {}
+        # Operational references belong to the conversation, not only the
+        # currently open task. They are intentionally retained across task
+        # boundaries so a later "run it again" or "did it finish?" can be
+        # resolved against audited state without leaking task parameters.
+        recent = prior.get("recent_references")
         recent_references = dict(recent) if isinstance(recent, dict) else {}
         return CanonicalTaskContext(
             task_id=task_id,
@@ -185,6 +194,16 @@ class AgentContextResolver:
             ),
             objective=str(current.get("objective") or "").strip(),
             recent_references=recent_references,
+            previous_action=(
+                dict(prior["previous_action"])
+                if isinstance(prior.get("previous_action"), dict)
+                else None
+            ),
+            current_execution=(
+                dict(prior["current_execution"])
+                if isinstance(prior.get("current_execution"), dict)
+                else None
+            ),
         )
 
     @staticmethod
@@ -241,4 +260,3 @@ class AgentContextResolver:
             capability is not CanonicalCapability.UNKNOWN
             and capability is prior_capability
         )
-
