@@ -94,11 +94,19 @@ class AgentMessageRequest(BaseModel):
     """One user message sent to a user-owned agent conversation."""
 
     content: str = Field(min_length=1, max_length=4_000)
+    client_message_id: str | None = Field(
+        default=None, min_length=1, max_length=64
+    )
 
     @field_validator("content", mode="before")
     @classmethod
     def normalize_agent_content(cls, value) -> str:
         return str(value).strip()
+
+    @field_validator("client_message_id", mode="before")
+    @classmethod
+    def normalize_client_message_id(cls, value) -> str | None:
+        return str(value).strip() if value is not None else value
 
 
 class AgentActionDraftInputsRequest(BaseModel):

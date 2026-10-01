@@ -78,6 +78,7 @@ EXPECTED_TABLES = {
     "workflow_steps",
     "agent_conversations",
     "agent_messages",
+    "agent_turns",
     "agent_tool_activities",
     "agent_action_drafts",
     "agent_action_decisions",
@@ -149,7 +150,7 @@ def test_alembic_has_one_production_head() -> None:
     scripts = ScriptDirectory.from_config(
         Config(str(project_root / "alembic.ini"))
     )
-    assert scripts.get_heads() == ["0023_security_administration"]
+    assert scripts.get_heads() == ["0024_agent_turn_coordination"]
     assert all(len(revision.revision) <= 32 for revision in scripts.walk_revisions())
 
 

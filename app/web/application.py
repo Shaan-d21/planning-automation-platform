@@ -1191,6 +1191,11 @@ def create_app(
                 conversation_id,
                 user,
             )
+            active_turn = await run_in_threadpool(
+                request.app.state.agent_service.get_active_turn,
+                conversation_id,
+                user,
+            )
         except AgentError as exc:
             return _agent_error(exc)
         return {
@@ -1207,6 +1212,7 @@ def create_app(
             ),
             "input_request": asdict(input_request) if input_request else None,
             "data_review_context": data_review_context,
+            "active_turn": asdict(active_turn) if active_turn else None,
         }
 
     @app.post("/api/agent/conversations/{conversation_id}/messages")
@@ -1224,6 +1230,7 @@ def create_app(
                 conversation_id=conversation_id,
                 user=user,
                 content=payload.content,
+                client_message_id=payload.client_message_id,
             )
         except AgentError as exc:
             return _agent_error(exc)
@@ -1259,7 +1266,30 @@ def create_app(
                 if result.get("decision")
                 else None
             ),
+            "turn": asdict(result["turn"]) if result.get("turn") else None,
         }
+
+    @app.post(
+        "/api/agent/conversations/{conversation_id}/turns/{turn_id}/cancel"
+    )
+    async def cancel_agent_turn(
+        request: Request,
+        conversation_id: str,
+        turn_id: str,
+    ):
+        require_api_session(request)
+        user = _current_user(request)
+        assert user is not None
+        try:
+            turn = await run_in_threadpool(
+                request.app.state.agent_service.cancel_turn,
+                conversation_id,
+                turn_id,
+                user,
+            )
+        except AgentError as exc:
+            return _agent_error(exc)
+        return {"status": "success", "turn": asdict(turn)}
 
     @app.post(
         "/api/agent/conversations/{conversation_id}/approval"

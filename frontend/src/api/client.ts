@@ -305,12 +305,27 @@ export const api = {
   sendAgentMessage: (
     conversationId: string,
     content: string,
+    clientMessageId: string,
     csrfToken: string,
     signal?: AbortSignal
   ) =>
     request<AgentSendResponse>(
       `/api/agent/conversations/${encodeURIComponent(conversationId)}/messages`,
-      { method: "POST", body: JSON.stringify({ content }), signal },
+      {
+        method: "POST",
+        body: JSON.stringify({ content, client_message_id: clientMessageId }),
+        signal
+      },
+      csrfToken
+    ),
+  cancelAgentTurn: (
+    conversationId: string,
+    turnId: string,
+    csrfToken: string
+  ) =>
+    request<{ status: string; turn: import("./types").AgentTurn }>(
+      `/api/agent/conversations/${encodeURIComponent(conversationId)}/turns/${encodeURIComponent(turnId)}/cancel`,
+      { method: "POST" },
       csrfToken
     ),
   resolveAgentApproval: (

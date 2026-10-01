@@ -1277,6 +1277,7 @@ describe("App", () => {
     const first = { conversation_id: "conv-slow", user_id: 7, title: "Slow request", provider: "groq", model: "test", created_at: "2026-08-11T10:00:00Z", updated_at: "2026-08-11T10:00:00Z" };
     const second = { conversation_id: "conv-second", user_id: 7, title: "Second task", provider: "groq", model: "test", created_at: "2026-08-11T09:00:00Z", updated_at: "2026-08-11T09:00:00Z" };
     let aborted = false;
+    let cancelRequested = false;
     vi.mocked(fetch).mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url === "/api/v1/bootstrap") return response(assistantUser);
@@ -1292,6 +1293,10 @@ describe("App", () => {
           });
         });
       }
+      if (url.startsWith("/api/v1/agent/conversations/conv-slow/turns/") && url.endsWith("/cancel")) {
+        cancelRequested = true;
+        return response({ status: "success", turn: { status: "CANCEL_REQUESTED" } });
+      }
       if (url === "/api/v1/agent/conversations/conv-slow/messages") return response({ status: "success", messages: [], action_drafts: [], approval_request: null, clarification_request: null, input_request: null });
       if (url === "/api/v1/agent/conversations/conv-second/messages") return response({ status: "success", messages: [{ message_id: 20, conversation_id: "conv-second", role: "assistant", content: "Second conversation ready.", created_at: "2026-08-11T09:01:00Z" }], action_drafts: [], approval_request: null, clarification_request: null, input_request: null });
       return response({ detail: "Unexpected request" }, 404);
@@ -1306,6 +1311,7 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: /Second task/ }));
 
     await waitFor(() => expect(aborted).toBe(true));
+    expect(cancelRequested).toBe(true);
     expect(await screen.findByText("Second conversation ready.")).toBeTruthy();
     expect(
       (screen.getByLabelText("Message the EPM Assistant") as HTMLTextAreaElement)

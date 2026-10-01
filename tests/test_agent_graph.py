@@ -853,6 +853,40 @@ def test_graph_routes_model_tool_and_final_response(tmp_path: Path) -> None:
     assert "list_configured_processes" not in provider.tool_names
 
 
+def test_graph_clarifies_parameter_conflict_before_load_planning(
+    tmp_path: Path,
+) -> None:
+    graph = _orchestrator(tmp_path, _NeverCalledProvider())
+    clarification = (
+        "You provided more than one planning year: **FY27** or **FY28**. "
+        "Which should I use?"
+    )
+
+    result = graph.invoke(
+        conversation_id="conversation-conflicting-load-year",
+        user_id=7,
+        messages=(_message("Load Actual data for FY27 or FY28."),),
+        task_context={
+            "task_id": "task-conflicting-load-year",
+            "intent": "DATA_LOAD",
+            "phase": "COLLECTING_INFORMATION",
+            "confidence": "NEEDS_CLARIFICATION",
+            "parameters": {"scenario": "Actual", "year": None},
+            "missing_parameters": ["year"],
+            "clarification_prompt": clarification,
+            "parameter_conflicts": [
+                {"name": "year", "values": ["FY27", "FY28"]}
+            ],
+            "objective": "Load Actual data.",
+        },
+    )
+
+    assert result.text == clarification
+    assert result.tool_activity == ()
+    assert result.input_request is None
+    assert result.approval_request is None
+
+
 def test_graph_routes_selected_cube_directly_to_dimension_discovery(
     tmp_path: Path,
 ) -> None:
@@ -1093,6 +1127,40 @@ def test_status_followup_uses_only_conversation_owned_execution(
     assert "**Status:** FAILED" in result.text
     assert "evidence-run-1" in result.text
     assert result.tool_activity[0].arguments == {"selector": "latest"}
+
+
+def test_structured_status_followup_uses_retained_execution_id(
+    tmp_path: Path,
+) -> None:
+    graph = _orchestrator(
+        tmp_path,
+        _NeverCalledProvider(),
+        control_center=_ExecutionEvidenceControlCenter(),
+    )
+
+    result = graph.invoke(
+        conversation_id="structured-owned-execution",
+        user_id=7,
+        messages=(_message("Did it finish?"),),
+        allowed_tool_names=("get_execution_evidence",),
+        authorized_execution_ids=("evidence-run-1",),
+        task_context={
+            "task_id": "status-task",
+            "intent": "JOB_STATUS",
+            "phase": "READY_FOR_PLAN",
+            "canonical_capability": "execution.history",
+            "action_mode": "status",
+            "parameters": {"execution_id": "evidence-run-1"},
+            "recent_references": {
+                "last_execution_id": "evidence-run-1",
+            },
+        },
+    )
+
+    assert "**Status:** FAILED" in result.text
+    assert result.tool_activity[0].arguments == {
+        "execution_id": "evidence-run-1"
+    }
 
 
 def test_execution_id_from_another_conversation_is_not_disclosed(

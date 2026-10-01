@@ -480,6 +480,129 @@
       "expected_status": "ambiguous"
     },
     {
+      "id": "clarification-select-display-name",
+      "category": "clarification-accuracy",
+      "severity": "critical",
+      "kind": "clarification_resolution",
+      "prompt": "Use Revenue Forecast Pipeline",
+      "operation_code": "pipelines",
+      "options": ["PIPE_REVENUE", "PIPE_WORKFORCE"],
+      "option_labels": {"PIPE_REVENUE": "Revenue Forecast Pipeline", "PIPE_WORKFORCE": "Workforce Planning Pipeline"},
+      "expected_status": "selected",
+      "expected_value": "PIPE_REVENUE",
+      "expected_reason": "explicit_name"
+    },
+    {
+      "id": "clarification-select-second-option",
+      "category": "clarification-accuracy",
+      "severity": "critical",
+      "kind": "clarification_resolution",
+      "prompt": "run the second one",
+      "operation_code": "business-rules",
+      "options": ["Revenue Calc", "Revenue Seed", "Revenue Aggregate"],
+      "expected_status": "selected",
+      "expected_value": "Revenue Seed",
+      "expected_reason": "ordinal"
+    },
+    {
+      "id": "clarification-does-not-guess-unknown-name",
+      "category": "false-execution-prevention",
+      "severity": "critical",
+      "kind": "clarification_resolution",
+      "prompt": "use Revenue Magic",
+      "operation_code": "business-rules",
+      "options": ["Revenue Calc", "Revenue Seed"],
+      "expected_status": "unresolved",
+      "expected_reason": "no_unique_match"
+    },
+    {
+      "id": "followup-repeat-completed-rule",
+      "category": "context-retention",
+      "severity": "critical",
+      "kind": "follow_up_resolution",
+      "prompt": "Run it again",
+      "prior": {
+        "task_id": "task-rule-1",
+        "intent": "RUN_BUSINESS_RULE",
+        "canonical_capability": "business_rule.run",
+        "action_mode": "execute",
+        "phase": "COMPLETED",
+        "parameters": {"year": "FY27", "scenario": "Actual"},
+        "recent_references": {"last_execution_id": "execution-1"},
+        "previous_action": {
+          "operation_code": "business-rules",
+          "artifact_name": "Calculate Revenue",
+          "task_intent": "RUN_BUSINESS_RULE",
+          "parameters": {"year": "FY27", "scenario": "Actual"}
+        }
+      },
+      "expected_dialogue_act": "repeat_last_action",
+      "expected_capability": "business_rule.run",
+      "expected_action_mode": "execute",
+      "expected_task_intent": "RUN_BUSINESS_RULE",
+      "expected_execution_requested": true,
+      "expected_parameters": {"artifact_name": "Calculate Revenue", "year": "FY27", "scenario": "Actual"}
+    },
+    {
+      "id": "followup-repeat-rule-with-corrections",
+      "category": "context-retention",
+      "severity": "critical",
+      "kind": "follow_up_resolution",
+      "prompt": "Do the same for Forecast in FY28",
+      "prior": {
+        "task_id": "task-rule-1",
+        "intent": "RUN_BUSINESS_RULE",
+        "canonical_capability": "business_rule.run",
+        "action_mode": "execute",
+        "phase": "COMPLETED",
+        "previous_action": {
+          "operation_code": "business-rules",
+          "artifact_name": "Calculate Revenue",
+          "task_intent": "RUN_BUSINESS_RULE",
+          "parameters": {"year": "FY27", "scenario": "Actual"}
+        }
+      },
+      "expected_dialogue_act": "repeat_with_changes",
+      "expected_capability": "business_rule.run",
+      "expected_action_mode": "execute",
+      "expected_execution_requested": true,
+      "expected_parameters": {"artifact_name": "Calculate Revenue", "year": "FY28", "scenario": "Forecast"}
+    },
+    {
+      "id": "followup-status-owned-execution",
+      "category": "execution-evidence",
+      "severity": "critical",
+      "kind": "follow_up_resolution",
+      "prompt": "Did it finish?",
+      "prior": {
+        "task_id": "task-rule-1",
+        "intent": "RUN_BUSINESS_RULE",
+        "phase": "COMPLETED",
+        "current_execution": {"execution_id": "execution-1", "status": "SUCCESS"}
+      },
+      "expected_dialogue_act": "status_last_execution",
+      "expected_capability": "execution.history",
+      "expected_action_mode": "status",
+      "expected_task_intent": "JOB_STATUS",
+      "expected_execution_requested": false,
+      "expected_parameters": {"execution_id": "execution-1"}
+    },
+    {
+      "id": "followup-bare-retry-does-not-reexecute",
+      "category": "false-execution-prevention",
+      "severity": "critical",
+      "kind": "follow_up_resolution",
+      "prompt": "Try again",
+      "prior": {
+        "task_id": "task-rule-1",
+        "intent": "RUN_BUSINESS_RULE",
+        "phase": "FAILED",
+        "recent_references": {"last_execution_id": "execution-1"},
+        "previous_action": {"operation_code": "business-rules", "artifact_name": "Calculate Revenue"}
+      },
+      "expected_resolved": false
+    },
+    {
       "id": "retain-context-with-one-period-correction",
       "category": "context-retention",
       "severity": "critical",
@@ -503,6 +626,71 @@
       },
       "expected_capability": "data.import",
       "expected_parameters": {"scenario": "Actual", "period": "Feb", "year": "FY27", "file": "Actual_Feb.csv"}
+    },
+    {
+      "id": "parameter-correct-only-planning-year",
+      "category": "context-retention",
+      "severity": "critical",
+      "kind": "parameter_delta",
+      "prompt": "Actually use FY28 instead",
+      "prior": {
+        "task_id": "task-data-1",
+        "intent": "DATA_LOAD",
+        "phase": "READY_FOR_PLAN",
+        "objective": "Load Actual data for January FY27.",
+        "parameters": {"scenario": "Actual", "period": "Jan", "year": "FY27", "file": "actual_jan.csv"}
+      },
+      "interpreted_intent": "DATA_LOAD",
+      "expected_phase": "READY_FOR_PLAN",
+      "expected_updates": {"year": "FY28"},
+      "expected_conflicts": []
+    },
+    {
+      "id": "parameter-conflicting-years-require-clarification",
+      "category": "ambiguity-handling",
+      "severity": "critical",
+      "kind": "parameter_delta",
+      "prompt": "Load Actual data for FY27 or FY28",
+      "interpreted_intent": "DATA_LOAD",
+      "interpreted_parameters": {"scenario": "Actual", "year": "FY27"},
+      "expected_phase": "COLLECTING_INFORMATION",
+      "expected_updates": {"scenario": "Actual", "year": null},
+      "expected_missing_parameters": ["year"],
+      "expected_conflicts": [{"name": "year", "values": ["FY27", "FY28"]}]
+    },
+    {
+      "id": "parameter-period-range-is-not-conflict",
+      "category": "parameter-understanding",
+      "severity": "critical",
+      "kind": "parameter_delta",
+      "prompt": "Actually load Jan to Mar instead",
+      "prior": {
+        "task_id": "task-data-2",
+        "intent": "DATA_LOAD",
+        "phase": "READY_FOR_PLAN",
+        "objective": "Load Actual data.",
+        "parameters": {"scenario": "Actual", "period": "Jan", "year": "FY27", "file": "actual.csv"}
+      },
+      "interpreted_intent": "DATA_LOAD",
+      "expected_updates": {"period": "Mar", "period_reference": "explicit", "start_period": "Jan", "end_period": "Mar"},
+      "expected_conflicts": []
+    },
+    {
+      "id": "parameter-directional-period-change-selects-target",
+      "category": "parameter-understanding",
+      "severity": "critical",
+      "kind": "parameter_delta",
+      "prompt": "Change the period from Jan to Mar",
+      "prior": {
+        "task_id": "task-data-3",
+        "intent": "DATA_LOAD",
+        "phase": "READY_FOR_PLAN",
+        "objective": "Load Actual data for January.",
+        "parameters": {"scenario": "Actual", "period": "Jan", "year": "FY27", "file": "actual.csv"}
+      },
+      "interpreted_intent": "DATA_LOAD",
+      "expected_updates": {"period": "Mar", "period_reference": "explicit"},
+      "expected_conflicts": []
     }
   ]
 }

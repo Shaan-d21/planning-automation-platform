@@ -1282,6 +1282,67 @@ agent_messages = Table(
 )
 Index("ix_agent_messages_conversation", agent_messages.c.conversation_id, agent_messages.c.message_id)
 
+agent_turns = Table(
+    "agent_turns",
+    metadata,
+    Column("turn_id", Uuid(as_uuid=False), primary_key=True),
+    Column(
+        "conversation_id",
+        Uuid(as_uuid=False),
+        ForeignKey("agent_conversations.conversation_id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column(
+        "user_id",
+        IDENTITY_BIGINT,
+        ForeignKey("platform_users.user_id", ondelete="RESTRICT"),
+        nullable=False,
+    ),
+    Column("client_message_id", String(64), nullable=False),
+    Column("status", String(24), nullable=False),
+    Column(
+        "user_message_id",
+        IDENTITY_BIGINT,
+        ForeignKey("agent_messages.message_id", ondelete="SET NULL"),
+    ),
+    Column(
+        "assistant_message_id",
+        IDENTITY_BIGINT,
+        ForeignKey("agent_messages.message_id", ondelete="SET NULL"),
+    ),
+    Column("error_summary", Text),
+    Column("created_at", UTC_TIMESTAMP, nullable=False),
+    Column("started_at", UTC_TIMESTAMP, nullable=False),
+    Column("finished_at", UTC_TIMESTAMP),
+    Column("cancel_requested_at", UTC_TIMESTAMP),
+    CheckConstraint(
+        "status IN ('RUNNING', 'CANCEL_REQUESTED', 'COMPLETED', "
+        "'FAILED', 'CANCELLED')",
+        name="agent_turn_status",
+    ),
+    UniqueConstraint(
+        "conversation_id",
+        "client_message_id",
+        name="uq_agent_turn_client_message",
+    ),
+)
+Index(
+    "ix_agent_turns_conversation_created",
+    agent_turns.c.conversation_id,
+    agent_turns.c.created_at.desc(),
+)
+Index(
+    "uq_agent_turns_active_conversation",
+    agent_turns.c.conversation_id,
+    unique=True,
+    postgresql_where=agent_turns.c.status.in_(
+        ("RUNNING", "CANCEL_REQUESTED")
+    ),
+    sqlite_where=agent_turns.c.status.in_(
+        ("RUNNING", "CANCEL_REQUESTED")
+    ),
+)
+
 agent_tool_activities = Table(
     "agent_tool_activities",
     metadata,

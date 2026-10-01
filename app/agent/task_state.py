@@ -382,6 +382,27 @@ class AgentTaskInterpreter:
         return cls._understanding(intent, parameters, objective)
 
     @classmethod
+    def extract_parameters_for_intent(
+        cls,
+        prompt: str,
+        intent: AgentTaskIntent,
+        *,
+        today: date | None = None,
+    ) -> dict[str, Any]:
+        """Extract canonical slots from one follow-up without reclassifying it."""
+        return cls._extract_parameters((prompt,), intent, today=today)
+
+    @classmethod
+    def requirements_for(
+        cls,
+        intent: AgentTaskIntent,
+        parameters: dict[str, Any],
+    ) -> tuple[tuple[str, ...], str | None]:
+        """Return deterministic missing slots and the next focused question."""
+        missing = cls._missing_parameters(intent, parameters)
+        return missing, cls._clarification_prompt(intent, missing, parameters)
+
+    @classmethod
     def _current_task_turns(
         cls,
         turns: Sequence[str],
@@ -768,7 +789,7 @@ class AgentTaskInterpreter:
                 if overrides:
                     parameters["pov_overrides"] = overrides
 
-            for scenario in ("Actual", "Forecast", "Budget"):
+            for scenario in ("Actual", "Forecast", "Budget", "Plan"):
                 if re.search(rf"\b{scenario.casefold()}s?\b", normalized):
                     parameters["scenario"] = scenario
 

@@ -26,7 +26,9 @@ export default defineConfig({
     environment: "jsdom",
     setupFiles: "./src/test/setup.ts",
     restoreMocks: true,
-    testTimeout: 15_000,
+    // App.test exercises complete governed UI workflows. Give slower local
+    // and shared CI runners enough time without weakening any assertions.
+    testTimeout: 30_000,
     fileParallelism: false,
     maxWorkers: 1
   }

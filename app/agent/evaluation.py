@@ -13,11 +13,24 @@ from typing import Any
 
 from app.agent.graph import GRAPH_TOOL_NAMES
 from app.agent.context import AgentContextResolver
+from app.agent.clarification import ClarificationChoiceResolver
 from app.agent.entity_resolution import CatalogEntityResolver
+from app.agent.followups import AgentFollowUpResolver
 from app.agent.intent import AgentIntentRouter
-from app.agent.models import AgentMessage, AgentMessageRole
+from app.agent.models import (
+    AgentClarificationRequest,
+    AgentMessage,
+    AgentMessageRole,
+)
+from app.agent.parameter_updates import AgentParameterDeltaResolver
 from app.agent.rule_matching import recommend_artifacts
-from app.agent.task_state import AgentTaskInterpreter
+from app.agent.task_state import (
+    AgentTaskConfidence,
+    AgentTaskIntent,
+    AgentTaskInterpreter,
+    AgentTaskPhase,
+    AgentTaskUnderstanding,
+)
 
 
 DEFAULT_SUITE_PATH = Path("evaluations/agent/release_v1.json")
@@ -188,6 +201,15 @@ def _evaluate_case(case: dict[str, Any]) -> AgentEvaluationCaseResult:
         checks, failures, actual = _evaluate_canonical_context(case_id, case)
     elif kind == "entity_resolution":
         checks, failures, actual = _evaluate_entity_resolution(case_id, case)
+    elif kind == "follow_up_resolution":
+        checks, failures, actual = _evaluate_follow_up_resolution(case_id, case)
+    elif kind == "clarification_resolution":
+        checks, failures, actual = _evaluate_clarification_resolution(
+            case_id,
+            case,
+        )
+    elif kind == "parameter_delta":
+        checks, failures, actual = _evaluate_parameter_delta(case_id, case)
     else:
         raise AgentEvaluationConfigurationError(
             f"Case {case_id} has unsupported kind: {kind}"
@@ -202,6 +224,204 @@ def _evaluate_case(case: dict[str, Any]) -> AgentEvaluationCaseResult:
         failures=tuple(failures),
         actual=actual,
     )
+
+
+def _evaluate_parameter_delta(
+    case_id: str,
+    case: dict[str, Any],
+) -> tuple[list[str], list[str], dict[str, Any]]:
+    """Evaluate slot corrections and contradiction handling deterministically."""
+    raw_prior = case.get("prior")
+    if raw_prior is not None and not isinstance(raw_prior, dict):
+        raise AgentEvaluationConfigurationError(
+            f"Case {case_id} prior must be an object when provided."
+        )
+    prior = dict(raw_prior) if isinstance(raw_prior, dict) else None
+    raw_parameters = case.get("interpreted_parameters") or {}
+    if not isinstance(raw_parameters, dict):
+        raise AgentEvaluationConfigurationError(
+            f"Case {case_id} interpreted_parameters must be an object."
+        )
+    intent_value = str(
+        case.get("interpreted_intent")
+        or (prior or {}).get("intent")
+        or AgentTaskIntent.DATA_LOAD.value
+    ).upper()
+    try:
+        intent = AgentTaskIntent(intent_value)
+    except ValueError as exc:
+        raise AgentEvaluationConfigurationError(
+            f"Case {case_id} has unsupported interpreted_intent: {intent_value}"
+        ) from exc
+    interpreted = AgentTaskUnderstanding(
+        intent=intent,
+        phase=AgentTaskPhase.READY_FOR_PLAN,
+        confidence=AgentTaskConfidence.HIGH_CONFIDENCE,
+        parameters=dict(raw_parameters),
+        objective=str(case.get("objective") or "Evaluate parameter update."),
+    )
+    result = AgentParameterDeltaResolver.resolve(
+        str(case.get("prompt") or ""),
+        prior,
+        interpreted,
+    )
+    expected_resolved = bool(case.get("expected_resolved", True))
+    checks: list[str] = []
+    failures: list[str] = []
+    if result is None:
+        if expected_resolved:
+            failures.append("Expected the parameter update to resolve.")
+        else:
+            checks.append("non-correction remained unresolved")
+        return checks, failures, {"resolved": False}
+    if not expected_resolved:
+        failures.append("Expected no parameter update resolution.")
+    else:
+        checks.append("parameter update resolved")
+
+    actual = {
+        "resolved": True,
+        "phase": result.task.phase.value,
+        "updates": dict(result.updates),
+        "missing_parameters": list(result.task.missing_parameters),
+        "conflicts": [
+            {"name": item.name, "values": list(item.values)}
+            for item in result.conflicts
+        ],
+    }
+    for name in ("phase", "updates", "missing_parameters", "conflicts"):
+        expected = case.get(f"expected_{name}")
+        if expected is None:
+            continue
+        if actual[name] == expected:
+            checks.append(f"{name} matched")
+        else:
+            failures.append(
+                f"Expected {name} {expected!r}, received {actual[name]!r}."
+            )
+    return checks, failures, actual
+
+
+def _evaluate_follow_up_resolution(
+    case_id: str,
+    case: dict[str, Any],
+) -> tuple[list[str], list[str], dict[str, Any]]:
+    """Evaluate reference resolution against an explicit durable context."""
+    prior = case.get("prior")
+    if not isinstance(prior, dict):
+        raise AgentEvaluationConfigurationError(
+            f"Case {case_id} requires a prior context object."
+        )
+    result = AgentFollowUpResolver.resolve(
+        str(case.get("prompt") or ""),
+        prior,
+    )
+    expected_resolved = bool(case.get("expected_resolved", True))
+    checks: list[str] = []
+    failures: list[str] = []
+    if result is None:
+        if expected_resolved:
+            failures.append("Expected the follow-up reference to resolve.")
+        else:
+            checks.append("unsafe or diagnostic reference remained unresolved")
+        return checks, failures, {"resolved": False}
+    if not expected_resolved:
+        failures.append(
+            f"Expected no resolution, received dialogue act {result.act.value}."
+        )
+    else:
+        checks.append("follow-up reference resolved")
+
+    expected_values = {
+        "dialogue_act": result.act.value,
+        "capability": result.capability.value,
+        "action_mode": result.action_mode.value,
+        "task_intent": result.task.intent.value,
+        "execution_requested": result.execution_requested,
+    }
+    for field_name, actual_value in expected_values.items():
+        expected_value = case.get(f"expected_{field_name}")
+        if expected_value is None:
+            continue
+        if actual_value == expected_value:
+            checks.append(f"{field_name}={expected_value}")
+        else:
+            failures.append(
+                f"Expected {field_name} {expected_value!r}, "
+                f"received {actual_value!r}."
+            )
+    expected_parameters = case.get("expected_parameters")
+    if expected_parameters is not None:
+        if not isinstance(expected_parameters, dict):
+            raise AgentEvaluationConfigurationError(
+                f"Case {case_id} expected_parameters must be an object."
+            )
+        for name, expected_value in expected_parameters.items():
+            actual_value = result.task.parameters.get(name)
+            if actual_value == expected_value:
+                checks.append(f"parameter {name} matched")
+            else:
+                failures.append(
+                    f"Expected parameter {name}={expected_value!r}, "
+                    f"received {actual_value!r}."
+                )
+    return checks, failures, {
+        "resolved": True,
+        **expected_values,
+        "parameters": dict(result.task.parameters),
+        "referenced_entity": result.referenced_entity,
+        "resolved_entity": result.resolved_entity,
+    }
+
+
+def _evaluate_clarification_resolution(
+    case_id: str,
+    case: dict[str, Any],
+) -> tuple[list[str], list[str], dict[str, Any]]:
+    raw_options = case.get("options")
+    if not isinstance(raw_options, list) or not raw_options:
+        raise AgentEvaluationConfigurationError(
+            f"Case {case_id} requires a non-empty options list."
+        )
+    labels = case.get("option_labels") or {}
+    recommendations = case.get("recommendations") or []
+    if not isinstance(labels, dict) or not isinstance(recommendations, list):
+        raise AgentEvaluationConfigurationError(
+            f"Case {case_id} has invalid clarification metadata."
+        )
+    request = AgentClarificationRequest(
+        request_id=f"evaluation-{case_id}",
+        operation_code=str(case.get("operation_code") or "business-rules"),
+        display_name=str(case.get("display_name") or "Artifacts"),
+        prompt="Choose an artifact.",
+        options=tuple(str(item) for item in raw_options),
+        option_labels={str(key): str(value) for key, value in labels.items()},
+        recommendations=tuple(
+            dict(item) for item in recommendations if isinstance(item, dict)
+        ),
+    )
+    result = ClarificationChoiceResolver.resolve(
+        str(case.get("prompt") or ""),
+        request,
+    )
+    actual = {
+        "status": result.status.value,
+        "value": result.value,
+        "reason": result.reason,
+    }
+    checks: list[str] = []
+    failures: list[str] = []
+    for name in ("status", "value", "reason"):
+        expected = case.get(f"expected_{name}")
+        if expected is None:
+            continue
+        if actual[name] == expected:
+            checks.append(f"{name}={expected}")
+        else:
+            failures.append(
+                f"Expected {name} {expected!r}, received {actual[name]!r}."
+            )
+    return checks, failures, actual
 
 
 def _evaluate_intent_route(

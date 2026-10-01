@@ -22,6 +22,7 @@ from app.agent.capabilities import (
     PIPELINE_SCHEDULE_RESUME,
 )
 from app.agent.checkpoints import AgentCheckpointStore
+from app.agent.clarification import ClarificationChoiceResolver
 from app.agent.canonical import capability_definition
 from app.agent.entity_resolution import CatalogEntityResolver
 from app.agent.errors import classify_agent_error
@@ -45,6 +46,7 @@ from app.agent.rule_matching import (
     recommend_artifacts,
     recommend_forecast_seeding_rules,
 )
+from app.agent.task_lifecycle import phase_for_interrupt
 from app.utils.exceptions import (
     AgentCapabilityError,
     AgentConversationError,
@@ -267,7 +269,32 @@ class AgentGraphOrchestrator:
             self._config(conversation_id, user_id)
         )
         value = snapshot.values.get("task_context") if snapshot.values else None
-        return dict(value) if isinstance(value, dict) else None
+        context = dict(value) if isinstance(value, dict) else None
+        if context is None:
+            return None
+        for task in snapshot.tasks:
+            for pending in task.interrupts:
+                interrupt_value = (
+                    pending.value if isinstance(pending.value, dict) else {}
+                )
+                phase = phase_for_interrupt(
+                    str(interrupt_value.get("kind") or "")
+                )
+                if phase is None:
+                    continue
+                context["phase"] = phase
+                context["pending_interaction"] = {
+                    "request_id": str(pending.id),
+                    "kind": str(interrupt_value.get("kind") or ""),
+                    "operation_code": str(
+                        interrupt_value.get("operation_code") or ""
+                    ),
+                    "artifact_name": str(
+                        interrupt_value.get("artifact_name") or ""
+                    ),
+                }
+                return context
+        return context
 
     def pending_clarification(
         self,
@@ -856,6 +883,10 @@ class AgentGraphOrchestrator:
             "VARIANCE_REPORTING",
         }:
             return None
+        conflicts = context.get("parameter_conflicts")
+        if isinstance(conflicts, list) and conflicts:
+            prompt = str(context.get("clarification_prompt") or "").strip()
+            return prompt or "Which value should I use for this task?"
         if intent == "DATA_LOAD" or (
             intent == "METADATA_LOAD"
             and not (
@@ -881,6 +912,9 @@ class AgentGraphOrchestrator:
         phase = str(context.get("phase") or "").upper()
         parameters = context.get("parameters")
         task_parameters = parameters if isinstance(parameters, dict) else {}
+        conflicts = context.get("parameter_conflicts")
+        if isinstance(conflicts, list) and conflicts:
+            return None
         if phase != "READY_FOR_PLAN" and not (
             phase == "COLLECTING_INFORMATION"
             and intent in {"DATA_LOAD", "METADATA_LOAD"}
@@ -1369,6 +1403,35 @@ class AgentGraphOrchestrator:
         }
         if "get_execution_evidence" not in allowed:
             return None
+        context = state.get("task_context")
+        if isinstance(context, dict) and str(
+            context.get("canonical_capability") or ""
+        ).casefold() == "execution.history":
+            parameters = context.get("parameters")
+            task_parameters = parameters if isinstance(parameters, dict) else {}
+            references = context.get("recent_references")
+            recent = references if isinstance(references, dict) else {}
+            execution_id = str(
+                task_parameters.get("execution_id")
+                or recent.get("last_execution_id")
+                or ""
+            ).strip()
+            action_mode = str(context.get("action_mode") or "status").casefold()
+            arguments = (
+                {"execution_id": execution_id}
+                if execution_id
+                else {
+                    "selector": (
+                        "latest_failed" if action_mode == "explain" else "latest"
+                    )
+                }
+            )
+            return AgentToolCall(
+                name="get_execution_evidence",
+                arguments=arguments,
+                call_id="deterministic-execution-evidence",
+            )
+
         user_messages = [
             str(item.get("content") or "").strip()
             for item in state.get("messages", [])
@@ -3847,6 +3910,9 @@ class AgentGraphOrchestrator:
         response = interrupt(
             {
                 "kind": "governed_operation_preparation",
+                "task_id": str(
+                    (state.get("task_context") or {}).get("task_id") or ""
+                ),
                 "operation_code": proposal.get("target_code"),
                 "display_name": proposal.get("display_name"),
                 "objective": proposal.get("objective"),
@@ -4086,6 +4152,9 @@ class AgentGraphOrchestrator:
         response = interrupt(
             {
                 "kind": "governed_operation_preparation",
+                "task_id": str(
+                    (state.get("task_context") or {}).get("task_id") or ""
+                ),
                 "operation_code": "standalone-flow",
                 "display_name": "Standalone Planning Flow",
                 "objective": objective,
@@ -4617,44 +4686,7 @@ class AgentGraphOrchestrator:
     @classmethod
     def _ordinal_selection(cls, user_text: str) -> int | None:
         """Return a zero-based ordinal only for an unambiguous short reply."""
-        normalized = cls._normalize_artifact_text(user_text)
-        words = normalized.split()
-        if not words or len(words) > 7:
-            return None
-        filler = {
-            "the",
-            "one",
-            "option",
-            "please",
-            "use",
-            "select",
-            "choose",
-            "pick",
-            "with",
-            "go",
-        }
-        meaningful = [word for word in words if word not in filler]
-        if len(meaningful) != 1:
-            return None
-        ordinals = {
-            "first": 0,
-            "1": 0,
-            "1st": 0,
-            "second": 1,
-            "2": 1,
-            "2nd": 1,
-            "third": 2,
-            "3": 2,
-            "3rd": 2,
-            "fourth": 3,
-            "4": 3,
-            "4th": 3,
-            "fifth": 4,
-            "5": 4,
-            "5th": 4,
-            "last": -1,
-        }
-        return ordinals.get(meaningful[0])
+        return ClarificationChoiceResolver.ordinal_selection(user_text)
 
     @staticmethod
     def _resolve_explicit_operation_intent(
@@ -4896,6 +4928,7 @@ class AgentGraphOrchestrator:
                 if isinstance(value.get("input_values"), dict)
                 else {}
             ),
+            task_id=(str(value.get("task_id") or "").strip() or None),
         )
 
     @staticmethod
