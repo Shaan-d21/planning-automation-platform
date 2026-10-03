@@ -37,6 +37,7 @@ export function AppShell({
 
   return (
     <div className={`app-shell${isHome ? " app-shell--home" : ""}${sidebarCollapsed && !isHome ? " app-shell--sidebar-collapsed" : ""}${activeView === "assistant" ? " app-shell--assistant" : ""}`}>
+      <a className="skip-link" href={`#${activeView}`}>Skip to main content</a>
       {!isHome && <>
         <button
           className="mobile-menu"
@@ -70,6 +71,7 @@ export function AppShell({
                     className={`nav-link${isActiveNavigation(item.code, activeView) ? " is-active" : ""}`}
                     href={navigationHref(item.code, item.path)}
                     key={item.code}
+                    aria-current={isActiveNavigation(item.code, activeView) ? "page" : undefined}
                     title={sidebarCollapsed ? item.label : undefined}
                     onClick={() => setMobileOpen(false)}
                   >
@@ -87,9 +89,10 @@ export function AppShell({
         </aside>
       </>}
 
-      <div className={`workspace${isHome ? " workspace--home" : ""}${activeView === "assistant" ? " workspace--assistant" : ""}`}>
+      <div className={`workspace${isHome ? " workspace--home" : ""}${activeView === "assistant" ? " workspace--assistant" : ""}`} data-view={activeView}>
         <header className="topbar">
           <div className="topbar-context">
+            {activeView === "assistant" && <span className="topbar-ai-mark"><Icon name="sparkle" /></span>}
             <span>Oracle EPM</span><Icon name="chevron" /><strong>{viewLabel(activeView)}</strong>
           </div>
           <div className="topbar-actions">
