@@ -117,7 +117,7 @@ def test_single_discovered_application_is_selected_automatically(
     assert saved.selected_business_process.value == "PLANNING"
 
 
-def test_disabled_fccs_provider_prevents_automatic_selection(
+def test_enabled_read_only_fccs_provider_allows_verified_selection(
     tmp_path: Path,
 ) -> None:
     settings = _settings(tmp_path / "environment.sqlite3")
@@ -131,12 +131,10 @@ def test_disabled_fccs_provider_prevents_automatic_selection(
     resolved = service.resolve_startup_settings()
     saved = service.require()
 
-    assert resolved.application_name == ""
-    assert saved.selected_application is None
+    assert resolved.application_name == "Close"
+    assert saved.selected_application == "Close"
     assert saved.applications[0].application_type == "FCCS"
-
-    with pytest.raises(ConfigurationError, match="FCCS support is not enabled"):
-        service.select_application("Close", selected_by_user_id=1)
+    assert saved.selected_business_process.value == "FCCS"
 
 
 def test_multiple_applications_require_an_explicit_verified_selection(

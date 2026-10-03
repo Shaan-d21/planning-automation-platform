@@ -8,8 +8,8 @@ and deployment remain shared. Each Oracle EPM business process contributes
 operations through an allow-listed product provider.
 
 The first provider is Planning. Financial Consolidation and Close (FCCS) is
-registered as a disabled provider with no executable operations until its
-read-only Oracle contract and release controls are implemented and verified.
+enabled for a deliberately read-only foundation and contributes no executable
+operations.
 
 ## Product selection
 
@@ -23,9 +23,8 @@ deliberate fail-closed behavior.
 
 During the transition, legacy Planning environments that omit application-type
 metadata retain the existing Planning compatibility path. An application that
-Oracle explicitly identifies as FCCS cannot be selected while the FCCS
-provider is disabled, preventing Planning operations from being offered
-against an FCCS application.
+Oracle explicitly identifies as FCCS receives only the FCCS read navigation;
+Planning operations are never offered against it.
 
 ## Provider contract
 
@@ -44,7 +43,7 @@ of the Planning compatibility contract. Existing imports continue to consume
 ## Current state
 
 - Planning is enabled and exposes the unchanged release operation catalog.
-- FCCS is registered but disabled and exposes no operations.
+- FCCS is enabled for verified read-only navigation and exposes no operations.
 - Runtime operation catalogs, navigation, agent tools, preflight, action
   handoff, and worker startup consume the active product composition.
 - Common EPM capabilities and shell navigation are defined independently from
@@ -53,12 +52,15 @@ of the Planning compatibility contract. Existing imports continue to consume
 - The environment configuration API exposes product classification without
   exposing the Oracle base URL or credentials.
 - Regression tests lock the exact Planning operation and navigation contracts
-  and prevent `UNKNOWN` or disabled providers from inheriting Planning
+  and prevent `UNKNOWN` or unrelated providers from inheriting Planning
   operations, navigation, or agent tools.
-- The disabled FCCS module contains a read-only service contract for verified
-  connection/application identity, plan types and dimensions, saved job
-  definitions and job status, and bounded consolidation-journal retrieval.
+- The FCCS module contains a read-only service contract and guarded API/UI for
+  verified connection/application identity, plan types and dimensions, saved
+  job definitions and job status, and bounded consolidation-journal retrieval.
   It contains no FCCS write method.
+- The durable worker remains idle for a provider that exposes no executable
+  operations, preventing stale Planning work from running in an FCCS
+  deployment.
 
 The FCCS read contract follows Oracle's supported public REST resources:
 
@@ -76,8 +78,8 @@ pass the complete Planning regression suite.
 
 ## FCCS release gate
 
-FCCS remains disabled until the read-only service is verified against a real
-FCCS environment. The next increment is to add FCCS-specific read navigation
-and API schemas, run live UAT for connection, discovery, dimensions, jobs, and
-journals, and only then enable the provider. Write operations remain out of
-scope for that gate.
+FCCS selection is enabled for the read-only workspace. Production acceptance
+still requires live UAT for connection, application discovery, dimensions,
+jobs, and journals against the target FCCS environment. Write operations stay
+disabled until each operation receives its own supported Oracle contract,
+authorization policy, review flow, audit evidence, and live UAT.

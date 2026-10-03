@@ -9,6 +9,17 @@ from fastapi.responses import FileResponse
 from starlette.concurrency import run_in_threadpool
 
 from app.api.v1.schemas import (
+    FCCSDimensionsResponse,
+    FCCSDimensionSummary,
+    FCCSJobDefinitionSummary,
+    FCCSJobResponse,
+    FCCSJobsResponse,
+    FCCSJobStatusSummary,
+    FCCSJournalDetailResponse,
+    FCCSJournalSummary,
+    FCCSJournalsResponse,
+    FCCSOverviewResponse,
+    FCCSPlanTypeSummary,
     PlanningCycleCreateRequest,
     PlanningApprovalDecisionRequest,
     PlanningTaskStatusRequest,
@@ -60,7 +71,7 @@ from app.application.identity_access import (
 from app.models.access_control import Permission, UserAccount
 from app.models.environment_configuration import EnvironmentConfiguration
 from app.products.context import classify_business_process
-from app.products.contracts import NavigationDefinition
+from app.products.contracts import BusinessProcessType, NavigationDefinition
 from app.web.security import (
     client_ip,
     csrf_token,
@@ -371,6 +382,177 @@ async def standalone_operations(request: Request) -> OperationsResponse:
             )
         )
     return OperationsResponse(status="success", operations=operations)
+
+
+@router.get("/fccs/overview", response_model=FCCSOverviewResponse)
+async def fccs_overview(request: Request) -> FCCSOverviewResponse:
+    """Return a verified, non-mutating FCCS application snapshot."""
+
+    service = _require_fccs_reader(request)
+    try:
+        snapshot = await run_in_threadpool(service.snapshot)
+    except EPMError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    application = snapshot.connection.application
+    return FCCSOverviewResponse(
+        application_name=application.name,
+        product_type=application.product_type,
+        application_type=application.application_type,
+        plan_types=[_fccs_plan_type_payload(item) for item in snapshot.plan_types],
+        job_definitions=[
+            FCCSJobDefinitionSummary(
+                job_name=item.job_name,
+                job_type=item.job_type,
+            )
+            for item in snapshot.job_definitions
+        ],
+    )
+
+
+@router.get("/fccs/dimensions", response_model=FCCSDimensionsResponse)
+async def fccs_dimensions(request: Request) -> FCCSDimensionsResponse:
+    """Return live FCCS cubes and dimension metadata."""
+
+    service = _require_fccs_reader(request)
+    try:
+        plan_types = await run_in_threadpool(service.plan_types)
+    except EPMError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return FCCSDimensionsResponse(
+        plan_types=[_fccs_plan_type_payload(item) for item in plan_types]
+    )
+
+
+@router.get("/fccs/jobs", response_model=FCCSJobsResponse)
+async def fccs_jobs(
+    request: Request,
+    job_type: str | None = None,
+) -> FCCSJobsResponse:
+    """Return saved FCCS job definitions without starting a job."""
+
+    service = _require_fccs_reader(request)
+    normalized_type = str(job_type or "").strip() or None
+    try:
+        jobs = await run_in_threadpool(
+            service.job_definitions,
+            job_type=normalized_type,
+        )
+    except EPMError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return FCCSJobsResponse(
+        jobs=[
+            FCCSJobDefinitionSummary(
+                job_name=item.job_name,
+                job_type=item.job_type,
+            )
+            for item in jobs
+        ]
+    )
+
+
+@router.get("/fccs/jobs/{job_id}", response_model=FCCSJobResponse)
+async def fccs_job(request: Request, job_id: int) -> FCCSJobResponse:
+    """Return exact Oracle status for one FCCS job ID."""
+
+    if job_id < 1:
+        raise HTTPException(status_code=422, detail="Job ID must be positive.")
+    service = _require_fccs_reader(request)
+    try:
+        job = await run_in_threadpool(service.job, job_id)
+    except EPMError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return FCCSJobResponse(
+        job=FCCSJobStatusSummary(
+            job_id=job.job_id,
+            status=job.status,
+            job_name=job.job_name,
+            job_type=job.job_type,
+            descriptive_status=job.descriptive_status,
+            detailed_status=job.detailed_status,
+            details=job.details,
+        )
+    )
+
+
+@router.get("/fccs/journals", response_model=FCCSJournalsResponse)
+async def fccs_journals(
+    request: Request,
+    offset: int = 0,
+    limit: int = 50,
+    scenario: str | None = None,
+    year: str | None = None,
+    period: str | None = None,
+    consolidation: str | None = None,
+    status: str | None = None,
+    group: str | None = None,
+    label: str | None = None,
+    description: str | None = None,
+    entity: str | None = None,
+) -> FCCSJournalsResponse:
+    """Return a bounded, filter-allowlisted page of FCCS journals."""
+
+    service = _require_fccs_reader(request)
+    filters = {
+        "scenario": scenario or "",
+        "year": year or "",
+        "period": period or "",
+        "consolidation": consolidation or "",
+        "status": status or "",
+        "group": group or "",
+        "label": label or "",
+        "description": description or "",
+        "entity": entity or "",
+    }
+    try:
+        journals = await run_in_threadpool(
+            service.journals,
+            filters=filters,
+            offset=offset,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except EPMError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return FCCSJournalsResponse(
+        offset=offset,
+        limit=limit,
+        journals=[_fccs_journal_payload(item) for item in journals],
+    )
+
+
+@router.get(
+    "/fccs/journals/{label}",
+    response_model=FCCSJournalDetailResponse,
+)
+async def fccs_journal_detail(
+    request: Request,
+    label: str,
+    scenario: str,
+    year: str,
+    period: str,
+    consolidation: str | None = None,
+) -> FCCSJournalDetailResponse:
+    """Return one exact FCCS journal and its Oracle-provided lines."""
+
+    service = _require_fccs_reader(request)
+    try:
+        detail = await run_in_threadpool(
+            service.journal_detail,
+            label,
+            scenario=scenario,
+            year=year,
+            period=period,
+            consolidation=consolidation,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except EPMError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return FCCSJournalDetailResponse(
+        journal=_fccs_journal_payload(detail.journal),
+        line_items=[dict(item) for item in detail.line_items],
+    )
 
 
 @router.get("/planning-cycles")
@@ -1381,6 +1563,65 @@ def _safe_job_details(value):
     if isinstance(value, str):
         return value[:1000]
     return value
+
+
+def _require_fccs_reader(request: Request):
+    """Authorize the FCCS read surface and fail closed for other products."""
+
+    require_api_session(request)
+    user = current_user(request)
+    if user is None or not user.has_permission(Permission.HISTORY_VIEW):
+        raise HTTPException(
+            status_code=403,
+            detail="You do not have permission to review FCCS resources.",
+        )
+    if request.app.state.business_process is not BusinessProcessType.FCCS:
+        raise HTTPException(
+            status_code=404,
+            detail="The FCCS workspace is not available for this application.",
+        )
+    service = getattr(request.app.state, "fccs_read", None)
+    if service is None:
+        raise HTTPException(
+            status_code=503,
+            detail="The FCCS read service is not configured.",
+        )
+    return service
+
+
+def _fccs_plan_type_payload(plan_type) -> FCCSPlanTypeSummary:
+    return FCCSPlanTypeSummary(
+        name=plan_type.name,
+        cube_name=plan_type.cube_name,
+        identifier=plan_type.identifier,
+        cube_type=plan_type.cube_type,
+        dimension_count=plan_type.dimension_count,
+        dimensions=[
+            FCCSDimensionSummary(
+                name=item.name,
+                dimension_type=item.dimension_type,
+            )
+            for item in plan_type.dimensions
+        ],
+    )
+
+
+def _fccs_journal_payload(journal) -> FCCSJournalSummary:
+    return FCCSJournalSummary(
+        label=journal.label,
+        scenario=journal.scenario,
+        year=journal.year,
+        period=journal.period,
+        status=journal.status,
+        consolidation=journal.consolidation,
+        description=journal.description,
+        group=journal.group,
+        journal_type=journal.journal_type,
+        balance_type=journal.balance_type,
+        created_by=journal.created_by,
+        modified_by=journal.modified_by,
+        posted_by=journal.posted_by,
+    )
 
 
 def _persona_for(user: UserAccount) -> tuple[str, str]:

@@ -18,7 +18,18 @@ from sqlalchemy.exc import OperationalError
 from app.agent.models import AgentMessageRole, AgentToolActivity
 from app.agent.repository import SQLiteAgentRepository
 from app.application.connection import ConnectionResult
-from app.models.environment import ApplicationInfo
+from app.models.environment import (
+    ApplicationInfo,
+    DimensionInfo,
+    PlanTypeInfo,
+)
+from app.models.fccs import (
+    FCCSConnectionSnapshot,
+    FCCSJournal,
+    FCCSJournalDetail,
+    FCCSReadSnapshot,
+)
+from app.models.job import JobDefinition
 from app.models.environment_configuration import EnvironmentConfiguration
 from app.application.data_review import (
     DataReviewComparison,
@@ -100,6 +111,8 @@ from app.models.substitution_variable import SubstitutionVariable
 from app.utils.exceptions import AuthenticationError
 from app.web import application as web_application
 from app.web.application import _agent_tool_activity_payload, create_app
+from app.products.contracts import BusinessProcessType
+from app.products.registry import PRODUCT_PROVIDER_REGISTRY
 
 
 @pytest.mark.parametrize(
@@ -623,6 +636,126 @@ def test_v1_bootstrap_returns_effective_user_and_navigation(
         "access_control": True,
         "jobs_activity": True,
     }
+
+
+def test_fccs_bootstrap_and_read_routes_are_product_guarded(
+    tmp_path: Path,
+) -> None:
+    app = create_app(_settings(tmp_path), session_secret="test-secret")
+    client = TestClient(app)
+    _login(client)
+    app.state.business_process = BusinessProcessType.FCCS
+    app.state.navigation_definitions = (
+        PRODUCT_PROVIDER_REGISTRY.navigation_for(BusinessProcessType.FCCS)
+    )
+    plan_type = PlanTypeInfo(
+        name="Consol",
+        cube_name="Consol",
+        dimension_count=2,
+        dimensions=(
+            DimensionInfo(name="Account", dimension_type="Account"),
+            DimensionInfo(name="Entity", dimension_type="Entity"),
+        ),
+    )
+    job = JobDefinition(job_name="Consolidate", job_type="RULES")
+    journal = FCCSJournal(
+        label="Close Adjustment",
+        scenario="Actual",
+        year="FY27",
+        period="Jan",
+        status="Working",
+    )
+    reader = Mock()
+    reader.snapshot.return_value = FCCSReadSnapshot(
+        connection=FCCSConnectionSnapshot(
+            application=ApplicationInfo(
+                name="Consolidation",
+                product_type="HP",
+                application_type="FCCS",
+            ),
+            api_version={"version": "v3"},
+        ),
+        plan_types=(plan_type,),
+        job_definitions=(job,),
+    )
+    reader.plan_types.return_value = (plan_type,)
+    reader.job_definitions.return_value = (job,)
+    reader.journals.return_value = (journal,)
+    reader.journal_detail.return_value = FCCSJournalDetail(
+        journal=journal,
+        line_items=({"amountType": "Debit", "amount": 100},),
+    )
+    app.state.fccs_read = reader
+
+    bootstrap = client.get("/api/v1/bootstrap")
+    overview = client.get("/api/v1/fccs/overview")
+    dimensions = client.get("/api/v1/fccs/dimensions")
+    jobs = client.get("/api/v1/fccs/jobs")
+    journals = client.get(
+        "/api/v1/fccs/journals?scenario=Actual&year=FY27&period=Jan"
+    )
+    detail = client.get(
+        "/api/v1/fccs/journals/Close%20Adjustment"
+        "?scenario=Actual&year=FY27&period=Jan"
+    )
+
+    assert bootstrap.status_code == 200
+    assert bootstrap.json()["environment"]["business_process"] == "FCCS"
+    navigation = {item["code"] for item in bootstrap.json()["navigation"]}
+    assert {
+        "fccs-overview",
+        "fccs-dimensions",
+        "fccs-jobs",
+        "fccs-journals",
+    } <= navigation
+    assert "operations" not in navigation
+    assert overview.status_code == 200
+    assert overview.json()["application_name"] == "Consolidation"
+    assert overview.json()["plan_types"][0]["dimensions"][0]["name"] == "Account"
+    assert dimensions.status_code == 200
+    assert jobs.json()["jobs"] == [
+        {"job_name": "Consolidate", "job_type": "RULES"}
+    ]
+    assert journals.json()["journals"][0]["label"] == "Close Adjustment"
+    assert detail.json()["line_items"] == [
+        {"amountType": "Debit", "amount": 100}
+    ]
+    assert client.get("/api/v1/home").status_code == 404
+    assert client.get("/api/v1/operations").status_code == 404
+    blocked_run = client.post(
+        "/api/operations/business-rules/runs",
+        json={"rule_name": "Consolidate", "runtime_prompts": {}},
+    )
+    assert blocked_run.status_code == 404
+    assert "Planning capability" in blocked_run.json()["detail"]
+    reader.journals.assert_called_once_with(
+        filters={
+            "scenario": "Actual",
+            "year": "FY27",
+            "period": "Jan",
+            "consolidation": "",
+            "status": "",
+            "group": "",
+            "label": "",
+            "description": "",
+            "entity": "",
+        },
+        offset=0,
+        limit=50,
+    )
+
+
+def test_fccs_routes_fail_closed_for_planning_application(
+    tmp_path: Path,
+) -> None:
+    app = create_app(_settings(tmp_path), session_secret="test-secret")
+    client = TestClient(app)
+    _login(client)
+
+    response = client.get("/api/v1/fccs/overview")
+
+    assert response.status_code == 404
+    assert "not available" in response.json()["detail"]
 
 
 def test_v1_operations_returns_role_authorized_standalone_services(

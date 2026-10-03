@@ -17,13 +17,14 @@ import { DataReviewWorkspace } from "./components/DataReviewWorkspace";
 import { ReportGenerationRunner } from "./components/ReportGenerationRunner";
 import { EpmAssistantWorkspace } from "./components/EpmAssistantWorkspace";
 import { SystemAdministrationWorkspace } from "./components/SystemAdministrationWorkspace";
+import { FCCSReadWorkspace, type FCCSReadView } from "./components/FCCSReadWorkspace";
 
 const SchedulingWorkspace = lazy(async () => {
   const module = await import("./components/SchedulingWorkspace");
   return { default: module.SchedulingWorkspace };
 });
 
-type AppView = "home" | "tasks" | "cycles" | "approvals" | "notifications" | "access" | "system-administration" | "jobs" | "operations" | "schedules" | "data-review" | "reports" | "assistant";
+type AppView = "home" | "tasks" | "cycles" | "approvals" | "notifications" | "access" | "system-administration" | "jobs" | "operations" | "schedules" | "data-review" | "reports" | "assistant" | FCCSReadView;
 
 export function App() {
   const [bootstrap, setBootstrap] = useState<BootstrapResponse | null>(null);
@@ -60,7 +61,11 @@ export function App() {
     const nextBootstrap = await api.bootstrap();
     setBootstrap(nextBootstrap);
     if (nextBootstrap.authenticated) {
-      const [nextHome, nextNotifications] = await Promise.all([api.home(), api.notifications()]);
+      const isFccs = nextBootstrap.environment?.business_process === "FCCS";
+      const [nextHome, nextNotifications] = await Promise.all([
+        isFccs ? Promise.resolve(null) : api.home(),
+        api.notifications()
+      ]);
       setHome(nextHome);
       setNotifications(nextNotifications);
     } else {
@@ -103,6 +108,20 @@ export function App() {
     window.addEventListener("hashchange", updateView);
     return () => window.removeEventListener("hashchange", updateView);
   }, []);
+
+  useEffect(() => {
+    if (
+      !bootstrap?.authenticated
+      || bootstrap.environment?.business_process !== "FCCS"
+    ) return;
+    const navigationCode = navigationCodeForView(activeView);
+    if (
+      navigationCode
+      && !bootstrap.navigation.some((item) => item.code === navigationCode)
+    ) {
+      window.location.hash = "#home";
+    }
+  }, [activeView, bootstrap]);
 
   useEffect(() => {
     if (activeView !== "tasks" || !bootstrap?.authenticated || work) return;
@@ -582,7 +601,8 @@ export function App() {
   if (!bootstrap.authenticated) {
     return <LoginPage productName={bootstrap.product.name} company={bootstrap.product.company} busy={busy} error={error} requiresBootstrap={bootstrap.requires_bootstrap} identityAuthentication={bootstrap.identity_authentication} onLogin={login} onOracleLogin={oracleLogin} onBootstrap={bootstrapAdministrator} />;
   }
-  if (!home) return <UnavailableState error={error ?? "Your Planning workspace is unavailable."} onRetry={refresh} />;
+  const isFccs = bootstrap.environment?.business_process === "FCCS";
+  if (!home && !isFccs) return <UnavailableState error={error ?? "Your Planning workspace is unavailable."} onRetry={refresh} />;
 
   return (
     <AppShell bootstrap={bootstrap} activeView={activeView} busy={busy} unreadNotifications={notifications?.unread_count ?? 0} onLogout={logout} onRefresh={refresh}>
@@ -590,7 +610,7 @@ export function App() {
       {error && <ToastMessage tone="error" message={error} onDismiss={() => setError(null)} />}
       {activeView === "tasks" ? (
         work
-          ? <PlanningWorkspace work={work} home={home} busyTaskId={busyTaskId} onTaskStatus={updateTask} onSubmitApproval={submitForApproval} />
+          ? <PlanningWorkspace work={work} home={home!} busyTaskId={busyTaskId} onTaskStatus={updateTask} onSubmitApproval={submitForApproval} />
           : <WorkspaceLoading />
       ) : activeView === "cycles" ? (
         cycleAdministration
@@ -635,6 +655,10 @@ export function App() {
         <ReportGenerationRunner csrfToken={bootstrap.csrf_token} onBack={() => { window.location.hash = "#home"; }} />
       ) : activeView === "assistant" ? (
         <EpmAssistantWorkspace csrfToken={bootstrap.csrf_token} initialPrompt={assistantPrefill} onInitialPromptConsumed={() => setAssistantPrefill("")} />
+      ) : activeView.startsWith("fccs-") ? (
+        <FCCSReadWorkspace view={activeView as FCCSReadView} />
+      ) : isFccs ? (
+        <FCCSReadWorkspace view="fccs-overview" />
       ) : (
         <Dashboard
           bootstrap={bootstrap}
@@ -664,5 +688,14 @@ function viewFromHash(): AppView {
   if (hash === "#data-review") return "data-review";
   if (hash === "#reports") return "reports";
   if (hash === "#assistant") return "assistant";
+  if (hash === "#fccs-overview") return "fccs-overview";
+  if (hash === "#fccs-dimensions") return "fccs-dimensions";
+  if (hash === "#fccs-jobs") return "fccs-jobs";
+  if (hash === "#fccs-journals") return "fccs-journals";
   return "home";
+}
+
+function navigationCodeForView(view: AppView) {
+  if (view === "access") return "access-control";
+  return view;
 }

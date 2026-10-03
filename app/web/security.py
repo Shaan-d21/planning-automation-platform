@@ -258,6 +258,8 @@ def required_permissions(
         return (Permission.CATALOG_MANAGE,)
     if path.startswith("/api/v1/jobs"):
         return (Permission.HISTORY_VIEW,)
+    if path.startswith("/api/v1/fccs"):
+        return (Permission.HISTORY_VIEW,)
     if path == "/api/v1/operations":
         return (Permission.OPERATION_EXECUTE,)
 

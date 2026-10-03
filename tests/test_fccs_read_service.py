@@ -1,4 +1,4 @@
-"""Contract tests for the disabled FCCS read-only foundation."""
+"""Contract tests for the FCCS read-only foundation."""
 
 from __future__ import annotations
 

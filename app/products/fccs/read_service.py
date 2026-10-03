@@ -26,7 +26,7 @@ class FCCSReadService:
     """Expose only documented, non-mutating FCCS resources.
 
     This service intentionally has no POST, PUT, PATCH, or DELETE method.
-    Enabling the FCCS provider remains a separate release gate.
+    FCCS write operations remain a separate release gate.
     """
 
     _MAX_JOURNAL_PAGE_SIZE = 200
