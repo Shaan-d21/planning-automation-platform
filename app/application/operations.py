@@ -8,7 +8,6 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from enum import StrEnum
 from pathlib import Path, PurePath
 from typing import Any
 
@@ -52,6 +51,12 @@ from app.models.pipeline_input import (
 from app.models.workflow import WorkflowRun, WorkflowStepStatus
 from app.models.access_control import ExecutionActor
 from app.monitoring.job_monitor import JobMonitor
+from app.products.contracts import (
+    BusinessProcessType,
+    OperationDefinition,
+    OperationKind,
+)
+from app.products.registry import PRODUCT_PROVIDER_REGISTRY
 from app.services.business_rule_service import BusinessRuleService
 from app.services.application_service import ApplicationService
 from app.services.cube_refresh_service import CubeRefreshService
@@ -83,35 +88,6 @@ from app.utils.exceptions import (
     JobFailedError,
     OperationError,
 )
-
-
-class OperationKind(StrEnum):
-    """Supported standalone operation identifiers."""
-
-    BUSINESS_RULE = "BUSINESS_RULE"
-    DATA_MAP = "DATA_MAP"
-    PIPELINE = "PIPELINE"
-    DATA_INTEGRATION = "DATA_INTEGRATION"
-    METADATA_IMPORT = "METADATA_IMPORT"
-    DATA_IMPORT = "DATA_IMPORT"
-    SUBSTITUTION_VARIABLE = "SUBSTITUTION_VARIABLE"
-    USER_VARIABLE = "USER_VARIABLE"
-    CUBE_REFRESH = "CUBE_REFRESH"
-    REPORT_GENERATION = "REPORT_GENERATION"
-    STANDALONE_FLOW = "STANDALONE_FLOW"
-
-
-@dataclass(frozen=True, slots=True)
-class OperationDefinition:
-    """Presentation and governance metadata for one operation."""
-
-    kind: OperationKind
-    code: str
-    display_name: str
-    description: str
-    category: str
-    risk_level: str
-    route: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -279,127 +255,11 @@ OperationInput = (
 )
 
 
-OPERATION_DEFINITIONS = (
-    OperationDefinition(
-        kind=OperationKind.REPORT_GENERATION,
-        code="report-generation",
-        display_name="Data Explorer Export",
-        description=(
-            "Export an approved saved Data Explorer view and create a "
-            "downloadable Excel workbook."
-        ),
-        category="Analysis",
-        risk_level="Read only",
-        route="/app/reports",
-    ),
-    OperationDefinition(
-        kind=OperationKind.CUBE_REFRESH,
-        code="cube-refresh",
-        display_name="Planning Cube Refresh",
-        description=(
-            "Run and monitor an existing saved Cube Refresh job after "
-            "reviewing its application-wide impact."
-        ),
-        category="Application administration",
-        risk_level="Elevated",
-        route="/app/operations/cube-refresh",
-    ),
-    OperationDefinition(
-        kind=OperationKind.SUBSTITUTION_VARIABLE,
-        code="substitution-variables",
-        display_name="Substitution Variables",
-        description=(
-            "Review application- and cube-scoped variables, safely update "
-            "existing values, or explicitly create a new definition."
-        ),
-        category="Application administration",
-        risk_level="Elevated",
-        route="/app/operations/substitution-variables",
-    ),
-    OperationDefinition(
-        kind=OperationKind.USER_VARIABLE,
-        code="user-variables",
-        display_name="User Variables",
-        description=(
-            "Review live Planning user-variable assignments and safely set "
-            "the selected member for yourself or an authorized user."
-        ),
-        category="User preferences",
-        risk_level="Controlled",
-        route="/app/operations/user-variables",
-    ),
-    OperationDefinition(
-        kind=OperationKind.DATA_IMPORT,
-        code="data-import",
-        display_name="Planning Data Import",
-        description=(
-            "Upload or reuse a data file and run a saved native Planning "
-            "Import Data job."
-        ),
-        category="Data loading",
-        risk_level="Elevated",
-        route="/app/operations/data-import",
-    ),
-    OperationDefinition(
-        kind=OperationKind.METADATA_IMPORT,
-        code="metadata-import",
-        display_name="Metadata Import",
-        description=(
-            "Upload or reuse a metadata file, run a saved Import Metadata "
-            "job, and optionally refresh the Planning cube."
-        ),
-        category="Application administration",
-        risk_level="Elevated",
-        route="/app/operations/metadata-import",
-    ),
-    OperationDefinition(
-        kind=OperationKind.PIPELINE,
-        code="pipelines",
-        display_name="Pipelines",
-        description=(
-            "Run multi-stage Data Integration pipelines with live variables "
-            "and stage-specific file requirements."
-        ),
-        category="Orchestration",
-        risk_level="Elevated",
-        route="/app/operations/pipelines",
-    ),
-    OperationDefinition(
-        kind=OperationKind.DATA_INTEGRATION,
-        code="data-integrations",
-        display_name="Data Integrations",
-        description=(
-            "Load file-based data through configured Data Integration "
-            "profiles, periods, and import/export modes."
-        ),
-        category="Data loading",
-        risk_level="Elevated",
-        route="/app/operations/data-integrations",
-    ),
-    OperationDefinition(
-        kind=OperationKind.BUSINESS_RULE,
-        code="business-rules",
-        display_name="Business Rules",
-        description=(
-            "Run deployed Calculation Manager rules with optional runtime "
-            "prompt values."
-        ),
-        category="Calculation",
-        risk_level="Controlled",
-        route="/app/operations/business-rules",
-    ),
-    OperationDefinition(
-        kind=OperationKind.DATA_MAP,
-        code="data-maps",
-        display_name="Data Maps",
-        description=(
-            "Publish Planning data to a target cube with governed clear and "
-            "member-override controls."
-        ),
-        category="Data movement",
-        risk_level="Elevated",
-        route="/app/operations/data-maps",
-    ),
+# Backwards-compatible alias retained while callers are moved to the product
+# registry. Its order and values are protected by regression tests because
+# agent schemas and frontend routes consume these stable operation codes.
+OPERATION_DEFINITIONS = PRODUCT_PROVIDER_REGISTRY.operations_for(
+    BusinessProcessType.PLANNING
 )
 
 

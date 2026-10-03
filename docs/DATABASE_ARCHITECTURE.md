@@ -94,11 +94,18 @@ workbook.
 #### `oracle_environment_settings`
 
 One non-secret connection-configuration record per normalized Oracle base
-URL. It retains the selected Planning application, its selection source, the
+URL. It retains the selected Oracle EPM application, its selection source, the
 latest supported Get Applications response, discovery timestamps, and a
 bounded failure message. Credentials and tokens are never stored. A selection
 change is activated only after the API and worker restart, preventing running
 or scheduled work from changing applications mid-execution.
+
+`selected_business_process` records the verified product classification for
+the selected Oracle application: `PLANNING`, `FCCS`, or `UNKNOWN`. The value is
+derived only from Oracle application metadata. Existing selections with no
+stored classification reuse retained Oracle discovery metadata when available.
+Otherwise they fail closed as `UNKNOWN` until application discovery is
+refreshed; they are never classified from the application name.
 
 #### `oracle_pipelines`
 

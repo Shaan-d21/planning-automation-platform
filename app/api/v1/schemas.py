@@ -64,6 +64,7 @@ class EnvironmentApplicationSummary(BaseModel):
     product_type: str | None = None
     application_type: str | None = None
     admin_mode: bool | None = None
+    business_process: str = "UNKNOWN"
 
 
 class EnvironmentConfigurationResponse(BaseModel):
@@ -73,6 +74,7 @@ class EnvironmentConfigurationResponse(BaseModel):
     deployment_mode: str
     active_application: str | None
     selected_application: str | None
+    selected_business_process: str = "UNKNOWN"
     selection_source: str | None
     configured: bool
     restart_required: bool

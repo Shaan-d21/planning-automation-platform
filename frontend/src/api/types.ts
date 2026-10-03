@@ -16,6 +16,7 @@ export interface EnvironmentApplication {
   product_type: string | null;
   application_type: string | null;
   admin_mode: boolean | null;
+  business_process?: "PLANNING" | "FCCS" | "UNKNOWN";
 }
 
 export interface EnvironmentConfigurationResponse {
@@ -23,6 +24,7 @@ export interface EnvironmentConfigurationResponse {
   deployment_mode: string;
   active_application: string | null;
   selected_application: string | null;
+  selected_business_process?: "PLANNING" | "FCCS" | "UNKNOWN";
   selection_source: string | null;
   configured: boolean;
   restart_required: boolean;

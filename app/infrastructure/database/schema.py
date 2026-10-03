@@ -68,6 +68,7 @@ oracle_environment_settings = Table(
     Column("base_url", String(500), primary_key=True),
     Column("deployment_mode", String(32), nullable=False),
     Column("selected_application", String(128)),
+    Column("selected_business_process", String(32)),
     Column("selection_source", String(32)),
     Column(
         "discovered_applications",
@@ -98,6 +99,11 @@ oracle_environment_settings = Table(
         "selection_source IS NULL OR selection_source IN "
         "('DATABASE', 'ENVIRONMENT', 'AUTO_DISCOVERY', 'ADMIN_SELECTION')",
         name="selection_source",
+    ),
+    CheckConstraint(
+        "selected_business_process IS NULL OR selected_business_process IN "
+        "('PLANNING', 'FCCS', 'UNKNOWN')",
+        name="selected_business_process",
     ),
     ForeignKeyConstraint(
         ["selected_by_user_id"],

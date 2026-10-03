@@ -60,6 +60,7 @@ from app.application.identity_access import (
 )
 from app.models.access_control import Permission, UserAccount
 from app.models.environment_configuration import EnvironmentConfiguration
+from app.products.context import classify_business_process
 from app.web.security import (
     client_ip,
     csrf_token,
@@ -1304,6 +1305,11 @@ def _environment_configuration_payload(
         deployment_mode=settings.resolved_deployment_mode,
         active_application=active,
         selected_application=selected,
+        selected_business_process=(
+            configuration.selected_business_process.value
+            if configuration
+            else "UNKNOWN"
+        ),
         selection_source=(
             configuration.selection_source if configuration else None
         ),
@@ -1315,6 +1321,10 @@ def _environment_configuration_payload(
                 product_type=item.product_type,
                 application_type=item.application_type,
                 admin_mode=item.admin_mode,
+                business_process=classify_business_process(
+                    product_type=item.product_type,
+                    application_type=item.application_type,
+                ).value,
             )
             for item in (configuration.applications if configuration else ())
         ],

@@ -355,6 +355,7 @@ def test_environment_configuration_exposes_only_non_secret_selection(
     assert "epm.internal" not in response.text
     assert payload["active_application"] == "Vision"
     assert payload["selected_application"] == "Vision"
+    assert payload["selected_business_process"] == "UNKNOWN"
     assert payload["selection_source"] == "ENVIRONMENT"
     assert payload["restart_required"] is False
     assert "secret" not in response.text
@@ -402,6 +403,10 @@ def test_environment_application_discovery_and_selection_are_governed(
         "Forecast",
         "Vision",
     ]
+    assert {
+        item["business_process"]
+        for item in refreshed.json()["applications"]
+    } == {"UNKNOWN"}
     assert saved.status_code == 200
     assert saved.json()["selected_application"] == "Forecast"
     assert saved.json()["restart_required"] is True
