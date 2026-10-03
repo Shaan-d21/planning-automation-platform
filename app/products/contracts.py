@@ -31,6 +31,39 @@ class OperationKind(StrEnum):
     STANDALONE_FLOW = "STANDALONE_FLOW"
 
 
+class CapabilityScope(StrEnum):
+    """Ownership boundary for a capability exposed by the platform."""
+
+    COMMON = "COMMON"
+    PRODUCT = "PRODUCT"
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityDefinition:
+    """Stable capability identity independent of UI wording and LLM prompts."""
+
+    code: str
+    scope: CapabilityScope
+    description: str
+    agent_tools: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class NavigationDefinition:
+    """Product-composable navigation metadata.
+
+    Permission values are stored as stable strings so the product layer does
+    not depend on access-control implementation classes.
+    """
+
+    code: str
+    label: str
+    path: str
+    group: str
+    order: int
+    permissions: tuple[str, ...] = ()
+
+
 @dataclass(frozen=True, slots=True)
 class OperationDefinition:
     """Presentation and governance metadata for one operation."""
@@ -68,3 +101,9 @@ class EPMProductProvider(Protocol):
 
     def operations(self) -> tuple[OperationDefinition, ...]:
         """Return the governed operations contributed by this product."""
+
+    def navigation(self) -> tuple[NavigationDefinition, ...]:
+        """Return product-specific navigation contributed by this product."""
+
+    def capabilities(self) -> tuple[CapabilityDefinition, ...]:
+        """Return product-specific capabilities contributed by this product."""

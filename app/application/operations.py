@@ -53,6 +53,7 @@ from app.models.access_control import ExecutionActor
 from app.monitoring.job_monitor import JobMonitor
 from app.products.contracts import (
     BusinessProcessType,
+    CapabilityDefinition,
     OperationDefinition,
     OperationKind,
 )
@@ -289,15 +290,34 @@ class OperationCatalogService:
         self,
         settings: Settings,
         *,
+        business_process: BusinessProcessType = BusinessProcessType.PLANNING,
         logger: logging.Logger | None = None,
     ) -> None:
         self._settings = settings
+        self._business_process = business_process
         self._logger = logger or logging.getLogger(__name__)
 
     @staticmethod
     def definitions() -> tuple[OperationDefinition, ...]:
-        """Return operations implemented by the current application build."""
+        """Return the legacy Planning contract for compatibility callers."""
         return OPERATION_DEFINITIONS
+
+    def active_definitions(self) -> tuple[OperationDefinition, ...]:
+        """Return only operations contributed by the active product."""
+
+        return PRODUCT_PROVIDER_REGISTRY.operations_for(self._business_process)
+
+    def active_capabilities(self) -> tuple[CapabilityDefinition, ...]:
+        """Return common and product capabilities for runtime composition."""
+
+        return PRODUCT_PROVIDER_REGISTRY.capabilities_for(self._business_process)
+
+    def active_agent_tool_names(self) -> frozenset[str]:
+        """Return agent tools explicitly contributed for the active product."""
+
+        return PRODUCT_PROVIDER_REGISTRY.agent_tool_names_for(
+            self._business_process
+        )
 
     def discover(self, *, include_live: bool = True) -> OperationCatalog:
         """Return registrations and optionally discover live Oracle artifacts.

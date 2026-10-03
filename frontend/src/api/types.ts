@@ -9,6 +9,7 @@ export interface EnvironmentSummary {
   deployment_mode: string;
   configured: boolean;
   execution_account?: string;
+  business_process?: "PLANNING" | "FCCS" | "UNKNOWN";
 }
 
 export interface EnvironmentApplication {

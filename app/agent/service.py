@@ -72,7 +72,6 @@ from app.application.standalone_flow import (
     StandaloneFlowStepInput,
 )
 from app.application.operations import (
-    OPERATION_DEFINITIONS,
     BusinessRuleOperationInput,
     CubeRefreshOperationInput,
     DataImportOperationInput,
@@ -529,7 +528,7 @@ class AgentApplicationService:
         definition = next(
             (
                 item
-                for item in OPERATION_DEFINITIONS
+                for item in self._gateway.operation_definitions
                 if item.code.casefold() == target_code.strip().casefold()
             ),
             None,
@@ -1139,7 +1138,7 @@ class AgentApplicationService:
                 ),
                 tools=tuple(
                     item
-                    for item in self._gateway.definitions()
+                    for item in self._gateway.tool_definitions()
                     if item.name in allowed
                 ),
                 execute_tool=lambda call: self._execute_user_tool(

@@ -10,7 +10,7 @@ from app.application.operations import (
 )
 from app.models.environment import ApplicationInfo
 from app.products.context import classify_business_process, product_context
-from app.products.contracts import BusinessProcessType
+from app.products.contracts import BusinessProcessType, CapabilityScope
 from app.products.registry import PRODUCT_PROVIDER_REGISTRY, ProductProviderRegistry
 
 
@@ -97,6 +97,70 @@ PLANNING_OPERATION_CONTRACT = (
     ),
 )
 
+PLANNING_NAVIGATION_CONTRACT = (
+    ("home", "Home", "#home", "workspace", ()),
+    ("tasks", "My Work", "#tasks", "workspace", ()),
+    ("notifications", "Notifications", "#notifications", "workspace", ()),
+    ("approvals", "Approvals", "#approvals", "planning", ("PROCESS_RUN",)),
+    (
+        "data-review",
+        "Data Explorer",
+        "#data-review",
+        "planning",
+        ("DATA_REVIEW",),
+    ),
+    (
+        "operations",
+        "Operations",
+        "#operations",
+        "automation",
+        ("OPERATION_EXECUTE", "USER_VARIABLE_UPDATE"),
+    ),
+    (
+        "schedules",
+        "Schedules",
+        "#schedules",
+        "automation",
+        ("SCHEDULE_MANAGE",),
+    ),
+    (
+        "reports",
+        "Data Explorer",
+        "#reports",
+        "planning",
+        ("REPORT_GENERATE",),
+    ),
+    ("jobs", "Jobs & Activity", "#jobs", "analysis", ("HISTORY_VIEW",)),
+    (
+        "assistant",
+        "EPM Assistant",
+        "#assistant",
+        "workspace",
+        ("AGENT_USE",),
+    ),
+    (
+        "cycles",
+        "Planning Cycles",
+        "#cycles",
+        "administration",
+        ("PROCESS_DESIGN",),
+    ),
+    (
+        "access-control",
+        "Access Control",
+        "#access",
+        "administration",
+        ("USER_MANAGE",),
+    ),
+    (
+        "system-administration",
+        "System Administration",
+        "#system-administration",
+        "administration",
+        ("SECURITY_AUDIT_VIEW",),
+    ),
+)
+
 
 def test_planning_operation_contract_is_unchanged() -> None:
     actual = tuple(
@@ -118,6 +182,73 @@ def test_planning_operation_contract_is_unchanged() -> None:
         == OPERATION_DEFINITIONS
     )
 
+
+def test_planning_navigation_contract_is_unchanged() -> None:
+    navigation = PRODUCT_PROVIDER_REGISTRY.navigation_for(
+        BusinessProcessType.PLANNING
+    )
+
+    assert tuple(
+        (item.code, item.label, item.path, item.group, item.permissions)
+        for item in navigation
+    ) == PLANNING_NAVIGATION_CONTRACT
+
+
+def test_unknown_product_exposes_only_common_shell_and_agent_capabilities() -> None:
+    navigation = PRODUCT_PROVIDER_REGISTRY.navigation_for(
+        BusinessProcessType.UNKNOWN
+    )
+    capability_codes = {
+        item.code
+        for item in PRODUCT_PROVIDER_REGISTRY.capabilities_for(
+            BusinessProcessType.UNKNOWN
+        )
+    }
+
+    assert {item.code for item in navigation} == {
+        "home",
+        "notifications",
+        "jobs",
+        "assistant",
+        "access-control",
+        "system-administration",
+    }
+    assert "operations" not in {item.code for item in navigation}
+    assert capability_codes == {
+        "environment-verification",
+        "application-discovery",
+        "dimension-discovery",
+        "job-monitoring",
+    }
+    assert all(
+        item.scope is CapabilityScope.COMMON
+        for item in PRODUCT_PROVIDER_REGISTRY.capabilities_for(
+            BusinessProcessType.UNKNOWN
+        )
+    )
+    assert PRODUCT_PROVIDER_REGISTRY.agent_tool_names_for(
+        BusinessProcessType.UNKNOWN
+    ) == {
+        "get_environment_summary",
+        "get_recent_execution_history",
+        "get_execution_evidence",
+    }
+
+
+def test_planning_composes_common_and_product_capabilities() -> None:
+    capabilities = PRODUCT_PROVIDER_REGISTRY.capabilities_for(
+        BusinessProcessType.PLANNING
+    )
+
+    assert any(item.scope is CapabilityScope.COMMON for item in capabilities)
+    assert any(item.scope is CapabilityScope.PRODUCT for item in capabilities)
+    assert {
+        "list_platform_operations",
+        "list_planning_cubes",
+        "prepare_operation_action",
+    } <= PRODUCT_PROVIDER_REGISTRY.agent_tool_names_for(
+        BusinessProcessType.PLANNING
+    )
 
 def test_fccs_provider_is_registered_but_cannot_expose_operations() -> None:
     assert PRODUCT_PROVIDER_REGISTRY.get(BusinessProcessType.FCCS) is None

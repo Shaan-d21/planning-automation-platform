@@ -98,6 +98,7 @@ from app.models.oracle_artifact import (
     OracleArtifactType,
     OracleEnvironment,
 )
+from app.products.registry import PRODUCT_PROVIDER_REGISTRY
 from app.models.workflow import WorkflowStepStatus
 from app.services.access_control_service import AccessControlService
 from app.services.api_token_service import ApiTokenService
@@ -201,6 +202,16 @@ def create_app(
         logger=LOGGER.getChild("environment_configuration"),
     )
     resolved_settings = environment_configuration.resolve_startup_settings()
+    business_process = environment_configuration.active_business_process(
+        application_name=resolved_settings.application_name
+    )
+    product_provider = PRODUCT_PROVIDER_REGISTRY.get(business_process)
+    if product_provider is None and resolved_settings.application_name:
+        LOGGER.warning(
+            "No enabled product provider is available for %s; product-specific "
+            "operations and navigation are disabled.",
+            business_process.value,
+        )
     resolved_secret = (
         session_secret
         or os.getenv("WEB_SESSION_SECRET", "").strip()
@@ -222,6 +233,7 @@ def create_app(
     )
     operation_catalog = OperationCatalogService(
         resolved_settings,
+        business_process=business_process,
         logger=LOGGER.getChild("operation_catalog"),
     )
     automation_schedule_service = AutomationScheduleApplicationService(
@@ -295,6 +307,14 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.settings = resolved_settings
+    app.state.business_process = business_process
+    app.state.product_provider = product_provider
+    app.state.navigation_definitions = PRODUCT_PROVIDER_REGISTRY.navigation_for(
+        business_process
+    )
+    app.state.product_capabilities = PRODUCT_PROVIDER_REGISTRY.capabilities_for(
+        business_process
+    )
     app.state.platform_database = database_for(
         resolved_settings.database_target
     )

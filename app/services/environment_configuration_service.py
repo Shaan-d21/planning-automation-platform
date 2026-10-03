@@ -122,6 +122,32 @@ class EnvironmentConfigurationService:
             )
         return self._settings
 
+    def active_business_process(
+        self,
+        *,
+        application_name: str | None = None,
+    ) -> BusinessProcessType:
+        """Resolve the runtime product from persisted, verified metadata.
+
+        Existing deployments that still provide only ``APPLICATION_NAME``
+        retain Planning behavior during migration. A discovered application
+        with unknown product metadata does not inherit Planning capabilities.
+        """
+
+        configuration = self.get()
+        if configuration and configuration.selected_application:
+            if (
+                configuration.selected_business_process
+                is not BusinessProcessType.UNKNOWN
+            ):
+                return configuration.selected_business_process
+            if configuration.selection_source == "ENVIRONMENT":
+                return BusinessProcessType.PLANNING
+            return BusinessProcessType.UNKNOWN
+        if str(application_name or self._settings.application_name).strip():
+            return BusinessProcessType.PLANNING
+        return BusinessProcessType.UNKNOWN
+
     def get(self) -> EnvironmentConfiguration | None:
         """Return persisted configuration for the current Oracle base URL."""
         with self._database.connect() as connection:

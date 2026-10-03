@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from app.products.contracts import (
     BusinessProcessType,
+    CapabilityDefinition,
+    NavigationDefinition,
     OperationDefinition,
 )
 
@@ -15,4 +17,10 @@ class FCCSProductProvider:
     enabled = False
 
     def operations(self) -> tuple[OperationDefinition, ...]:
+        return ()
+
+    def navigation(self) -> tuple[NavigationDefinition, ...]:
+        return ()
+
+    def capabilities(self) -> tuple[CapabilityDefinition, ...]:
         return ()

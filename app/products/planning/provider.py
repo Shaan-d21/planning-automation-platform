@@ -4,8 +4,100 @@ from __future__ import annotations
 
 from app.products.contracts import (
     BusinessProcessType,
+    CapabilityDefinition,
+    CapabilityScope,
+    NavigationDefinition,
     OperationDefinition,
     OperationKind,
+)
+
+
+PLANNING_CAPABILITIES = (
+    CapabilityDefinition(
+        code="planning-data-explorer",
+        scope=CapabilityScope.PRODUCT,
+        description="Review and export governed Planning data slices.",
+        agent_tools=(
+            "list_planning_cubes",
+            "list_cube_dimensions",
+            "search_dimension_members",
+            "list_data_explorer_views",
+            "review_saved_data_view",
+            "list_variance_views",
+            "review_saved_variance",
+            "review_data_slice",
+            "compare_data_slices",
+        ),
+    ),
+    CapabilityDefinition(
+        code="planning-workflow",
+        scope=CapabilityScope.PRODUCT,
+        description="Manage Planning work, approvals, and planning cycles.",
+        agent_tools=(),
+    ),
+    CapabilityDefinition(
+        code="planning-governed-operations",
+        scope=CapabilityScope.PRODUCT,
+        description=(
+            "Discover, prepare, and schedule governed Planning operations."
+        ),
+        agent_tools=(
+            "list_platform_operations",
+            "list_operation_artifacts",
+            "plan_multi_step_request",
+            "prepare_operation_action",
+            "prepare_standalone_flow_action",
+            "prepare_schedule_action",
+        ),
+    ),
+)
+
+
+PLANNING_NAVIGATION_DEFINITIONS = (
+    NavigationDefinition("tasks", "My Work", "#tasks", "workspace", 20),
+    NavigationDefinition(
+        "approvals", "Approvals", "#approvals", "planning", 40, ("PROCESS_RUN",)
+    ),
+    NavigationDefinition(
+        "data-review",
+        "Data Explorer",
+        "#data-review",
+        "planning",
+        50,
+        ("DATA_REVIEW",),
+    ),
+    NavigationDefinition(
+        "operations",
+        "Operations",
+        "#operations",
+        "automation",
+        60,
+        ("OPERATION_EXECUTE", "USER_VARIABLE_UPDATE"),
+    ),
+    NavigationDefinition(
+        "schedules",
+        "Schedules",
+        "#schedules",
+        "automation",
+        70,
+        ("SCHEDULE_MANAGE",),
+    ),
+    NavigationDefinition(
+        "reports",
+        "Data Explorer",
+        "#reports",
+        "planning",
+        80,
+        ("REPORT_GENERATE",),
+    ),
+    NavigationDefinition(
+        "cycles",
+        "Planning Cycles",
+        "#cycles",
+        "administration",
+        110,
+        ("PROCESS_DESIGN",),
+    ),
 )
 
 
@@ -141,3 +233,18 @@ class PlanningProductProvider:
 
     def operations(self) -> tuple[OperationDefinition, ...]:
         return PLANNING_OPERATION_DEFINITIONS
+
+    def navigation(self) -> tuple[NavigationDefinition, ...]:
+        return PLANNING_NAVIGATION_DEFINITIONS
+
+    def capabilities(self) -> tuple[CapabilityDefinition, ...]:
+        operation_capabilities = tuple(
+            CapabilityDefinition(
+                code=item.code,
+                scope=CapabilityScope.PRODUCT,
+                description=item.description,
+                agent_tools=(),
+            )
+            for item in PLANNING_OPERATION_DEFINITIONS
+        )
+        return PLANNING_CAPABILITIES + operation_capabilities

@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Sequence
 
 from app.application.operations import OPERATION_DEFINITIONS
+from app.products.contracts import OperationDefinition
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,14 +46,15 @@ class AgentExecutionPlan:
 class AgentExecutionPlanBuilder:
     """Build a plan only from registered platform operation definitions."""
 
-    _DEFINITIONS = {item.code: item for item in OPERATION_DEFINITIONS}
-
     @classmethod
     def build(
         cls,
         task_context: dict[str, Any] | None,
         operation_codes: Sequence[str],
+        *,
+        definitions: Sequence[OperationDefinition] = OPERATION_DEFINITIONS,
     ) -> AgentExecutionPlan:
+        available = {item.code: item for item in definitions}
         context = task_context if isinstance(task_context, dict) else {}
         intent = str(context.get("intent") or "UNKNOWN").strip().upper()
         objective = str(context.get("objective") or "").strip()
@@ -68,7 +70,7 @@ class AgentExecutionPlanBuilder:
         steps: list[AgentExecutionPlanStep] = []
         for sequence, raw_code in enumerate(operation_codes, start=1):
             code = str(raw_code or "").strip().casefold()
-            definition = cls._DEFINITIONS.get(code)
+            definition = available.get(code)
             if definition is None:
                 return AgentExecutionPlan(
                     task_intent=intent,

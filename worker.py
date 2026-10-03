@@ -27,6 +27,7 @@ from app.services.notification_service import create_notification_service
 from app.services.environment_configuration_service import (
     EnvironmentConfigurationService,
 )
+from app.products.registry import PRODUCT_PROVIDER_REGISTRY
 from app.utils.logger import configure_logging
 
 
@@ -38,13 +39,22 @@ def main() -> int:
         initial_settings.database_target,
         project_root=PROJECT_ROOT,
     )
-    settings = replace(
-        EnvironmentConfigurationService(
-            initial_settings,
-            logger=logger.getChild("environment_configuration"),
-        ).resolve_startup_settings(),
-        execution_runtime="worker",
+    environment_configuration = EnvironmentConfigurationService(
+        initial_settings,
+        logger=logger.getChild("environment_configuration"),
     )
+    resolved_settings = environment_configuration.resolve_startup_settings()
+    business_process = environment_configuration.active_business_process(
+        application_name=resolved_settings.application_name
+    )
+    if PRODUCT_PROVIDER_REGISTRY.get(business_process) is None:
+        logger.error(
+            "Worker startup stopped: no enabled product provider is "
+            "available for %s.",
+            business_process.value,
+        )
+        return 1
+    settings = replace(resolved_settings, execution_runtime="worker")
 
     operation_manager = OperationExecutionManager(
         settings,
@@ -52,6 +62,7 @@ def main() -> int:
     )
     operation_catalog = OperationCatalogService(
         settings,
+        business_process=business_process,
         logger=logger.getChild("operation_catalog"),
     )
     automation_schedule_coordinator = AutomationScheduleCoordinator(

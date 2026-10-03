@@ -55,6 +55,7 @@ class EnvironmentSummary(BaseModel):
     deployment_mode: str
     configured: bool
     execution_account: str
+    business_process: str = "UNKNOWN"
 
 
 class EnvironmentApplicationSummary(BaseModel):

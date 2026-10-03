@@ -33,7 +33,9 @@ Providers declare:
 
 - a stable `BusinessProcessType`;
 - whether the provider is enabled; and
-- the exact governed operation definitions contributed by the provider.
+- the exact governed operation definitions contributed by the provider;
+- product navigation entries; and
+- product capabilities and agent-tool allow-lists.
 
 Stable operation codes, routes, risk levels, and presentation labels are part
 of the Planning compatibility contract. Existing imports continue to consume
@@ -43,11 +45,27 @@ of the Planning compatibility contract. Existing imports continue to consume
 
 - Planning is enabled and exposes the unchanged release operation catalog.
 - FCCS is registered but disabled and exposes no operations.
+- Runtime operation catalogs, navigation, agent tools, preflight, action
+  handoff, and worker startup consume the active product composition.
+- Common EPM capabilities and shell navigation are defined independently from
+  Planning workflow, Data Explorer, scheduling, and operation capabilities.
 - Oracle environment selection retains the verified business-process type.
 - The environment configuration API exposes product classification without
   exposing the Oracle base URL or credentials.
-- Regression tests prevent `UNKNOWN` or disabled providers from inheriting
-  Planning operations.
+- Regression tests lock the exact Planning operation and navigation contracts
+  and prevent `UNKNOWN` or disabled providers from inheriting Planning
+  operations, navigation, or agent tools.
+- The disabled FCCS module contains a read-only service contract for verified
+  connection/application identity, plan types and dimensions, saved job
+  definitions and job status, and bounded consolidation-journal retrieval.
+  It contains no FCCS write method.
+
+The FCCS read contract follows Oracle's supported public REST resources:
+
+- [Cloud EPM REST API support matrix](https://docs.oracle.com/en/cloud/saas/enterprise-performance-management-common/prest/all_rest_apis_table.html)
+- [Get Dimensions for a Plan Type](https://docs.oracle.com/en/cloud/saas/enterprise-performance-management-common/prest/GUID-185E11F9-8420-414A-B2EA-9098767FC24F.pdf)
+- [Manage Jobs](https://docs.oracle.com/en/cloud/saas/enterprise-performance-management-common/prest/manage_jobs.html)
+- [Retrieve FCCS Journals](https://docs.oracle.com/en/cloud/saas/enterprise-performance-management-common/prest/fccs_retrieve_journals.html)
 
 ## Incremental migration rule
 
@@ -56,9 +74,10 @@ Common, Planning, and FCCS behavior is extracted only when an implementation
 change requires it. Every extraction must retain the Planning contract and
 pass the complete Planning regression suite.
 
-## Next increment
+## FCCS release gate
 
-The next increment will make backend navigation and capability composition
-consume the active provider. Planning output must remain unchanged. FCCS will
-stay disabled until a read-only application connection and discovery slice is
-available.
+FCCS remains disabled until the read-only service is verified against a real
+FCCS environment. The next increment is to add FCCS-specific read navigation
+and API schemas, run live UAT for connection, discovery, dimensions, jobs, and
+journals, and only then enable the provider. Write operations remain out of
+scope for that gate.

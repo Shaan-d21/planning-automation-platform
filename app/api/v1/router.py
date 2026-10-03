@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
@@ -61,6 +60,7 @@ from app.application.identity_access import (
 from app.models.access_control import Permission, UserAccount
 from app.models.environment_configuration import EnvironmentConfiguration
 from app.products.context import classify_business_process
+from app.products.contracts import NavigationDefinition
 from app.web.security import (
     client_ip,
     csrf_token,
@@ -76,92 +76,6 @@ from app.application.execution_evidence import (
 
 
 router = APIRouter(prefix="/api/v1", tags=["frontend-v1"])
-
-
-@dataclass(frozen=True, slots=True)
-class _NavigationDefinition:
-    code: str
-    label: str
-    path: str
-    group: str
-    permissions: tuple[Permission, ...] = ()
-
-
-_NAVIGATION = (
-    _NavigationDefinition("home", "Home", "#home", "workspace"),
-    _NavigationDefinition("tasks", "My Work", "#tasks", "workspace"),
-    _NavigationDefinition("notifications", "Notifications", "#notifications", "workspace"),
-    _NavigationDefinition(
-        "approvals",
-        "Approvals",
-        "#approvals",
-        "planning",
-        (Permission.PROCESS_RUN,),
-    ),
-    _NavigationDefinition(
-        "data-review",
-        "Data Explorer",
-        "#data-review",
-        "planning",
-        (Permission.DATA_REVIEW,),
-    ),
-    _NavigationDefinition(
-        "operations",
-        "Operations",
-        "#operations",
-        "automation",
-        (Permission.OPERATION_EXECUTE, Permission.USER_VARIABLE_UPDATE),
-    ),
-    _NavigationDefinition(
-        "schedules",
-        "Schedules",
-        "#schedules",
-        "automation",
-        (Permission.SCHEDULE_MANAGE,),
-    ),
-    _NavigationDefinition(
-        "reports",
-        "Data Explorer",
-        "#reports",
-        "planning",
-        (Permission.REPORT_GENERATE,),
-    ),
-    _NavigationDefinition(
-        "jobs",
-        "Jobs & Activity",
-        "#jobs",
-        "analysis",
-        (Permission.HISTORY_VIEW,),
-    ),
-    _NavigationDefinition(
-        "assistant",
-        "EPM Assistant",
-        "#assistant",
-        "workspace",
-        (Permission.AGENT_USE,),
-    ),
-    _NavigationDefinition(
-        "cycles",
-        "Planning Cycles",
-        "#cycles",
-        "administration",
-        (Permission.PROCESS_DESIGN,),
-    ),
-    _NavigationDefinition(
-        "access-control",
-        "Access Control",
-        "#access",
-        "administration",
-        (Permission.USER_MANAGE,),
-    ),
-    _NavigationDefinition(
-        "system-administration",
-        "System Administration",
-        "#system-administration",
-        "administration",
-        (Permission.SECURITY_AUDIT_VIEW,),
-    ),
-)
 
 
 @router.get("/bootstrap", response_model=FrontendBootstrapResponse)
@@ -198,12 +112,17 @@ async def frontend_bootstrap(request: Request) -> FrontendBootstrapResponse:
                 deployment_mode=settings.resolved_deployment_mode,
                 configured=bool(settings.application_name),
                 execution_account=settings.oracle_execution_username,
+                business_process=request.app.state.business_process.value,
             )
             if authenticated
             else None
         ),
         user=_user_summary(user) if authenticated and user else None,
-        navigation=_navigation_for(user) if authenticated and user else [],
+        navigation=(
+            _navigation_for(user, request.app.state.navigation_definitions)
+            if authenticated and user
+            else []
+        ),
         features=FeatureAvailability(),
     )
 
@@ -437,7 +356,7 @@ async def standalone_operations(request: Request) -> OperationsResponse:
     user = current_user(request)
     assert user is not None
     operations = []
-    for operation in request.app.state.operation_catalog.definitions():
+    for operation in request.app.state.operation_catalog.active_definitions():
         required_permission = _operation_permission(operation.code)
         if not user.has_permission(required_permission):
             continue
@@ -1482,7 +1401,10 @@ def _persona_for(user: UserAccount) -> tuple[str, str]:
     return "VIEWER", "Viewer / Executive"
 
 
-def _navigation_for(user: UserAccount) -> list[NavigationItem]:
+def _navigation_for(
+    user: UserAccount,
+    definitions: tuple[NavigationDefinition, ...],
+) -> list[NavigationItem]:
     return [
         NavigationItem(
             code=item.code,
@@ -1490,13 +1412,16 @@ def _navigation_for(user: UserAccount) -> list[NavigationItem]:
             path=item.path,
             group=item.group,
         )
-        for item in _NAVIGATION
+        for item in definitions
         if not (
             item.code == "reports"
             and user.has_permission(Permission.DATA_REVIEW)
         )
         if not item.permissions
-        or any(user.has_permission(permission) for permission in item.permissions)
+        or any(
+            user.has_permission(Permission[permission])
+            for permission in item.permissions
+        )
     ]
 
 

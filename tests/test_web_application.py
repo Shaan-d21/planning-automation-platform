@@ -575,6 +575,7 @@ def test_v1_bootstrap_returns_effective_user_and_navigation(
         "deployment_mode": "on_premises",
         "configured": True,
         "execution_account": "administrator",
+        "business_process": "PLANNING",
     }
     assert payload["user"]["username"] == "admin"
     assert payload["user"]["platform_roles"] == [
