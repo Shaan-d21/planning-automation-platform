@@ -101,6 +101,7 @@ from app.models.oracle_artifact import (
 )
 from app.products.registry import PRODUCT_PROVIDER_REGISTRY
 from app.products.contracts import BusinessProcessType
+from app.products.runtime_context import RuntimeApplicationContextResolver
 from app.models.workflow import WorkflowStepStatus
 from app.services.access_control_service import AccessControlService
 from app.services.api_token_service import ApiTokenService
@@ -114,6 +115,9 @@ from app.services.federated_authentication_service import (
 )
 from app.services.environment_configuration_service import (
     EnvironmentConfigurationService,
+)
+from app.services.application_workspace_service import (
+    ApplicationWorkspaceService,
 )
 from app.services.notification_service import create_notification_service
 from app.services.oracle_password_authentication_service import (
@@ -172,6 +176,7 @@ from app.web.request_correlation import RequestCorrelationMiddleware
 from app.web.security import (
     client_ip as _client_ip,
     csrf_token as _csrf_token,
+    current_application_context,
     current_user as _current_user,
     require_api_session,
     require_bearer_token,
@@ -317,20 +322,29 @@ def create_app(
     app.state.product_capabilities = PRODUCT_PROVIDER_REGISTRY.capabilities_for(
         business_process
     )
-    app.state.fccs_read = (
-        FCCSReadApplicationService(
-            resolved_settings,
-            logger=LOGGER.getChild("fccs_read"),
-        )
-        if business_process is BusinessProcessType.FCCS
-        else None
-    )
     app.state.platform_database = database_for(
         resolved_settings.database_target
     )
     app.state.environment_configuration = EnvironmentConfigurationService(
         resolved_settings,
         logger=LOGGER.getChild("environment_configuration"),
+    )
+    app.state.application_workspaces = ApplicationWorkspaceService(
+        resolved_settings.database_target
+    )
+    app.state.application_workspaces.synchronize(
+        app.state.environment_configuration.get()
+    )
+    app.state.application_contexts = RuntimeApplicationContextResolver(
+        resolved_settings,
+        workspaces=app.state.application_workspaces,
+        environment_configuration=app.state.environment_configuration,
+    )
+    app.state.fccs_read_factory = lambda context_settings: (
+        FCCSReadApplicationService(
+            context_settings,
+            logger=LOGGER.getChild("fccs_read"),
+        )
     )
     app.state.access_control = access_control
     app.state.session_security = SessionSecurityService(
@@ -455,21 +469,7 @@ def create_app(
     app.include_router(v1_router)
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
-        if (
-            request.app.state.business_process is not BusinessProcessType.PLANNING
-            and _is_planning_only_path(request.url.path)
-        ):
-            response = JSONResponse(
-                status_code=404,
-                content={
-                    "detail": (
-                        "This Planning capability is not available for the "
-                        "active Oracle EPM application."
-                    )
-                },
-            )
-        else:
-            response = await call_next(request)
+        response = await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
@@ -700,16 +700,13 @@ def create_app(
     @app.get("/api/health")
     async def health(request: Request):
         require_api_session(request)
+        user = _current_user(request)
+        assert user is not None
+        application_context = current_application_context(request, user)
         factory = request.app.state.connection_use_case_factory
-        health_settings = await run_in_threadpool(
-            request.app.state.environment_configuration.resolve_startup_settings
-        )
-        active_application = request.app.state.settings.application_name
-        restart_required = bool(
-            health_settings.application_name
-            and health_settings.application_name.casefold()
-            != active_application.casefold()
-        )
+        health_settings = application_context.settings
+        active_application = application_context.application_name
+        restart_required = False
         try:
             result = await run_in_threadpool(
                 factory(health_settings).execute
@@ -2713,7 +2710,10 @@ def create_app(
         return {
             "status": "success",
             "environment": {
-                "application_name": request.app.state.settings.application_name,
+                "application_name": current_application_context(
+                    request,
+                    _current_user(request),
+                ).application_name,
                 "deployment_mode": (
                     request.app.state.settings.resolved_deployment_mode
                 ),
@@ -3867,45 +3867,6 @@ def _secure_cookie_enabled() -> bool:
     if value in {"false", "0", "no", "off"}:
         return False
     raise ValueError("WEB_SECURE_COOKIES must be true or false.")
-
-
-def _is_planning_only_path(path: str) -> bool:
-    """Identify legacy/current surfaces that are owned by Planning today."""
-
-    exact = {
-        "/api/v1/home",
-        "/api/v1/operations",
-        "/api/operations/catalog",
-    }
-    prefixes = (
-        "/api/v1/planning-",
-        "/api/v1/data-review",
-        "/api/v1/data-explorer",
-        "/api/v1/reports",
-        "/api/v1/schedules",
-        "/api/v1/substitution-variables",
-        "/api/v1/user-variables",
-        "/api/v1/uploads",
-        "/api/operations",
-        "/api/data-review",
-        "/api/data-explorer",
-        "/api/reports",
-        "/api/schedules",
-        "/api/substitution-variables",
-        "/api/user-variables",
-        "/api/uploads",
-        "/api/processes",
-        "/api/process-designer",
-        "/api/runs",
-        "/app/operations",
-        "/app/data-review",
-        "/app/reports",
-        "/app/schedules",
-        "/app/processes",
-        "/app/process-designer",
-        "/app/runs",
-    )
-    return path in exact or path.startswith(prefixes)
 
 
 def _validate_process_files(

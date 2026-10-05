@@ -11,8 +11,10 @@ from fastapi.responses import RedirectResponse
 
 from app.models.access_control import Permission, UserAccount
 from app.models.api_token import ApiTokenScope, AuthenticatedApiToken
+from app.products.contracts import BusinessProcessType
+from app.products.runtime_context import RuntimeApplicationContext
 from app.services.session_security_service import ClientContext
-from app.utils.exceptions import ApiTokenError
+from app.utils.exceptions import ApiTokenError, ConfigurationError
 
 
 def current_user(request: Request) -> UserAccount | None:
@@ -81,6 +83,7 @@ def require_page_session(request: Request) -> RedirectResponse | None:
         return RedirectResponse("/login", status_code=303)
     try:
         require_permission(request, user)
+        _require_product_surface(request, user)
     except HTTPException:
         return RedirectResponse("/app?access=denied", status_code=303)
     return None
@@ -102,7 +105,84 @@ def require_api_session(request: Request) -> str:
             status_code=401,
             detail="The web session is invalid. Connect again.",
         )
+    _require_product_surface(request, user)
     return session_id
+
+
+def current_application_context(
+    request: Request,
+    user: UserAccount | None = None,
+) -> RuntimeApplicationContext:
+    """Resolve and cache the authorized application context for this request."""
+
+    cached = getattr(request.state, "application_context", None)
+    if isinstance(cached, RuntimeApplicationContext):
+        return cached
+    account = user or current_user(request)
+    session_id = str(request.session.get("session_id", "")).strip()
+    if account is None or not session_id:
+        raise HTTPException(status_code=401, detail="Sign in to continue.")
+    try:
+        context = request.app.state.application_contexts.resolve(
+            session_id,
+            user_id=account.user_id,
+        )
+    except ConfigurationError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    request.state.application_context = context
+    return context
+
+
+def is_planning_only_path(path: str) -> bool:
+    """Return whether a route belongs to the Planning product module."""
+
+    exact = {
+        "/api/v1/home",
+        "/api/v1/operations",
+        "/api/operations/catalog",
+    }
+    prefixes = (
+        "/api/v1/planning-",
+        "/api/v1/data-review",
+        "/api/v1/reports",
+        "/api/v1/schedules",
+        "/api/v1/substitution-variables",
+        "/api/v1/user-variables",
+        "/api/v1/uploads",
+        "/api/operations",
+        "/api/data-review",
+        "/api/data-explorer",
+        "/api/reports",
+        "/api/schedules",
+        "/api/substitution-variables",
+        "/api/user-variables",
+        "/api/uploads",
+        "/api/processes",
+        "/api/process-designer",
+        "/api/runs",
+        "/app/operations",
+        "/app/data-review",
+        "/app/reports",
+        "/app/schedules",
+        "/app/processes",
+        "/app/process-designer",
+        "/app/runs",
+    )
+    return path in exact or path.startswith(prefixes)
+
+
+def _require_product_surface(request: Request, user: UserAccount) -> None:
+    if not is_planning_only_path(request.url.path):
+        return
+    context = current_application_context(request, user)
+    if context.business_process is not BusinessProcessType.PLANNING:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "This Planning capability is not available for the active "
+                "Oracle EPM application."
+            ),
+        )
 
 
 def require_bearer_token(
@@ -167,6 +247,17 @@ def start_user_session(
         authentication_method=authentication_method,
         client=client_context(request),
     )
+    workspace_service = getattr(
+        request.app.state,
+        "application_workspaces",
+        None,
+    )
+    if workspace_service is not None:
+        workspace_service.establish_default_for_session(
+            session_id,
+            user_id=user.user_id,
+            configuration=request.app.state.environment_configuration.get(),
+        )
 
 
 def client_context(request: Request) -> ClientContext:

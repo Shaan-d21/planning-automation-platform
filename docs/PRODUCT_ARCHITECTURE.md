@@ -61,6 +61,23 @@ of the Planning compatibility contract. Existing imports continue to consume
 - The durable worker remains idle for a provider that exposes no executable
   operations, preventing stale Planning work from running in an FCCS
   deployment.
+- Oracle applications now have normalized, non-secret registry records,
+  explicit user memberships, and a durable active-application field on each
+  platform session. Existing deployments are backfilled into one default
+  workspace without changing their runtime behavior.
+- The public workspace catalog is read-only for this increment. Switching is
+  intentionally disabled until Oracle clients, provider composition, durable
+  work, and product-owned records resolve their application from the request
+  or queued execution rather than process-global settings.
+- Authenticated requests now resolve an authorized runtime application context
+  from the durable session. Bootstrap identity, navigation, product
+  capabilities, standalone operation presentation, Planning route guards, and
+  FCCS read-only Oracle clients use that context instead of process-global
+  product composition.
+- Write services, schedules, the agent, and durable workers remain bound to the
+  deployment application. This deliberate split prevents a session selection
+  from redirecting a write until application ownership is persisted on every
+  proposal and queued execution.
 
 The FCCS read contract follows Oracle's supported public REST resources:
 
@@ -83,3 +100,13 @@ still requires live UAT for connection, application discovery, dimensions,
 jobs, and journals against the target FCCS environment. Write operations stay
 disabled until each operation receives its own supported Oracle contract,
 authorization policy, review flow, audit evidence, and live UAT.
+
+## Multi-application release gate
+
+Application registration alone does not make this deployment multi-
+application. Before the UI switcher is enabled, every request and queued job
+must carry an authorized application identifier; Oracle clients and product
+providers must be created from that context; and conversations, catalogs,
+schedules, artifacts, uploads, reports, and execution evidence must be scoped
+to it. Until those conditions are met, a session is bound to the deployment's
+existing active application and cannot switch through the public API.

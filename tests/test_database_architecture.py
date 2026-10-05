@@ -20,6 +20,7 @@ from app.infrastructure.database.schema import metadata
 from app.services import (
     access_control_service,
     api_token_service,
+    application_workspace_service,
     business_rule_rtp_registry,
     automation_schedule_repository,
     oracle_artifact_registry,
@@ -55,6 +56,8 @@ EXPECTED_TABLES = {
     "identity_sync_runs",
     "api_tokens",
     "oracle_environment_settings",
+    "oracle_applications",
+    "platform_user_applications",
     "oracle_artifacts",
     "business_rule_rtp_sync_runs",
     "business_rule_rtp_definitions",
@@ -122,6 +125,7 @@ def test_repositories_do_not_mutate_schema_at_runtime() -> None:
     modules = (
         access_control_service,
         api_token_service,
+        application_workspace_service,
         business_rule_rtp_registry,
         automation_schedule_repository,
         oracle_artifact_registry,
@@ -150,7 +154,7 @@ def test_alembic_has_one_production_head() -> None:
     scripts = ScriptDirectory.from_config(
         Config(str(project_root / "alembic.ini"))
     )
-    assert scripts.get_heads() == ["0025_epm_product_context"]
+    assert scripts.get_heads() == ["0026_application_workspaces"]
     assert all(len(revision.revision) <= 32 for revision in scripts.walk_revisions())
 
 

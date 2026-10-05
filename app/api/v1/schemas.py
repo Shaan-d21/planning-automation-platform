@@ -93,6 +93,26 @@ class EnvironmentApplicationSelectionRequest(BaseModel):
     application_name: str = Field(min_length=1, max_length=128)
 
 
+class ApplicationWorkspaceSummary(BaseModel):
+    """One registered Oracle application assigned to the current user."""
+
+    application_id: int
+    application_name: str
+    business_process: str
+    product_type: str | None = None
+    application_type: str | None = None
+    current: bool = False
+
+
+class ApplicationWorkspaceListResponse(BaseModel):
+    """Safe session workspace state before request-scoped routing is enabled."""
+
+    status: str = "success"
+    switching_enabled: bool = False
+    applications: list[ApplicationWorkspaceSummary] = Field(default_factory=list)
+    message: str
+
+
 class IdentityAuthenticationSummary(BaseModel):
     """Safe unauthenticated sign-in options exposed to the browser."""
 

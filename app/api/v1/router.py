@@ -9,6 +9,8 @@ from fastapi.responses import FileResponse
 from starlette.concurrency import run_in_threadpool
 
 from app.api.v1.schemas import (
+    ApplicationWorkspaceListResponse,
+    ApplicationWorkspaceSummary,
     FCCSDimensionsResponse,
     FCCSDimensionSummary,
     FCCSJobDefinitionSummary,
@@ -72,10 +74,12 @@ from app.models.access_control import Permission, UserAccount
 from app.models.environment_configuration import EnvironmentConfiguration
 from app.products.context import classify_business_process
 from app.products.contracts import BusinessProcessType, NavigationDefinition
+from app.products.registry import PRODUCT_PROVIDER_REGISTRY
 from app.web.security import (
     client_ip,
     csrf_token,
     current_user,
+    current_application_context,
     require_api_session,
     start_user_session,
     validate_csrf,
@@ -96,6 +100,20 @@ async def frontend_bootstrap(request: Request) -> FrontendBootstrapResponse:
     user = current_user(request)
     authenticated = user is not None and bool(
         str(request.session.get("session_id", "")).strip()
+    )
+    application_context = None
+    if authenticated and user:
+        try:
+            application_context = current_application_context(request, user)
+        except HTTPException as exc:
+            if exc.status_code != 409:
+                raise
+    navigation_definitions = (
+        application_context.navigation
+        if application_context is not None
+        else PRODUCT_PROVIDER_REGISTRY.navigation_for(
+            BusinessProcessType.UNKNOWN
+        )
     )
     return FrontendBootstrapResponse(
         product=ProductSummary(
@@ -119,18 +137,26 @@ async def frontend_bootstrap(request: Request) -> FrontendBootstrapResponse:
         ),
         environment=(
             EnvironmentSummary(
-                application_name=settings.application_name,
+                application_name=(
+                    application_context.application_name
+                    if application_context is not None
+                    else ""
+                ),
                 deployment_mode=settings.resolved_deployment_mode,
-                configured=bool(settings.application_name),
+                configured=application_context is not None,
                 execution_account=settings.oracle_execution_username,
-                business_process=request.app.state.business_process.value,
+                business_process=(
+                    application_context.business_process.value
+                    if application_context is not None
+                    else BusinessProcessType.UNKNOWN.value
+                ),
             )
             if authenticated
             else None
         ),
         user=_user_summary(user) if authenticated and user else None,
         navigation=(
-            _navigation_for(user, request.app.state.navigation_definitions)
+            _navigation_for(user, navigation_definitions)
             if authenticated and user
             else []
         ),
@@ -169,6 +195,12 @@ async def discover_environment_applications(
         )
     except EPMError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    actor = current_user(request)
+    await run_in_threadpool(
+        request.app.state.application_workspaces.synchronize,
+        configuration,
+        actor_user_id=(actor.user_id if actor else None),
+    )
     return _environment_configuration_payload(request, configuration)
 
 
@@ -193,10 +225,53 @@ async def select_environment_application(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except EPMError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    await run_in_threadpool(
+        request.app.state.application_workspaces.synchronize,
+        configuration,
+        actor_user_id=actor.user_id,
+    )
     return _environment_configuration_payload(
         request,
         configuration,
         selection_changed=True,
+    )
+
+
+@router.get(
+    "/workspaces",
+    response_model=ApplicationWorkspaceListResponse,
+)
+async def application_workspaces(
+    request: Request,
+) -> ApplicationWorkspaceListResponse:
+    """List application workspaces assigned to the current signed-in user."""
+
+    session_id = require_api_session(request)
+    user = current_user(request)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Sign in to continue.")
+    workspaces = await run_in_threadpool(
+        request.app.state.application_workspaces.available_for_user,
+        user.user_id,
+        raw_session_id=session_id,
+    )
+    return ApplicationWorkspaceListResponse(
+        applications=[
+            ApplicationWorkspaceSummary(
+                application_id=item.application_id,
+                application_name=item.application_name,
+                business_process=item.business_process.value,
+                product_type=item.product_type,
+                application_type=item.application_type,
+                current=item.current,
+            )
+            for item in workspaces
+        ],
+        message=(
+            "Application registration and membership are active. Workspace "
+            "switching remains disabled until Oracle services are fully "
+            "request-scoped."
+        ),
     )
 
 
@@ -366,8 +441,9 @@ async def standalone_operations(request: Request) -> OperationsResponse:
     require_api_session(request)
     user = current_user(request)
     assert user is not None
+    application_context = current_application_context(request, user)
     operations = []
-    for operation in request.app.state.operation_catalog.active_definitions():
+    for operation in application_context.operations:
         required_permission = _operation_permission(operation.code)
         if not user.has_permission(required_permission):
             continue
@@ -1575,18 +1651,19 @@ def _require_fccs_reader(request: Request):
             status_code=403,
             detail="You do not have permission to review FCCS resources.",
         )
-    if request.app.state.business_process is not BusinessProcessType.FCCS:
+    application_context = current_application_context(request, user)
+    if application_context.business_process is not BusinessProcessType.FCCS:
         raise HTTPException(
             status_code=404,
             detail="The FCCS workspace is not available for this application.",
         )
-    service = getattr(request.app.state, "fccs_read", None)
-    if service is None:
+    factory = getattr(request.app.state, "fccs_read_factory", None)
+    if factory is None:
         raise HTTPException(
             status_code=503,
             detail="The FCCS read service is not configured.",
         )
-    return service
+    return factory(application_context.settings)
 
 
 def _fccs_plan_type_payload(plan_type) -> FCCSPlanTypeSummary:
