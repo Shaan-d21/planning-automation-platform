@@ -132,6 +132,13 @@ PLANNING_NAVIGATION_CONTRACT = (
     ),
     ("jobs", "Jobs & Activity", "#jobs", "analysis", ("HISTORY_VIEW",)),
     (
+        "task-manager",
+        "Task Manager",
+        "#task-manager",
+        "planning",
+        ("REPORT_GENERATE",),
+    ),
+    (
         "assistant",
         "EPM Assistant",
         "#assistant",

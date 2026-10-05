@@ -223,6 +223,13 @@ class EPMClient:
             return f"rest/{self._PLANNING_API_VERSION}"
         return f"HyperionPlanning/rest/{self._PLANNING_API_VERSION}"
 
+    @property
+    def fcm_report_endpoint(self) -> str:
+        """Return the shared Task Manager report-generation endpoint."""
+        if self.base_url.lower().endswith("/hyperionplanning"):
+            return "rest/fcmapi/v1/report"
+        return "HyperionPlanning/rest/fcmapi/v1/report"
+
     def _request(self, method: str, endpoint: str, **kwargs: Any) -> Any:
         """Send an HTTP request and apply common transport/response handling."""
         deserialize = bool(kwargs.pop("deserialize", True))

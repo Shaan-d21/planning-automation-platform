@@ -340,6 +340,14 @@ class PlanningCycleCreateRequest(BaseModel):
     tasks: list[PlanningTaskCreateRequest] = Field(min_length=1)
 
 
+class TaskManagerSyncRequest(BaseModel):
+    """Oracle Task Manager report used to refresh the local task snapshot."""
+
+    report_group: str = Field(min_length=1, max_length=200)
+    report_name: str = Field(min_length=1, max_length=200)
+    parameters: dict[str, str] = Field(default_factory=dict)
+
+
 class PlanningTaskStatusRequest(BaseModel):
     """One governed task-status transition."""
 

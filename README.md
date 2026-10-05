@@ -55,6 +55,16 @@ The framework then calls Export Data Slice and creates the same formatted
 Excel workbook. Reports are stored locally and never require the unsupported
 Management Reporting Library APIs.
 
+Planning Task Manager is exposed as a separate read-only workspace. A Service
+Administrator configures an Oracle Task Manager report group, report name, and
+required report parameters once, then synchronizes the current schedules and
+tasks through Oracle's FCM report REST API. CSV report bytes are parsed only in
+memory and are never stored by the platform; PostgreSQL retains the normalized
+application-scoped task snapshot and synchronization evidence. The existing
+platform Planning Cycles feature remains independent. The synchronization core
+uses Oracle's shared FCM report contract, but the current release enables the
+workspace only for verified Planning applications; FCCS remains unchanged.
+
 The Planning Process Orchestrator combines approved operations into a
 catalog-driven, one-click process. It reuses the existing cycle, Pipeline,
 Business Rule, Data Map, validation, report, notification, and PostgreSQL history
@@ -1502,8 +1512,8 @@ code.
 
 An artifact created under Oracle's **Reports** area is a different resource
 from a Planning data form and cannot be passed as a form name. Task Manager
-reports require Oracle's separate report-generation API and are outside this
-form/data-slice workspace.
+reports use Oracle's separate FCM report-generation API and are synchronized
+from the dedicated **Task Manager** workspace, not from Data Explorer.
 
 If a new form cannot be discovered through the environment's REST API, the
 interactive flow offers a one-time registration wizard. It asks for:

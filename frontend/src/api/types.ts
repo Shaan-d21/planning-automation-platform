@@ -225,6 +225,57 @@ export interface PlanningCycleAdministrationResponse {
   roles: PlanningCycleAssigneeRole[];
 }
 
+export interface TaskManagerTask {
+  source_key: string;
+  external_id: string | null;
+  name: string;
+  schedule_name: string | null;
+  period_name: string | null;
+  status: string | null;
+  owner: string | null;
+  assignee: string | null;
+  approver: string | null;
+  organization: string | null;
+  task_type: string | null;
+  priority: string | null;
+  description: string | null;
+  parent_task: string | null;
+  dependency: string | null;
+  start_at: string | null;
+  due_at: string | null;
+  completed_at: string | null;
+  attributes: Record<string, string>;
+}
+
+export interface TaskManagerSnapshotResponse {
+  status: string;
+  message?: string;
+  can_sync: boolean;
+  configuration: {
+    report_group: string;
+    report_name: string;
+    parameters: Record<string, string>;
+  } | null;
+  sync: {
+    last_synced_at: string | null;
+    last_sync_status: "SUCCESS" | "FAILED" | null;
+    last_sync_record_count: number;
+    last_error: string | null;
+  } | null;
+  summary: {
+    task_count: number;
+    schedule_count: number;
+    status_counts: Record<string, number>;
+  };
+  tasks: TaskManagerTask[];
+}
+
+export interface TaskManagerSyncInput {
+  report_group: string;
+  report_name: string;
+  parameters: Record<string, string>;
+}
+
 export interface PlanningCycleStageInput {
   code: string;
   name: string;

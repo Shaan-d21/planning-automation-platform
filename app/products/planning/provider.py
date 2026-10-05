@@ -91,6 +91,14 @@ PLANNING_NAVIGATION_DEFINITIONS = (
         ("REPORT_GENERATE",),
     ),
     NavigationDefinition(
+        "task-manager",
+        "Task Manager",
+        "#task-manager",
+        "planning",
+        90,
+        ("REPORT_GENERATE",),
+    ),
+    NavigationDefinition(
         "cycles",
         "Planning Cycles",
         "#cycles",

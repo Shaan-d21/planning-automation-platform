@@ -5,7 +5,7 @@ import { Icon } from "./Icon";
 
 interface AppShellProps {
   bootstrap: BootstrapResponse;
-  activeView: "home" | "tasks" | "cycles" | "approvals" | "notifications" | "access" | "system-administration" | "jobs" | "operations" | "schedules" | "data-review" | "reports" | "assistant" | "fccs-overview" | "fccs-dimensions" | "fccs-jobs" | "fccs-journals";
+  activeView: "home" | "tasks" | "cycles" | "task-manager" | "approvals" | "notifications" | "access" | "system-administration" | "jobs" | "operations" | "schedules" | "data-review" | "reports" | "assistant" | "fccs-overview" | "fccs-dimensions" | "fccs-jobs" | "fccs-journals";
   children: ReactNode;
   busy: boolean;
   unreadNotifications: number;
@@ -128,6 +128,7 @@ function navigationIcon(code: string) {
     reports: "reports",
     assistant: "assistant",
     cycles: "calendar",
+    "task-manager": "tasks",
     "access-control": "users",
     jobs: "activity",
     "system-administration": "users",
@@ -148,6 +149,7 @@ function navigationHref(code: string, fallback: string) {
     home: "home",
     tasks: "tasks",
     cycles: "cycles",
+    "task-manager": "task-manager",
     approvals: "approvals",
     notifications: "notifications",
     "access-control": "access",
@@ -176,6 +178,6 @@ function platformEntryHref(bootstrap: BootstrapResponse) {
 }
 
 function viewLabel(view: AppShellProps["activeView"]) {
-  const labels = { home: "Home", tasks: "My Work", cycles: "Planning Cycles", approvals: "Approvals", notifications: "Notifications", access: "Access Control", "system-administration": "System Administration", jobs: "Jobs & Activity", operations: "Operations", schedules: "Schedules", "data-review": "Data Explorer", reports: "Data Explorer", assistant: "EPM Assistant", "fccs-overview": "Close Overview", "fccs-dimensions": "Dimensions", "fccs-jobs": "Oracle Jobs", "fccs-journals": "Journals" };
+  const labels = { home: "Home", tasks: "My Work", cycles: "Planning Cycles", "task-manager": "Task Manager", approvals: "Approvals", notifications: "Notifications", access: "Access Control", "system-administration": "System Administration", jobs: "Jobs & Activity", operations: "Operations", schedules: "Schedules", "data-review": "Data Explorer", reports: "Data Explorer", assistant: "EPM Assistant", "fccs-overview": "Close Overview", "fccs-dimensions": "Dimensions", "fccs-jobs": "Oracle Jobs", "fccs-journals": "Journals" };
   return labels[view];
 }

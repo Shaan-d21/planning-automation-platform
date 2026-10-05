@@ -1,7 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 
 import { api, ApiError } from "./api/client";
-import type { AccessControlResponse, BootstrapResponse, HomeResponse, IdentityMappingCatalogResponse, IdentityProvisioningPreview, IdentitySyncPreview, InitialAdministratorInput, JobActivityDetail, JobsActivityResponse, NotificationsResponse, OperationsResponse, PlanningApprovalsResponse, PlanningCycleAdministrationResponse, PlanningCycleCreateInput, PlanningWorkResponse, PlatformRoleCode, PlatformUserCreateInput, PlatformUserEditInput, SystemSecurityResponse, TaskStatus } from "./api/types";
+import type { AccessControlResponse, BootstrapResponse, HomeResponse, IdentityMappingCatalogResponse, IdentityProvisioningPreview, IdentitySyncPreview, InitialAdministratorInput, JobActivityDetail, JobsActivityResponse, NotificationsResponse, OperationsResponse, PlanningApprovalsResponse, PlanningCycleAdministrationResponse, PlanningCycleCreateInput, PlanningWorkResponse, PlatformRoleCode, PlatformUserCreateInput, PlatformUserEditInput, SystemSecurityResponse, TaskManagerSnapshotResponse, TaskManagerSyncInput, TaskStatus } from "./api/types";
 import { AppShell } from "./components/AppShell";
 import { Dashboard } from "./components/Dashboard";
 import { FullPageLoading, ToastMessage, UnavailableState, WorkspaceLoading } from "./components/Feedback";
@@ -18,19 +18,21 @@ import { ReportGenerationRunner } from "./components/ReportGenerationRunner";
 import { EpmAssistantWorkspace } from "./components/EpmAssistantWorkspace";
 import { SystemAdministrationWorkspace } from "./components/SystemAdministrationWorkspace";
 import { FCCSReadWorkspace, type FCCSReadView } from "./components/FCCSReadWorkspace";
+import { TaskManagerWorkspace } from "./components/TaskManagerWorkspace";
 
 const SchedulingWorkspace = lazy(async () => {
   const module = await import("./components/SchedulingWorkspace");
   return { default: module.SchedulingWorkspace };
 });
 
-type AppView = "home" | "tasks" | "cycles" | "approvals" | "notifications" | "access" | "system-administration" | "jobs" | "operations" | "schedules" | "data-review" | "reports" | "assistant" | FCCSReadView;
+type AppView = "home" | "tasks" | "cycles" | "task-manager" | "approvals" | "notifications" | "access" | "system-administration" | "jobs" | "operations" | "schedules" | "data-review" | "reports" | "assistant" | FCCSReadView;
 
 export function App() {
   const [bootstrap, setBootstrap] = useState<BootstrapResponse | null>(null);
   const [home, setHome] = useState<HomeResponse | null>(null);
   const [work, setWork] = useState<PlanningWorkResponse | null>(null);
   const [cycleAdministration, setCycleAdministration] = useState<PlanningCycleAdministrationResponse | null>(null);
+  const [taskManager, setTaskManager] = useState<TaskManagerSnapshotResponse | null>(null);
   const [approvals, setApprovals] = useState<PlanningApprovalsResponse | null>(null);
   const [notifications, setNotifications] = useState<NotificationsResponse | null>(null);
   const [accessControl, setAccessControl] = useState<AccessControlResponse | null>(null);
@@ -72,6 +74,7 @@ export function App() {
       setHome(null);
       setWork(null);
       setCycleAdministration(null);
+      setTaskManager(null);
       setApprovals(null);
       setNotifications(null);
       setAccessControl(null);
@@ -132,6 +135,11 @@ export function App() {
     if (activeView !== "cycles" || !bootstrap?.authenticated || cycleAdministration) return;
     api.cycleAdministration().then(setCycleAdministration).catch((reason: unknown) => setError(message(reason)));
   }, [activeView, bootstrap, cycleAdministration]);
+
+  useEffect(() => {
+    if (activeView !== "task-manager" || !bootstrap?.authenticated || taskManager) return;
+    api.taskManager().then(setTaskManager).catch((reason: unknown) => setError(message(reason)));
+  }, [activeView, bootstrap, taskManager]);
 
   useEffect(() => {
     if (activeView !== "approvals" || !bootstrap?.authenticated || approvals) return;
@@ -263,6 +271,7 @@ export function App() {
       await load();
       if (activeView === "tasks") setWork(await api.planningWork());
       else if (activeView === "cycles") setCycleAdministration(await api.cycleAdministration());
+      else if (activeView === "task-manager") setTaskManager(await api.taskManager());
       else if (activeView === "approvals") setApprovals(await api.approvals());
       else if (activeView === "access") setAccessControl(await api.accessControl());
       else if (activeView === "system-administration") setSystemSecurity(await api.systemSecurity());
@@ -273,7 +282,7 @@ export function App() {
         setWork(null);
         setCycleAdministration(null);
       }
-      setNotice(activeView === "tasks" ? "My Work refreshed with the latest assignments." : activeView === "cycles" ? "Planning cycles refreshed." : activeView === "schedules" ? "Schedules refreshed." : "Homepage refreshed with the latest platform state.");
+      setNotice(activeView === "tasks" ? "My Work refreshed with the latest assignments." : activeView === "cycles" ? "Planning cycles refreshed." : activeView === "task-manager" ? "Task Manager snapshot refreshed." : activeView === "schedules" ? "Schedules refreshed." : "Homepage refreshed with the latest platform state.");
       window.setTimeout(() => setNotice(null), 3500);
     } catch (reason) {
       setError(message(reason));
@@ -363,6 +372,26 @@ export function App() {
       setCycleAdministration(nextAdministration);
       setWork(null);
       setNotice("Planning cycle opened. Assigned responsibilities are now available in My Work.");
+      window.setTimeout(() => setNotice(null), 4500);
+    } catch (reason) {
+      setError(message(reason));
+      throw reason;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function synchronizeTaskManager(payload: TaskManagerSyncInput) {
+    if (!bootstrap) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const response = await api.synchronizeTaskManager(
+        payload,
+        bootstrap.csrf_token
+      );
+      setTaskManager(response);
+      setNotice(response.message ?? "Task Manager synchronized from Oracle.");
       window.setTimeout(() => setNotice(null), 4500);
     } catch (reason) {
       setError(message(reason));
@@ -616,6 +645,10 @@ export function App() {
         cycleAdministration
           ? <PlanningCycleAdministration data={cycleAdministration} busy={busy} onCreate={createCycle} />
           : <WorkspaceLoading label="Planning cycles" message="Preparing the business calendar and assignment choices…" />
+      ) : activeView === "task-manager" ? (
+        taskManager
+          ? <TaskManagerWorkspace data={taskManager} busy={busy} onSynchronize={synchronizeTaskManager} />
+          : <WorkspaceLoading label="Task Manager" message="Preparing the latest synchronized Oracle tasks…" />
       ) : activeView === "approvals" ? (
         approvals
           ? <ApprovalsWorkspace approvals={approvals.approvals} busyApprovalId={busyApprovalId} onDecision={decideApproval} />
@@ -678,6 +711,7 @@ function viewFromHash(): AppView {
   const hash = window.location.hash.toLowerCase();
   if (hash === "#tasks") return "tasks";
   if (hash === "#cycles") return "cycles";
+  if (hash === "#task-manager") return "task-manager";
   if (hash === "#approvals") return "approvals";
   if (hash === "#notifications") return "notifications";
   if (hash === "#access") return "access";

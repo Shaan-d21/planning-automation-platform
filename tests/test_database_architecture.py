@@ -69,6 +69,8 @@ EXPECTED_TABLES = {
     "automation_schedules",
     "automation_schedule_runs",
     "planning_cycles",
+    "task_manager_sources",
+    "task_manager_tasks",
     "planning_cycle_stages",
     "planning_tasks",
     "planning_task_dependencies",
@@ -154,7 +156,7 @@ def test_alembic_has_one_production_head() -> None:
     scripts = ScriptDirectory.from_config(
         Config(str(project_root / "alembic.ini"))
     )
-    assert scripts.get_heads() == ["0026_application_workspaces"]
+    assert scripts.get_heads() == ["0027_task_manager_sync"]
     assert all(len(revision.revision) <= 32 for revision in scripts.walk_revisions())
 
 

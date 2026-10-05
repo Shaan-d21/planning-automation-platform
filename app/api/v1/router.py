@@ -23,6 +23,7 @@ from app.api.v1.schemas import (
     FCCSOverviewResponse,
     FCCSPlanTypeSummary,
     PlanningCycleCreateRequest,
+    TaskManagerSyncRequest,
     PlanningApprovalDecisionRequest,
     PlanningTaskStatusRequest,
     PlatformPasswordChangeRequest,
@@ -88,6 +89,7 @@ from app.application.execution_evidence import (
     aggregate_import_evidence,
     aggregate_record_statistics,
 )
+from app.services.task_manager_service import TaskManagerSyncService
 
 
 router = APIRouter(prefix="/api/v1", tags=["frontend-v1"])
@@ -433,6 +435,64 @@ async def planning_home(request: Request) -> dict[str, object]:
             for item in snapshot.recent_activity
         ],
     }
+
+
+@router.get("/task-manager")
+async def task_manager_snapshot(request: Request) -> dict[str, object]:
+    """Return the latest normalized Oracle Task Manager snapshot."""
+
+    user, application_context = _require_task_manager_reader(request)
+    service = TaskManagerSyncService(
+        application_context.settings,
+        request.app.state.settings.database_target,
+    )
+    snapshot = await run_in_threadpool(
+        service.snapshot,
+        application_context.application_id,
+    )
+    can_sync = user.has_permission(Permission.CATALOG_MANAGE)
+    return _task_manager_snapshot_payload(snapshot, can_sync=can_sync)
+
+
+@router.post("/task-manager/synchronize")
+async def synchronize_task_manager(
+    request: Request,
+    payload: TaskManagerSyncRequest,
+) -> dict[str, object]:
+    """Generate, parse, and discard an Oracle Task Manager CSV report."""
+
+    user, application_context = _require_task_manager_reader(request)
+    if not user.has_permission(Permission.CATALOG_MANAGE):
+        raise HTTPException(
+            status_code=403,
+            detail="Only a Service Administrator can synchronize Task Manager.",
+        )
+    validate_csrf(request)
+    service = TaskManagerSyncService(
+        application_context.settings,
+        request.app.state.settings.database_target,
+    )
+    try:
+        result = await run_in_threadpool(
+            service.synchronize,
+            application_context.application_id,
+            report_group=payload.report_group,
+            report_name=payload.report_name,
+            parameters=payload.parameters,
+            actor_user_id=user.user_id,
+        )
+        snapshot = await run_in_threadpool(
+            service.snapshot,
+            application_context.application_id,
+        )
+    except (ConfigurationError, EPMError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    response = _task_manager_snapshot_payload(snapshot, can_sync=True)
+    response["message"] = (
+        f"Synchronized {result.record_count} Task Manager tasks across "
+        f"{result.schedule_count} schedules."
+    )
+    return response
 
 
 @router.get("/operations", response_model=OperationsResponse)
@@ -1447,6 +1507,25 @@ def _require_user_management(request: Request) -> UserAccount:
     return user
 
 
+def _require_task_manager_reader(request: Request):
+    """Authorize the Planning-only Task Manager read surface."""
+
+    require_api_session(request)
+    user = current_user(request)
+    if user is None or not user.has_permission(Permission.REPORT_GENERATE):
+        raise HTTPException(
+            status_code=403,
+            detail="You do not have permission to review Task Manager tasks.",
+        )
+    application_context = current_application_context(request, user)
+    if application_context.business_process is not BusinessProcessType.PLANNING:
+        raise HTTPException(
+            status_code=404,
+            detail="Task Manager is not enabled for this application workspace.",
+        )
+    return user, application_context
+
+
 def _environment_configuration_payload(
     request: Request,
     configuration: EnvironmentConfiguration | None,
@@ -1771,6 +1850,75 @@ def _cycle_payload(cycle) -> dict[str, object]:
         "completed_at": (
             cycle.completed_at.isoformat() if cycle.completed_at else None
         ),
+    }
+
+
+def _task_manager_snapshot_payload(snapshot, *, can_sync: bool) -> dict[str, object]:
+    source = snapshot.source
+    status_counts: dict[str, int] = {}
+    schedule_names: set[str] = set()
+    for task in snapshot.tasks:
+        status = task.status or "Unspecified"
+        status_counts[status] = status_counts.get(status, 0) + 1
+        if task.schedule_name:
+            schedule_names.add(task.schedule_name)
+    return {
+        "status": "success",
+        "can_sync": can_sync,
+        "configuration": (
+            {
+                "report_group": source.report_group,
+                "report_name": source.report_name,
+                "parameters": source.parameters,
+            }
+            if source is not None and can_sync
+            else None
+        ),
+        "sync": (
+            {
+                "last_synced_at": (
+                    source.last_synced_at.isoformat()
+                    if source.last_synced_at
+                    else None
+                ),
+                "last_sync_status": source.last_sync_status,
+                "last_sync_record_count": source.last_sync_record_count,
+                "last_error": source.last_error if can_sync else None,
+            }
+            if source is not None
+            else None
+        ),
+        "summary": {
+            "task_count": len(snapshot.tasks),
+            "schedule_count": len(schedule_names),
+            "status_counts": status_counts,
+        },
+        "tasks": [
+            {
+                "source_key": task.source_key,
+                "external_id": task.external_id,
+                "name": task.name,
+                "schedule_name": task.schedule_name,
+                "period_name": task.period_name,
+                "status": task.status,
+                "owner": task.owner,
+                "assignee": task.assignee,
+                "approver": task.approver,
+                "organization": task.organization,
+                "task_type": task.task_type,
+                "priority": task.priority,
+                "description": task.description,
+                "parent_task": task.parent_task,
+                "dependency": task.dependency,
+                "start_at": task.start_at.isoformat() if task.start_at else None,
+                "due_at": task.due_at.isoformat() if task.due_at else None,
+                "completed_at": (
+                    task.completed_at.isoformat() if task.completed_at else None
+                ),
+                "attributes": task.attributes,
+            }
+            for task in snapshot.tasks
+        ],
     }
 
 

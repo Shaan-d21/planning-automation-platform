@@ -145,6 +145,7 @@ def is_planning_only_path(path: str) -> bool:
         "/api/v1/planning-",
         "/api/v1/data-review",
         "/api/v1/reports",
+        "/api/v1/task-manager",
         "/api/v1/schedules",
         "/api/v1/substitution-variables",
         "/api/v1/user-variables",

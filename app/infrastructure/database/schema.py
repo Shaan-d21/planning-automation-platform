@@ -1031,6 +1031,92 @@ planning_cycles = Table(
     Column("archived_at", UTC_TIMESTAMP),
     CheckConstraint("due_date >= start_date", name="date_order"),
 )
+
+task_manager_sources = Table(
+    "task_manager_sources",
+    metadata,
+    Column(
+        "application_id",
+        IDENTITY_BIGINT,
+        ForeignKey("oracle_applications.application_id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("report_group", String(200), nullable=False),
+    Column("report_name", String(200), nullable=False),
+    Column("parameters", JSON_DOCUMENT, nullable=False, server_default=text("'{}'")),
+    Column("updated_by_user_id", IDENTITY_BIGINT),
+    Column("updated_at", UTC_TIMESTAMP, nullable=False),
+    Column("last_synced_at", UTC_TIMESTAMP),
+    Column("last_sync_status", String(20)),
+    Column("last_sync_record_count", Integer, nullable=False, server_default="0"),
+    Column("last_error", Text),
+    CheckConstraint(
+        "last_sync_status IS NULL OR last_sync_status IN ('SUCCESS', 'FAILED')",
+        name="sync_status",
+    ),
+    CheckConstraint(
+        "last_sync_record_count >= 0",
+        name="record_count_nonnegative",
+    ),
+    ForeignKeyConstraint(
+        ["updated_by_user_id"],
+        ["platform_users.user_id"],
+        name="fk_task_manager_source_updated_by",
+        ondelete="SET NULL",
+    ),
+)
+
+task_manager_tasks = Table(
+    "task_manager_tasks",
+    metadata,
+    Column(
+        "task_manager_task_id",
+        IDENTITY_BIGINT,
+        primary_key=True,
+        autoincrement=True,
+    ),
+    Column(
+        "application_id",
+        IDENTITY_BIGINT,
+        ForeignKey("oracle_applications.application_id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("source_key", String(64), nullable=False),
+    Column("external_id", String(200)),
+    Column("name", String(500), nullable=False),
+    Column("schedule_name", String(300)),
+    Column("period_name", String(200)),
+    Column("status", String(120)),
+    Column("owner", String(300)),
+    Column("assignee", String(300)),
+    Column("approver", String(300)),
+    Column("organization", String(300)),
+    Column("task_type", String(160)),
+    Column("priority", String(80)),
+    Column("description", Text),
+    Column("parent_task", String(500)),
+    Column("dependency", Text),
+    Column("start_at", UTC_TIMESTAMP),
+    Column("due_at", UTC_TIMESTAMP),
+    Column("completed_at", UTC_TIMESTAMP),
+    Column("attributes", JSON_DOCUMENT, nullable=False, server_default=text("'{}'")),
+    Column("synchronized_at", UTC_TIMESTAMP, nullable=False),
+    UniqueConstraint(
+        "application_id",
+        "source_key",
+        name="application_source_key",
+    ),
+)
+Index(
+    "ix_task_manager_tasks_application_schedule",
+    task_manager_tasks.c.application_id,
+    task_manager_tasks.c.schedule_name,
+)
+Index(
+    "ix_task_manager_tasks_application_status",
+    task_manager_tasks.c.application_id,
+    task_manager_tasks.c.status,
+)
 Index(
     "uq_planning_cycles_active_code",
     func.lower(planning_cycles.c.code),

@@ -91,7 +91,9 @@ import type {
   FCCSDimensionsResponse,
   FCCSJobsResponse,
   FCCSJournalsResponse,
-  FCCSJournalDetailResponse
+  FCCSJournalDetailResponse,
+  TaskManagerSnapshotResponse,
+  TaskManagerSyncInput
 } from "./types";
 
 export class ApiError extends Error {
@@ -188,6 +190,17 @@ export const api = {
   ),
   cycleAdministration: () => request<PlanningCycleAdministrationResponse>(
     "/api/v1/planning-cycle-administration"
+  ),
+  taskManager: () => request<TaskManagerSnapshotResponse>(
+    "/api/v1/task-manager"
+  ),
+  synchronizeTaskManager: (
+    payload: TaskManagerSyncInput,
+    csrfToken: string
+  ) => request<TaskManagerSnapshotResponse>(
+    "/api/v1/task-manager/synchronize",
+    { method: "POST", body: JSON.stringify(payload) },
+    csrfToken
   ),
   createPlanningCycle: (payload: PlanningCycleCreateInput, csrfToken: string) =>
     request<{ status: string; cycle: PlanningCycle }>(
