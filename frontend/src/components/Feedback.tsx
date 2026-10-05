@@ -31,7 +31,7 @@ export function ToastMessage({ tone, message, onDismiss }: { tone: "success" | "
 }
 
 export function FullPageLoading() {
-  return <main className="loading-screen"><div className="loading-brand"><span className="brand-mark">B</span><strong>EPM AI Assistant</strong></div><div className="skeleton skeleton--title" /><div className="skeleton-grid"><span /><span /><span /><span /></div><p>Preparing your Planning workspace…</p></main>;
+  return <main className="loading-screen"><div className="loading-brand"><span className="brand-mark">B</span><strong>EPM AI Assistant</strong></div><div className="skeleton skeleton--title" /><div className="skeleton-grid"><span /><span /><span /><span /></div><p>Preparing your Oracle EPM workspace…</p></main>;
 }
 
 export function WorkspaceLoading({ label = "My work", message = "Organizing your assignments and Planning cycle…" }: { label?: string; message?: string }) {

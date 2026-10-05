@@ -86,6 +86,7 @@ def test_environment_fallback_is_persisted_without_live_discovery(
     assert resolved.application_name == "Vision"
     assert saved.selected_application == "Vision"
     assert saved.selection_source == "ENVIRONMENT"
+    assert saved.selected_business_process.value == "UNKNOWN"
 
 
 def test_single_discovered_application_is_selected_automatically(
@@ -95,7 +96,14 @@ def test_single_discovered_application_is_selected_automatically(
     service = EnvironmentConfigurationService(
         settings,
         client_factory=_factory(
-            [{"name": "EPBCS", "type": "HP", "adminMode": False}]
+            [
+                {
+                    "name": "EPBCS",
+                    "type": "HP",
+                    "appType": "PBCS",
+                    "adminMode": False,
+                }
+            ]
         ),
     )
 
@@ -106,6 +114,27 @@ def test_single_discovered_application_is_selected_automatically(
     assert saved.selected_application == "EPBCS"
     assert saved.selection_source == "AUTO_DISCOVERY"
     assert saved.applications[0].product_type == "HP"
+    assert saved.selected_business_process.value == "PLANNING"
+
+
+def test_enabled_read_only_fccs_provider_allows_verified_selection(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path / "environment.sqlite3")
+    service = EnvironmentConfigurationService(
+        settings,
+        client_factory=_factory(
+            [{"name": "Close", "type": "HP", "appType": "FCCS"}]
+        ),
+    )
+
+    resolved = service.resolve_startup_settings()
+    saved = service.require()
+
+    assert resolved.application_name == "Close"
+    assert saved.selected_application == "Close"
+    assert saved.applications[0].application_type == "FCCS"
+    assert saved.selected_business_process.value == "FCCS"
 
 
 def test_multiple_applications_require_an_explicit_verified_selection(

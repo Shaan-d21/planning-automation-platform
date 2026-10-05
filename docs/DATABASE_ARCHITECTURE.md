@@ -78,7 +78,9 @@ Server-side browser-session registry used for expiry, activity review, and
 immediate revocation. Only a SHA-256 digest of the random cookie session ID is
 stored. Login/current IP, optional trusted Cloudflare country and ray metadata,
 browser user agent, timestamps, and revocation attribution support the System
-Administration workspace without storing credentials.
+Administration workspace without storing credentials. `active_application_id`
+binds an authenticated session to one authorized Oracle application workspace;
+it never contains a URL or credential.
 
 #### `api_tokens`
 
@@ -94,11 +96,32 @@ workbook.
 #### `oracle_environment_settings`
 
 One non-secret connection-configuration record per normalized Oracle base
-URL. It retains the selected Planning application, its selection source, the
+URL. It retains the selected Oracle EPM application, its selection source, the
 latest supported Get Applications response, discovery timestamps, and a
 bounded failure message. Credentials and tokens are never stored. A selection
 change is activated only after the API and worker restart, preventing running
 or scheduled work from changing applications mid-execution.
+
+`selected_business_process` records the verified product classification for
+the selected Oracle application: `PLANNING`, `FCCS`, or `UNKNOWN`. The value is
+derived only from Oracle application metadata. Existing selections with no
+stored classification reuse retained Oracle discovery metadata when available.
+Otherwise they fail closed as `UNKNOWN` until application discovery is
+refreshed; they are never classified from the application name.
+
+#### `oracle_applications`
+
+Normalized, non-secret applications discovered beneath an Oracle environment.
+Each row retains the verified product/application types, canonical business
+process classification, active lifecycle state, and verification timestamp.
+The environment URL remains server-side and is not returned by workspace APIs.
+
+#### `platform_user_applications`
+
+Explicit many-to-many authorization between platform users and registered
+Oracle applications. Session resolution joins through this table so knowing an
+application identifier is not sufficient to enter another workspace. The
+grant timestamp and optional granting administrator are retained for audit.
 
 #### `oracle_pipelines`
 

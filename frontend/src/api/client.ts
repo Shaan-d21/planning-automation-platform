@@ -86,7 +86,12 @@ import type {
   AutomationScheduleRunsResponse,
   ScheduleMutationResponse,
   SchedulePreviewResponse,
-  SystemSecurityResponse
+  SystemSecurityResponse,
+  FCCSOverviewResponse,
+  FCCSDimensionsResponse,
+  FCCSJobsResponse,
+  FCCSJournalsResponse,
+  FCCSJournalDetailResponse
 } from "./types";
 
 export class ApiError extends Error {
@@ -290,6 +295,33 @@ export const api = {
       csrfToken
     ),
   operations: () => request<OperationsResponse>("/api/v1/operations"),
+  fccsOverview: () => request<FCCSOverviewResponse>("/api/v1/fccs/overview"),
+  fccsDimensions: () => request<FCCSDimensionsResponse>("/api/v1/fccs/dimensions"),
+  fccsJobs: (jobType = "") => request<FCCSJobsResponse>(
+    `/api/v1/fccs/jobs${jobType.trim() ? `?job_type=${encodeURIComponent(jobType.trim())}` : ""}`
+  ),
+  fccsJournals: (filters: Record<string, string> = {}) => {
+    const parameters = new URLSearchParams();
+    Object.entries(filters).forEach(([key, value]) => {
+      if (value.trim()) parameters.set(key, value.trim());
+    });
+    const query = parameters.toString();
+    return request<FCCSJournalsResponse>(`/api/v1/fccs/journals${query ? `?${query}` : ""}`);
+  },
+  fccsJournalDetail: (
+    label: string,
+    context: { scenario: string; year: string; period: string; consolidation?: string | null }
+  ) => {
+    const parameters = new URLSearchParams({
+      scenario: context.scenario,
+      year: context.year,
+      period: context.period
+    });
+    if (context.consolidation) parameters.set("consolidation", context.consolidation);
+    return request<FCCSJournalDetailResponse>(
+      `/api/v1/fccs/journals/${encodeURIComponent(label)}?${parameters.toString()}`
+    );
+  },
   agentStatus: () => request<AgentStatusResponse>("/api/agent/status"),
   agentConversations: () => request<AgentConversationsResponse>("/api/agent/conversations"),
   createAgentConversation: (csrfToken: string) =>

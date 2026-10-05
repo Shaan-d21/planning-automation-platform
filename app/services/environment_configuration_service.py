@@ -16,6 +16,9 @@ from app.infrastructure.database.engine import DatabaseTarget, database_for
 from app.infrastructure.database.schema import oracle_environment_settings
 from app.models.environment import ApplicationInfo
 from app.models.environment_configuration import EnvironmentConfiguration
+from app.products.context import classify_business_process
+from app.products.contracts import BusinessProcessType
+from app.products.registry import PRODUCT_PROVIDER_REGISTRY
 from app.services.application_service import ApplicationService
 from app.utils.exceptions import ConfigurationError
 
@@ -42,6 +45,21 @@ class EnvironmentConfigurationService:
         """Resolve the active application using DB, env, then live discovery."""
         configuration = self.get()
         if configuration and configuration.selected_application:
+            if (
+                configuration.selected_business_process
+                is not BusinessProcessType.UNKNOWN
+                and PRODUCT_PROVIDER_REGISTRY.get(
+                    configuration.selected_business_process
+                )
+                is None
+            ):
+                self._logger.error(
+                    "The selected Oracle application '%s' is %s, but that "
+                    "product provider is not enabled in this release.",
+                    configuration.selected_application,
+                    configuration.selected_business_process.value,
+                )
+                return replace(self._settings, application_name="")
             return replace(
                 self._settings,
                 application_name=configuration.selected_application,
@@ -66,7 +84,23 @@ class EnvironmentConfigurationService:
             return self._settings
 
         if len(discovered.applications) == 1:
-            application = discovered.applications[0].name
+            metadata = discovered.applications[0]
+            business_process = classify_business_process(
+                product_type=metadata.product_type,
+                application_type=metadata.application_type,
+            )
+            if (
+                business_process is not BusinessProcessType.UNKNOWN
+                and PRODUCT_PROVIDER_REGISTRY.get(business_process) is None
+            ):
+                self._logger.warning(
+                    "Oracle application '%s' is %s, but that product provider "
+                    "is not enabled in this release.",
+                    metadata.name,
+                    business_process.value,
+                )
+                return self._settings
+            application = metadata.name
             selected = self._persist_selection(
                 application,
                 source="AUTO_DISCOVERY",
@@ -87,6 +121,32 @@ class EnvironmentConfigurationService:
                 len(discovered.applications),
             )
         return self._settings
+
+    def active_business_process(
+        self,
+        *,
+        application_name: str | None = None,
+    ) -> BusinessProcessType:
+        """Resolve the runtime product from persisted, verified metadata.
+
+        Existing deployments that still provide only ``APPLICATION_NAME``
+        retain Planning behavior during migration. A discovered application
+        with unknown product metadata does not inherit Planning capabilities.
+        """
+
+        configuration = self.get()
+        if configuration and configuration.selected_application:
+            if (
+                configuration.selected_business_process
+                is not BusinessProcessType.UNKNOWN
+            ):
+                return configuration.selected_business_process
+            if configuration.selection_source == "ENVIRONMENT":
+                return BusinessProcessType.PLANNING
+            return BusinessProcessType.UNKNOWN
+        if str(application_name or self._settings.application_name).strip():
+            return BusinessProcessType.PLANNING
+        return BusinessProcessType.UNKNOWN
 
     def get(self) -> EnvironmentConfiguration | None:
         """Return persisted configuration for the current Oracle base URL."""
@@ -134,16 +194,29 @@ class EnvironmentConfigurationService:
         if configuration is None or not configuration.applications:
             configuration = self.discover()
         matches = {
-            item.name.casefold(): item.name for item in configuration.applications
+            item.name.casefold(): item for item in configuration.applications
         }
-        verified_name = matches.get(requested.casefold())
-        if verified_name is None:
+        verified_application = matches.get(requested.casefold())
+        if verified_application is None:
             raise ConfigurationError(
                 f"Oracle did not return an application named '{requested}'. "
                 "Refresh application discovery and select a current value."
             )
+        business_process = classify_business_process(
+            product_type=verified_application.product_type,
+            application_type=verified_application.application_type,
+        )
+        if (
+            business_process is not BusinessProcessType.UNKNOWN
+            and PRODUCT_PROVIDER_REGISTRY.get(business_process) is None
+        ):
+            raise ConfigurationError(
+                f"{business_process.value} support is not enabled in this "
+                "release. The application was discovered, but it cannot be "
+                "selected until its product provider is available."
+            )
         return self._persist_selection(
-            verified_name,
+            verified_application.name,
             source="ADMIN_SELECTION",
             selected_by_user_id=selected_by_user_id,
         )
@@ -169,6 +242,21 @@ class EnvironmentConfigurationService:
             "last_discovery_error": error,
             "updated_at": now,
         }
+        selected_name = existing.selected_application if existing else None
+        selected_metadata = next(
+            (
+                item
+                for item in applications
+                if selected_name
+                and item.name.casefold() == selected_name.casefold()
+            ),
+            None,
+        )
+        if selected_metadata is not None:
+            values["selected_business_process"] = classify_business_process(
+                product_type=selected_metadata.product_type,
+                application_type=selected_metadata.application_type,
+            ).value
         with self._database.begin() as connection:
             if existing is None:
                 connection.execute(
@@ -197,10 +285,27 @@ class EnvironmentConfigurationService:
     ) -> EnvironmentConfiguration:
         now = datetime.now(UTC)
         existing = self.get()
+        selected_metadata = next(
+            (
+                item
+                for item in (existing.applications if existing else ())
+                if item.name.casefold() == application_name.casefold()
+            ),
+            None,
+        )
+        business_process = (
+            classify_business_process(
+                product_type=selected_metadata.product_type,
+                application_type=selected_metadata.application_type,
+            )
+            if selected_metadata is not None
+            else BusinessProcessType.UNKNOWN
+        )
         values: dict[str, Any] = {
             "base_url": self._settings.epm_base_url,
             "deployment_mode": self._settings.resolved_deployment_mode,
             "selected_application": application_name,
+            "selected_business_process": business_process.value,
             "selection_source": source,
             "selected_at": now,
             "selected_by_user_id": selected_by_user_id,
@@ -268,14 +373,33 @@ class EnvironmentConfigurationService:
             for item in raw_applications
             if isinstance(item, Mapping) and str(item.get("name") or "").strip()
         )
+        selected_application = (
+            str(row["selected_application"])
+            if row.get("selected_application")
+            else None
+        )
+        selected_business_process = _business_process(
+            row.get("selected_business_process")
+        )
+        if selected_business_process is BusinessProcessType.UNKNOWN:
+            selected_metadata = next(
+                (
+                    item
+                    for item in applications
+                    if selected_application
+                    and item.name.casefold() == selected_application.casefold()
+                ),
+                None,
+            )
+            if selected_metadata is not None:
+                selected_business_process = classify_business_process(
+                    product_type=selected_metadata.product_type,
+                    application_type=selected_metadata.application_type,
+                )
         return EnvironmentConfiguration(
             base_url=str(row["base_url"]),
             deployment_mode=str(row["deployment_mode"]),
-            selected_application=(
-                str(row["selected_application"])
-                if row.get("selected_application")
-                else None
-            ),
+            selected_application=selected_application,
             selection_source=(
                 str(row["selection_source"])
                 if row.get("selection_source")
@@ -294,4 +418,12 @@ class EnvironmentConfigurationService:
                 if row.get("selected_by_user_id") is not None
                 else None
             ),
+            selected_business_process=selected_business_process,
         )
+
+
+def _business_process(value: Any) -> BusinessProcessType:
+    try:
+        return BusinessProcessType(str(value or "").strip().upper())
+    except ValueError:
+        return BusinessProcessType.UNKNOWN

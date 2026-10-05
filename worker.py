@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import signal
+import threading
 from dataclasses import replace
 
 from app.application.execution_worker import DurableExecutionWorker
@@ -27,6 +28,7 @@ from app.services.notification_service import create_notification_service
 from app.services.environment_configuration_service import (
     EnvironmentConfigurationService,
 )
+from app.products.registry import PRODUCT_PROVIDER_REGISTRY
 from app.utils.logger import configure_logging
 
 
@@ -38,13 +40,41 @@ def main() -> int:
         initial_settings.database_target,
         project_root=PROJECT_ROOT,
     )
-    settings = replace(
-        EnvironmentConfigurationService(
-            initial_settings,
-            logger=logger.getChild("environment_configuration"),
-        ).resolve_startup_settings(),
-        execution_runtime="worker",
+    environment_configuration = EnvironmentConfigurationService(
+        initial_settings,
+        logger=logger.getChild("environment_configuration"),
     )
+    resolved_settings = environment_configuration.resolve_startup_settings()
+    business_process = environment_configuration.active_business_process(
+        application_name=resolved_settings.application_name
+    )
+    product_provider = PRODUCT_PROVIDER_REGISTRY.get(business_process)
+    if product_provider is None:
+        logger.error(
+            "Worker startup stopped: no enabled product provider is "
+            "available for %s.",
+            business_process.value,
+        )
+        return 1
+    if not product_provider.operations():
+        shutdown_event = threading.Event()
+
+        def stop_read_only_worker(*_: object) -> None:
+            logger.info("Read-only worker shutdown requested.")
+            shutdown_event.set()
+
+        signal.signal(signal.SIGINT, stop_read_only_worker)
+        if hasattr(signal, "SIGTERM"):
+            signal.signal(signal.SIGTERM, stop_read_only_worker)
+        logger.info(
+            "Worker is idle because %s currently exposes read-only "
+            "capabilities and no executable operations.",
+            business_process.value,
+        )
+        while not shutdown_event.wait(60):
+            pass
+        return 0
+    settings = replace(resolved_settings, execution_runtime="worker")
 
     operation_manager = OperationExecutionManager(
         settings,
@@ -52,6 +82,7 @@ def main() -> int:
     )
     operation_catalog = OperationCatalogService(
         settings,
+        business_process=business_process,
         logger=logger.getChild("operation_catalog"),
     )
     automation_schedule_coordinator = AutomationScheduleCoordinator(

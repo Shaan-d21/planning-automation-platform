@@ -8,6 +8,14 @@ execution, and Data Integration Pipeline execution through two engines:
 - Oracle Planning REST APIs
 - Oracle EPM Automate
 
+The application is evolving as a modular Oracle EPM platform. Shared security,
+agent, approval, queue, scheduling, audit, and deployment services remain in
+one application, while each business process contributes capabilities through
+an allow-listed product provider. Planning retains its full operation catalog;
+FCCS is enabled only for verified read-only connection, dimension, job, and
+consolidation-journal review and exposes no write operations. See
+[EPM Product Architecture](docs/PRODUCT_ARCHITECTURE.md).
+
 Both engines can upload files, execute saved Import Metadata or Import Data
 jobs, replace an existing file with the same name, and report failures. Native
 data imports accept CSV, TXT, and ZIP files. The REST engine additionally

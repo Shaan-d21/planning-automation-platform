@@ -9,6 +9,7 @@ export interface EnvironmentSummary {
   deployment_mode: string;
   configured: boolean;
   execution_account?: string;
+  business_process?: "PLANNING" | "FCCS" | "UNKNOWN";
 }
 
 export interface EnvironmentApplication {
@@ -16,6 +17,7 @@ export interface EnvironmentApplication {
   product_type: string | null;
   application_type: string | null;
   admin_mode: boolean | null;
+  business_process?: "PLANNING" | "FCCS" | "UNKNOWN";
 }
 
 export interface EnvironmentConfigurationResponse {
@@ -23,6 +25,7 @@ export interface EnvironmentConfigurationResponse {
   deployment_mode: string;
   active_application: string | null;
   selected_application: string | null;
+  selected_business_process?: "PLANNING" | "FCCS" | "UNKNOWN";
   selection_source: string | null;
   configured: boolean;
   restart_required: boolean;
@@ -753,6 +756,74 @@ export interface OperationSummary {
 export interface OperationsResponse {
   status: string;
   operations: OperationSummary[];
+}
+
+export interface FCCSDimension {
+  name: string;
+  dimension_type: string | null;
+}
+
+export interface FCCSPlanType {
+  name: string;
+  cube_name: string;
+  identifier: number | null;
+  cube_type: number | null;
+  dimension_count: number | null;
+  dimensions: FCCSDimension[];
+}
+
+export interface FCCSJobDefinition {
+  job_name: string;
+  job_type: string;
+}
+
+export interface FCCSJournal {
+  label: string;
+  scenario: string | null;
+  year: string | null;
+  period: string | null;
+  status: string | null;
+  consolidation: string | null;
+  description: string | null;
+  group: string | null;
+  journal_type: string | null;
+  balance_type: string | null;
+  created_by: string | null;
+  modified_by: string | null;
+  posted_by: string | null;
+}
+
+export interface FCCSOverviewResponse {
+  status: string;
+  application_name: string;
+  product_type: string | null;
+  application_type: string | null;
+  connected: boolean;
+  plan_types: FCCSPlanType[];
+  job_definitions: FCCSJobDefinition[];
+}
+
+export interface FCCSDimensionsResponse {
+  status: string;
+  plan_types: FCCSPlanType[];
+}
+
+export interface FCCSJobsResponse {
+  status: string;
+  jobs: FCCSJobDefinition[];
+}
+
+export interface FCCSJournalsResponse {
+  status: string;
+  offset: number;
+  limit: number;
+  journals: FCCSJournal[];
+}
+
+export interface FCCSJournalDetailResponse {
+  status: string;
+  journal: FCCSJournal;
+  line_items: Record<string, unknown>[];
 }
 
 export interface OperationArtifactCatalog {

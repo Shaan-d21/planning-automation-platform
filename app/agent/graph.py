@@ -1280,8 +1280,8 @@ class AgentGraphOrchestrator:
             "artifacts before asking for approval."
         )
 
-    @staticmethod
     def _task_plan_payload(
+        self,
         state: AgentGraphState,
         call: AgentToolCall,
     ) -> dict[str, Any] | None:
@@ -1295,6 +1295,7 @@ class AgentGraphOrchestrator:
         plan = AgentExecutionPlanBuilder.build(
             state.get("task_context"),
             codes,
+            definitions=self._gateway.operation_definitions,
         )
         return (
             plan.to_payload()
@@ -4799,7 +4800,7 @@ class AgentGraphOrchestrator:
         allowed = set(state.get("allowed_tool_names", []))
         return tuple(
             item
-            for item in self._gateway.definitions()
+            for item in self._gateway.tool_definitions()
             if item.name in GRAPH_TOOL_NAMES and item.name in allowed
         )
 

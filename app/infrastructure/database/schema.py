@@ -68,6 +68,7 @@ oracle_environment_settings = Table(
     Column("base_url", String(500), primary_key=True),
     Column("deployment_mode", String(32), nullable=False),
     Column("selected_application", String(128)),
+    Column("selected_business_process", String(32)),
     Column("selection_source", String(32)),
     Column(
         "discovered_applications",
@@ -99,6 +100,11 @@ oracle_environment_settings = Table(
         "('DATABASE', 'ENVIRONMENT', 'AUTO_DISCOVERY', 'ADMIN_SELECTION')",
         name="selection_source",
     ),
+    CheckConstraint(
+        "selected_business_process IS NULL OR selected_business_process IN "
+        "('PLANNING', 'FCCS', 'UNKNOWN')",
+        name="selected_business_process",
+    ),
     ForeignKeyConstraint(
         ["selected_by_user_id"],
         ["platform_users.user_id"],
@@ -113,6 +119,77 @@ Index(
     unique=True,
     postgresql_where=platform_users.c.email.is_not(None),
     sqlite_where=platform_users.c.email.is_not(None),
+)
+
+
+oracle_applications = Table(
+    "oracle_applications",
+    metadata,
+    Column(
+        "application_id",
+        IDENTITY_BIGINT,
+        primary_key=True,
+        autoincrement=True,
+    ),
+    Column(
+        "environment_base_url",
+        String(500),
+        ForeignKey(
+            "oracle_environment_settings.base_url",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+    ),
+    Column("application_name", String(128), nullable=False),
+    Column("product_type", String(128)),
+    Column("application_type", String(128)),
+    Column("business_process", String(32), nullable=False),
+    Column("is_active", Boolean, nullable=False, server_default=text("true")),
+    Column("last_verified_at", UTC_TIMESTAMP),
+    Column("created_at", UTC_TIMESTAMP, nullable=False),
+    Column("updated_at", UTC_TIMESTAMP, nullable=False),
+    UniqueConstraint(
+        "environment_base_url",
+        "application_name",
+        name="environment_application",
+    ),
+    CheckConstraint(
+        "business_process IN ('PLANNING', 'FCCS', 'UNKNOWN')",
+        name="business_process",
+    ),
+)
+Index(
+    "ix_oracle_applications_environment_active",
+    oracle_applications.c.environment_base_url,
+    oracle_applications.c.is_active,
+)
+
+
+platform_user_applications = Table(
+    "platform_user_applications",
+    metadata,
+    Column(
+        "user_id",
+        IDENTITY_BIGINT,
+        ForeignKey("platform_users.user_id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column(
+        "application_id",
+        IDENTITY_BIGINT,
+        ForeignKey("oracle_applications.application_id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("granted_at", UTC_TIMESTAMP, nullable=False),
+    Column(
+        "granted_by_user_id",
+        IDENTITY_BIGINT,
+        ForeignKey("platform_users.user_id", ondelete="SET NULL"),
+    ),
+)
+Index(
+    "ix_platform_user_applications_application",
+    platform_user_applications.c.application_id,
 )
 
 platform_roles = Table(
@@ -194,6 +271,11 @@ platform_sessions = Table(
     Column("country_code", String(2)),
     Column("user_agent", String(512)),
     Column("cloudflare_ray", String(80)),
+    Column(
+        "active_application_id",
+        IDENTITY_BIGINT,
+        ForeignKey("oracle_applications.application_id", ondelete="SET NULL"),
+    ),
     Column("started_at", UTC_TIMESTAMP, nullable=False),
     Column("last_seen_at", UTC_TIMESTAMP, nullable=False),
     Column("expires_at", UTC_TIMESTAMP, nullable=False),
@@ -209,6 +291,10 @@ platform_sessions = Table(
 Index("ix_platform_sessions_user_id", platform_sessions.c.user_id)
 Index("ix_platform_sessions_last_seen_at", platform_sessions.c.last_seen_at.desc())
 Index("ix_platform_sessions_current_ip", platform_sessions.c.current_ip)
+Index(
+    "ix_platform_sessions_active_application",
+    platform_sessions.c.active_application_id,
+)
 
 identity_providers = Table(
     "identity_providers",

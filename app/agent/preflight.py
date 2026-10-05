@@ -11,7 +11,7 @@ from app.application.action_inputs import (
     missing_required_inputs,
 )
 from app.application.control_center import ControlCenterService
-from app.application.operations import OPERATION_DEFINITIONS, OperationCatalogService
+from app.application.operations import OperationCatalogService
 from app.application.reports import ReportWorkspaceService
 from app.models.access_control import Permission, UserAccount
 from app.utils.exceptions import EPMError
@@ -190,7 +190,7 @@ class AgentActionPreflightService:
         definition = next(
             (
                 item
-                for item in OPERATION_DEFINITIONS
+                for item in self._operation_definitions()
                 if item.code.casefold() == draft.target_code.casefold()
             ),
             None,
@@ -295,6 +295,12 @@ class AgentActionPreflightService:
                 )
             )
         return tuple(checks)
+
+    def _operation_definitions(self):
+        active = getattr(self._operations, "active_definitions", None)
+        if callable(active):
+            return tuple(active())
+        return OperationCatalogService.definitions()
 
     def _live_job_check(
         self, operation_code: str, artifact: str

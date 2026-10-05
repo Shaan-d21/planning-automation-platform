@@ -18,7 +18,19 @@ from sqlalchemy.exc import OperationalError
 from app.agent.models import AgentMessageRole, AgentToolActivity
 from app.agent.repository import SQLiteAgentRepository
 from app.application.connection import ConnectionResult
-from app.models.environment import ApplicationInfo
+from app.models.environment import (
+    ApplicationInfo,
+    DimensionInfo,
+    PlanTypeInfo,
+)
+from app.models.application_workspace import ApplicationWorkspace
+from app.models.fccs import (
+    FCCSConnectionSnapshot,
+    FCCSJournal,
+    FCCSJournalDetail,
+    FCCSReadSnapshot,
+)
+from app.models.job import JobDefinition
 from app.models.environment_configuration import EnvironmentConfiguration
 from app.application.data_review import (
     DataReviewComparison,
@@ -100,6 +112,9 @@ from app.models.substitution_variable import SubstitutionVariable
 from app.utils.exceptions import AuthenticationError
 from app.web import application as web_application
 from app.web.application import _agent_tool_activity_payload, create_app
+from app.products.contracts import BusinessProcessType
+from app.products.registry import PRODUCT_PROVIDER_REGISTRY
+from app.products.runtime_context import RuntimeApplicationContext
 
 
 @pytest.mark.parametrize(
@@ -355,10 +370,33 @@ def test_environment_configuration_exposes_only_non_secret_selection(
     assert "epm.internal" not in response.text
     assert payload["active_application"] == "Vision"
     assert payload["selected_application"] == "Vision"
+    assert payload["selected_business_process"] == "UNKNOWN"
     assert payload["selection_source"] == "ENVIRONMENT"
     assert payload["restart_required"] is False
     assert "secret" not in response.text
     assert "administrator" not in response.text
+
+
+def test_session_workspace_catalog_is_scoped_and_not_switchable_yet(
+    tmp_path: Path,
+) -> None:
+    app = create_app(_settings(tmp_path), session_secret="test-secret")
+    client = TestClient(app)
+    _login(client)
+
+    response = client.get("/api/v1/workspaces")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["switching_enabled"] is False
+    assert len(payload["applications"]) == 1
+    workspace = payload["applications"][0]
+    assert workspace["application_id"] > 0
+    assert workspace["application_name"] == "Vision"
+    assert workspace["business_process"] == "PLANNING"
+    assert workspace["current"] is True
+    assert "epm.internal" not in response.text
+    assert "secret" not in response.text
 
 
 def test_environment_application_discovery_and_selection_are_governed(
@@ -402,6 +440,10 @@ def test_environment_application_discovery_and_selection_are_governed(
         "Forecast",
         "Vision",
     ]
+    assert {
+        item["business_process"]
+        for item in refreshed.json()["applications"]
+    } == {"UNKNOWN"}
     assert saved.status_code == 200
     assert saved.json()["selected_application"] == "Forecast"
     assert saved.json()["restart_required"] is True
@@ -570,6 +612,7 @@ def test_v1_bootstrap_returns_effective_user_and_navigation(
         "deployment_mode": "on_premises",
         "configured": True,
         "execution_account": "administrator",
+        "business_process": "PLANNING",
     }
     assert payload["user"]["username"] == "admin"
     assert payload["user"]["platform_roles"] == [
@@ -617,6 +660,154 @@ def test_v1_bootstrap_returns_effective_user_and_navigation(
         "access_control": True,
         "jobs_activity": True,
     }
+
+
+def test_fccs_bootstrap_and_read_routes_are_product_guarded(
+    tmp_path: Path,
+) -> None:
+    app = create_app(_settings(tmp_path), session_secret="test-secret")
+    client = TestClient(app)
+    _login(client)
+    fccs_settings = replace(
+        _settings(tmp_path),
+        application_name="Consolidation",
+    )
+    application_context = RuntimeApplicationContext(
+        workspace=ApplicationWorkspace(
+            application_id=2,
+            application_name="Consolidation",
+            business_process=BusinessProcessType.FCCS,
+            product_type="HP",
+            application_type="FCCS",
+            active=True,
+            last_verified_at=datetime.now(UTC),
+            current=True,
+        ),
+        settings=fccs_settings,
+        provider=PRODUCT_PROVIDER_REGISTRY.get(BusinessProcessType.FCCS),
+        navigation=PRODUCT_PROVIDER_REGISTRY.navigation_for(
+            BusinessProcessType.FCCS
+        ),
+        capabilities=PRODUCT_PROVIDER_REGISTRY.capabilities_for(
+            BusinessProcessType.FCCS
+        ),
+        operations=PRODUCT_PROVIDER_REGISTRY.operations_for(
+            BusinessProcessType.FCCS
+        ),
+    )
+    context_resolver = Mock()
+    context_resolver.resolve.return_value = application_context
+    app.state.application_contexts = context_resolver
+    plan_type = PlanTypeInfo(
+        name="Consol",
+        cube_name="Consol",
+        dimension_count=2,
+        dimensions=(
+            DimensionInfo(name="Account", dimension_type="Account"),
+            DimensionInfo(name="Entity", dimension_type="Entity"),
+        ),
+    )
+    job = JobDefinition(job_name="Consolidate", job_type="RULES")
+    journal = FCCSJournal(
+        label="Close Adjustment",
+        scenario="Actual",
+        year="FY27",
+        period="Jan",
+        status="Working",
+    )
+    reader = Mock()
+    reader.snapshot.return_value = FCCSReadSnapshot(
+        connection=FCCSConnectionSnapshot(
+            application=ApplicationInfo(
+                name="Consolidation",
+                product_type="HP",
+                application_type="FCCS",
+            ),
+            api_version={"version": "v3"},
+        ),
+        plan_types=(plan_type,),
+        job_definitions=(job,),
+    )
+    reader.plan_types.return_value = (plan_type,)
+    reader.job_definitions.return_value = (job,)
+    reader.journals.return_value = (journal,)
+    reader.journal_detail.return_value = FCCSJournalDetail(
+        journal=journal,
+        line_items=({"amountType": "Debit", "amount": 100},),
+    )
+    app.state.fccs_read_factory = lambda _: reader
+
+    bootstrap = client.get("/api/v1/bootstrap")
+    overview = client.get("/api/v1/fccs/overview")
+    dimensions = client.get("/api/v1/fccs/dimensions")
+    jobs = client.get("/api/v1/fccs/jobs")
+    journals = client.get(
+        "/api/v1/fccs/journals?scenario=Actual&year=FY27&period=Jan"
+    )
+    detail = client.get(
+        "/api/v1/fccs/journals/Close%20Adjustment"
+        "?scenario=Actual&year=FY27&period=Jan"
+    )
+    planning_home = client.get("/api/v1/home")
+
+    assert bootstrap.status_code == 200
+    assert bootstrap.json()["environment"]["business_process"] == "FCCS"
+    navigation = {item["code"] for item in bootstrap.json()["navigation"]}
+    assert {
+        "fccs-overview",
+        "fccs-dimensions",
+        "fccs-jobs",
+        "fccs-journals",
+    } <= navigation
+    assert "operations" not in navigation
+    assert planning_home.status_code == 404
+    assert overview.status_code == 200
+    assert overview.json()["application_name"] == "Consolidation"
+    assert overview.json()["plan_types"][0]["dimensions"][0]["name"] == "Account"
+    assert dimensions.status_code == 200
+    assert jobs.json()["jobs"] == [
+        {"job_name": "Consolidate", "job_type": "RULES"}
+    ]
+    assert journals.json()["journals"][0]["label"] == "Close Adjustment"
+    assert detail.json()["line_items"] == [
+        {"amountType": "Debit", "amount": 100}
+    ]
+    assert client.get("/api/v1/home").status_code == 404
+    assert client.get("/api/v1/operations").status_code == 404
+    blocked_run = client.post(
+        "/api/operations/business-rules/runs",
+        json={"rule_name": "Consolidate", "runtime_prompts": {}},
+    )
+    assert blocked_run.status_code == 404
+    assert "Planning capability" in blocked_run.json()["detail"]
+    reader.journals.assert_called_once_with(
+        filters={
+            "scenario": "Actual",
+            "year": "FY27",
+            "period": "Jan",
+            "consolidation": "",
+            "status": "",
+            "group": "",
+            "label": "",
+            "description": "",
+            "entity": "",
+        },
+        offset=0,
+        limit=50,
+    )
+
+
+def test_fccs_routes_fail_closed_for_planning_application(
+    tmp_path: Path,
+) -> None:
+    app = create_app(_settings(tmp_path), session_secret="test-secret")
+    client = TestClient(app)
+    _login(client)
+
+    response = client.get("/api/v1/fccs/overview")
+
+    assert response.status_code == 404
+    assert "not available" in response.json()["detail"]
 
 
 def test_v1_operations_returns_role_authorized_standalone_services(
@@ -1772,7 +1963,7 @@ def test_health_check_verifies_oracle_application(
     assert response.json()["application"] == "Vision"
 
 
-def test_health_check_uses_latest_selected_application(
+def test_health_check_uses_the_session_bound_application(
     tmp_path: Path,
 ) -> None:
     checked_settings: list[Settings] = []
@@ -1798,9 +1989,10 @@ def test_health_check_uses_latest_selected_application(
     response = client.get("/api/health")
 
     assert response.status_code == 200
-    assert checked_settings[-1].application_name == "EBPCS"
+    assert checked_settings[-1].application_name == "Vision"
     assert response.json()["active_application"] == "Vision"
-    assert response.json()["restart_required"] is True
+    assert response.json()["restart_required"] is False
+    app.state.environment_configuration.resolve_startup_settings.assert_not_called()
 
 
 def test_health_check_reports_oracle_unavailability(

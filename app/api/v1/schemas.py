@@ -55,6 +55,7 @@ class EnvironmentSummary(BaseModel):
     deployment_mode: str
     configured: bool
     execution_account: str
+    business_process: str = "UNKNOWN"
 
 
 class EnvironmentApplicationSummary(BaseModel):
@@ -64,6 +65,7 @@ class EnvironmentApplicationSummary(BaseModel):
     product_type: str | None = None
     application_type: str | None = None
     admin_mode: bool | None = None
+    business_process: str = "UNKNOWN"
 
 
 class EnvironmentConfigurationResponse(BaseModel):
@@ -73,6 +75,7 @@ class EnvironmentConfigurationResponse(BaseModel):
     deployment_mode: str
     active_application: str | None
     selected_application: str | None
+    selected_business_process: str = "UNKNOWN"
     selection_source: str | None
     configured: bool
     restart_required: bool
@@ -88,6 +91,26 @@ class EnvironmentApplicationSelectionRequest(BaseModel):
     """Administrator selection from the live Oracle application list."""
 
     application_name: str = Field(min_length=1, max_length=128)
+
+
+class ApplicationWorkspaceSummary(BaseModel):
+    """One registered Oracle application assigned to the current user."""
+
+    application_id: int
+    application_name: str
+    business_process: str
+    product_type: str | None = None
+    application_type: str | None = None
+    current: bool = False
+
+
+class ApplicationWorkspaceListResponse(BaseModel):
+    """Safe session workspace state before request-scoped routing is enabled."""
+
+    status: str = "success"
+    switching_enabled: bool = False
+    applications: list[ApplicationWorkspaceSummary] = Field(default_factory=list)
+    message: str
 
 
 class IdentityAuthenticationSummary(BaseModel):
@@ -150,6 +173,101 @@ class OperationsResponse(BaseModel):
 
     status: str
     operations: list[OperationSummary] = Field(default_factory=list)
+
+
+class FCCSDimensionSummary(BaseModel):
+    """One Oracle-provided FCCS dimension."""
+
+    name: str
+    dimension_type: str | None = None
+
+
+class FCCSPlanTypeSummary(BaseModel):
+    """One FCCS cube with its discoverable dimensions."""
+
+    name: str
+    cube_name: str
+    identifier: int | None = None
+    cube_type: int | None = None
+    dimension_count: int | None = None
+    dimensions: list[FCCSDimensionSummary] = Field(default_factory=list)
+
+
+class FCCSJobDefinitionSummary(BaseModel):
+    """One saved Oracle job definition available for inspection."""
+
+    job_name: str
+    job_type: str
+
+
+class FCCSJobStatusSummary(BaseModel):
+    """Exact read-only status returned for one Oracle job."""
+
+    job_id: int
+    status: int
+    job_name: str | None = None
+    job_type: str | None = None
+    descriptive_status: str | None = None
+    detailed_status: int | None = None
+    details: str | None = None
+
+
+class FCCSJournalSummary(BaseModel):
+    """Safe consolidation-journal fields returned by Oracle."""
+
+    label: str
+    scenario: str | None = None
+    year: str | None = None
+    period: str | None = None
+    status: str | None = None
+    consolidation: str | None = None
+    description: str | None = None
+    group: str | None = None
+    journal_type: str | None = None
+    balance_type: str | None = None
+    created_by: str | None = None
+    modified_by: str | None = None
+    posted_by: str | None = None
+
+
+class FCCSOverviewResponse(BaseModel):
+    """Verified read-only FCCS workspace overview."""
+
+    status: str = "success"
+    application_name: str
+    product_type: str | None = None
+    application_type: str | None = None
+    connected: bool = True
+    plan_types: list[FCCSPlanTypeSummary] = Field(default_factory=list)
+    job_definitions: list[FCCSJobDefinitionSummary] = Field(default_factory=list)
+
+
+class FCCSDimensionsResponse(BaseModel):
+    status: str = "success"
+    plan_types: list[FCCSPlanTypeSummary] = Field(default_factory=list)
+
+
+class FCCSJobsResponse(BaseModel):
+    status: str = "success"
+    jobs: list[FCCSJobDefinitionSummary] = Field(default_factory=list)
+
+
+class FCCSJobResponse(BaseModel):
+    status: str = "success"
+    job: FCCSJobStatusSummary
+
+
+class FCCSJournalsResponse(BaseModel):
+    status: str = "success"
+    offset: int
+    limit: int
+    journals: list[FCCSJournalSummary] = Field(default_factory=list)
+
+
+class FCCSJournalDetailResponse(BaseModel):
+    status: str = "success"
+    journal: FCCSJournalSummary
+    line_items: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class FrontendBootstrapResponse(BaseModel):

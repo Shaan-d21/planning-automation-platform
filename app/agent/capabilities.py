@@ -91,6 +91,12 @@ class AgentCapabilityGateway:
         self._data_review = data_review
         self._report_workspace = report_workspace or ReportWorkspaceService(settings)
         self._operation_catalog = operation_catalog
+        self._operation_definitions = self._resolve_operation_definitions(
+            operation_catalog
+        )
+        self._agent_tool_names = self._resolve_agent_tool_names(
+            operation_catalog
+        )
         self._substitution_variables = substitution_variables or (
             SubstitutionVariableApplicationService(settings)
         )
@@ -160,7 +166,16 @@ class AgentCapabilityGateway:
     )
 
     @staticmethod
-    def definitions() -> tuple[AgentToolDefinition, ...]:
+    def definitions(
+        operation_definitions=OPERATION_DEFINITIONS,
+    ) -> tuple[AgentToolDefinition, ...]:
+        """Build tool contracts for an explicit operation allow-list.
+
+        The default retains the historic Planning contract for tests and
+        third-party callers. Runtime callers use :meth:`tool_definitions`.
+        """
+
+        operation_codes = [item.code for item in operation_definitions]
         empty = {"type": "object", "properties": {}, "additionalProperties": False}
         axis_item = {
             "type": "object",
@@ -422,7 +437,7 @@ class AgentCapabilityGateway:
                     "properties": {
                         "operation_code": {
                             "type": "string",
-                            "enum": [item.code for item in OPERATION_DEFINITIONS],
+                            "enum": operation_codes,
                         }
                     },
                     "required": ["operation_code"],
@@ -445,7 +460,7 @@ class AgentCapabilityGateway:
                             "type": "array",
                             "items": {
                                 "type": "string",
-                                "enum": [item.code for item in OPERATION_DEFINITIONS],
+                                "enum": operation_codes,
                             },
                             "minItems": 2,
                         },
@@ -474,7 +489,7 @@ class AgentCapabilityGateway:
                     "properties": {
                         "operation_code": {
                             "type": "string",
-                            "enum": [item.code for item in OPERATION_DEFINITIONS],
+                            "enum": operation_codes,
                         },
                         "objective": {
                             "type": "string",
@@ -554,7 +569,27 @@ class AgentCapabilityGateway:
             ),
         )
 
+    @property
+    def operation_definitions(self):
+        """Return the active product's governed operation definitions."""
+
+        return self._operation_definitions
+
+    def tool_definitions(self) -> tuple[AgentToolDefinition, ...]:
+        """Return agent tools constrained to the active product provider."""
+
+        return tuple(
+            item
+            for item in self.definitions(self._operation_definitions)
+            if item.name in self._agent_tool_names
+        )
+
     def execute(self, call: AgentToolCall) -> dict[str, Any]:
+        if call.name not in self._agent_tool_names:
+            raise AgentCapabilityError(
+                f"Agent capability '{call.name}' is not available for the "
+                "active Oracle product."
+            )
         handler = self._handlers.get(call.name)
         if handler is None:
             raise AgentCapabilityError(
@@ -690,7 +725,7 @@ class AgentCapabilityGateway:
         raw_steps = arguments.get("requested_steps")
         if not isinstance(raw_steps, list):
             raise AgentCapabilityError("Requested steps must be a list.")
-        definitions = {item.code: item for item in OPERATION_DEFINITIONS}
+        definitions = {item.code: item for item in self._operation_definitions}
         requested_steps = tuple(
             str(item).strip().casefold()
             for item in raw_steps
@@ -901,8 +936,7 @@ class AgentCapabilityGateway:
             "access": "read-only agent capabilities",
         }
 
-    @staticmethod
-    def _platform_operations(_: dict[str, Any]) -> dict[str, Any]:
+    def _platform_operations(self, _: dict[str, Any]) -> dict[str, Any]:
         items = [
             {
                 "code": item.code,
@@ -911,7 +945,7 @@ class AgentCapabilityGateway:
                 "risk_level": item.risk_level,
                 "description": item.description,
             }
-            for item in OPERATION_DEFINITIONS
+            for item in self._operation_definitions
         ]
         return {"count": len(items), "operations": items}
 
@@ -3349,7 +3383,7 @@ class AgentCapabilityGateway:
         definition = next(
             (
                 item
-                for item in OPERATION_DEFINITIONS
+                for item in self._operation_definitions
                 if item.code.casefold() == operation_code.casefold()
             ),
             None,
@@ -3407,6 +3441,31 @@ class AgentCapabilityGateway:
                 "input_values": input_values,
             }
         }
+
+    @staticmethod
+    def _resolve_operation_definitions(operation_catalog):
+        if operation_catalog is None:
+            return OPERATION_DEFINITIONS
+        active = getattr(operation_catalog, "active_definitions", None)
+        if callable(active):
+            try:
+                return tuple(active())
+            except TypeError:
+                # Lightweight mocks and older catalog adapters expose dynamic
+                # attributes but do not implement the composition contract.
+                pass
+        return OPERATION_DEFINITIONS
+
+    @classmethod
+    def _resolve_agent_tool_names(cls, operation_catalog) -> frozenset[str]:
+        if operation_catalog is not None:
+            active = getattr(operation_catalog, "active_agent_tool_names", None)
+            if callable(active):
+                try:
+                    return frozenset(active())
+                except TypeError:
+                    pass
+        return frozenset(item.name for item in cls.definitions())
 
     @staticmethod
     def _required_text(

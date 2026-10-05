@@ -5,7 +5,7 @@ import { Icon } from "./Icon";
 
 interface AppShellProps {
   bootstrap: BootstrapResponse;
-  activeView: "home" | "tasks" | "cycles" | "approvals" | "notifications" | "access" | "system-administration" | "jobs" | "operations" | "schedules" | "data-review" | "reports" | "assistant";
+  activeView: "home" | "tasks" | "cycles" | "approvals" | "notifications" | "access" | "system-administration" | "jobs" | "operations" | "schedules" | "data-review" | "reports" | "assistant" | "fccs-overview" | "fccs-dimensions" | "fccs-jobs" | "fccs-journals";
   children: ReactNode;
   busy: boolean;
   unreadNotifications: number;
@@ -50,7 +50,7 @@ export function AppShell({
         <aside className={`sidebar${mobileOpen ? " is-open" : ""}${sidebarCollapsed ? " is-collapsed" : ""}`}>
           <div className="sidebar-brand">
             <img src="/static/images/bisp-logo.png" alt="BISP Solutions" />
-            <div><strong>EPM AI Assistant</strong><small>Planning workspace</small></div>
+            <div><strong>EPM AI Assistant</strong><small>{bootstrap.environment?.business_process === "FCCS" ? "Close workspace" : "Planning workspace"}</small></div>
             <button
               className="sidebar-toggle"
               type="button"
@@ -127,7 +127,11 @@ function navigationIcon(code: string) {
     cycles: "calendar",
     "access-control": "users",
     jobs: "activity",
-    "system-administration": "users"
+    "system-administration": "users",
+    "fccs-overview": "home",
+    "fccs-dimensions": "data",
+    "fccs-jobs": "activity",
+    "fccs-journals": "reports"
   } as const;
   return icons[code as keyof typeof icons] ?? "chevron";
 }
@@ -150,14 +154,18 @@ function navigationHref(code: string, fallback: string) {
     schedules: "schedules",
     "data-review": "data-review",
     reports: "reports",
-    assistant: "assistant"
+    assistant: "assistant",
+    "fccs-overview": "fccs-overview",
+    "fccs-dimensions": "fccs-dimensions",
+    "fccs-jobs": "fccs-jobs",
+    "fccs-journals": "fccs-journals"
   };
   if (reactViews[code]) return `#${reactViews[code]}`;
   return fallback;
 }
 
 function platformEntryHref(bootstrap: BootstrapResponse) {
-  const preferredCodes = ["tasks", "assistant", "operations", "data-review", "jobs", "schedules"];
+  const preferredCodes = ["fccs-overview", "tasks", "assistant", "operations", "data-review", "jobs", "schedules"];
   const destination = preferredCodes
     .map((code) => bootstrap.navigation.find((item) => item.code === code))
     .find(Boolean) ?? bootstrap.navigation.find((item) => item.code !== "home");
@@ -165,6 +173,6 @@ function platformEntryHref(bootstrap: BootstrapResponse) {
 }
 
 function viewLabel(view: AppShellProps["activeView"]) {
-  const labels = { home: "Home", tasks: "My Work", cycles: "Planning Cycles", approvals: "Approvals", notifications: "Notifications", access: "Access Control", "system-administration": "System Administration", jobs: "Jobs & Activity", operations: "Operations", schedules: "Schedules", "data-review": "Data Explorer", reports: "Data Explorer", assistant: "EPM Assistant" };
+  const labels = { home: "Home", tasks: "My Work", cycles: "Planning Cycles", approvals: "Approvals", notifications: "Notifications", access: "Access Control", "system-administration": "System Administration", jobs: "Jobs & Activity", operations: "Operations", schedules: "Schedules", "data-review": "Data Explorer", reports: "Data Explorer", assistant: "EPM Assistant", "fccs-overview": "Close Overview", "fccs-dimensions": "Dimensions", "fccs-jobs": "Oracle Jobs", "fccs-journals": "Journals" };
   return labels[view];
 }

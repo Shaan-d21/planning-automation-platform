@@ -30,6 +30,7 @@ from app.agent.models import AgentToolActivity
 from app.agent.preflight import AgentActionPreflightService
 from app.agent.service import AgentApplicationService
 from app.api.v1 import router as v1_router
+from app.application.fccs_read import FCCSReadApplicationService
 from app.application.connection import VerifyConnection
 from app.application.automation_schedule_manager import (
     AutomationScheduleManager,
@@ -98,6 +99,9 @@ from app.models.oracle_artifact import (
     OracleArtifactType,
     OracleEnvironment,
 )
+from app.products.registry import PRODUCT_PROVIDER_REGISTRY
+from app.products.contracts import BusinessProcessType
+from app.products.runtime_context import RuntimeApplicationContextResolver
 from app.models.workflow import WorkflowStepStatus
 from app.services.access_control_service import AccessControlService
 from app.services.api_token_service import ApiTokenService
@@ -111,6 +115,9 @@ from app.services.federated_authentication_service import (
 )
 from app.services.environment_configuration_service import (
     EnvironmentConfigurationService,
+)
+from app.services.application_workspace_service import (
+    ApplicationWorkspaceService,
 )
 from app.services.notification_service import create_notification_service
 from app.services.oracle_password_authentication_service import (
@@ -169,6 +176,7 @@ from app.web.request_correlation import RequestCorrelationMiddleware
 from app.web.security import (
     client_ip as _client_ip,
     csrf_token as _csrf_token,
+    current_application_context,
     current_user as _current_user,
     require_api_session,
     require_bearer_token,
@@ -201,6 +209,16 @@ def create_app(
         logger=LOGGER.getChild("environment_configuration"),
     )
     resolved_settings = environment_configuration.resolve_startup_settings()
+    business_process = environment_configuration.active_business_process(
+        application_name=resolved_settings.application_name
+    )
+    product_provider = PRODUCT_PROVIDER_REGISTRY.get(business_process)
+    if product_provider is None and resolved_settings.application_name:
+        LOGGER.warning(
+            "No enabled product provider is available for %s; product-specific "
+            "operations and navigation are disabled.",
+            business_process.value,
+        )
     resolved_secret = (
         session_secret
         or os.getenv("WEB_SESSION_SECRET", "").strip()
@@ -222,6 +240,7 @@ def create_app(
     )
     operation_catalog = OperationCatalogService(
         resolved_settings,
+        business_process=business_process,
         logger=LOGGER.getChild("operation_catalog"),
     )
     automation_schedule_service = AutomationScheduleApplicationService(
@@ -295,12 +314,37 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.settings = resolved_settings
+    app.state.business_process = business_process
+    app.state.product_provider = product_provider
+    app.state.navigation_definitions = PRODUCT_PROVIDER_REGISTRY.navigation_for(
+        business_process
+    )
+    app.state.product_capabilities = PRODUCT_PROVIDER_REGISTRY.capabilities_for(
+        business_process
+    )
     app.state.platform_database = database_for(
         resolved_settings.database_target
     )
     app.state.environment_configuration = EnvironmentConfigurationService(
         resolved_settings,
         logger=LOGGER.getChild("environment_configuration"),
+    )
+    app.state.application_workspaces = ApplicationWorkspaceService(
+        resolved_settings.database_target
+    )
+    app.state.application_workspaces.synchronize(
+        app.state.environment_configuration.get()
+    )
+    app.state.application_contexts = RuntimeApplicationContextResolver(
+        resolved_settings,
+        workspaces=app.state.application_workspaces,
+        environment_configuration=app.state.environment_configuration,
+    )
+    app.state.fccs_read_factory = lambda context_settings: (
+        FCCSReadApplicationService(
+            context_settings,
+            logger=LOGGER.getChild("fccs_read"),
+        )
     )
     app.state.access_control = access_control
     app.state.session_security = SessionSecurityService(
@@ -656,16 +700,13 @@ def create_app(
     @app.get("/api/health")
     async def health(request: Request):
         require_api_session(request)
+        user = _current_user(request)
+        assert user is not None
+        application_context = current_application_context(request, user)
         factory = request.app.state.connection_use_case_factory
-        health_settings = await run_in_threadpool(
-            request.app.state.environment_configuration.resolve_startup_settings
-        )
-        active_application = request.app.state.settings.application_name
-        restart_required = bool(
-            health_settings.application_name
-            and health_settings.application_name.casefold()
-            != active_application.casefold()
-        )
+        health_settings = application_context.settings
+        active_application = application_context.application_name
+        restart_required = False
         try:
             result = await run_in_threadpool(
                 factory(health_settings).execute
@@ -2669,7 +2710,10 @@ def create_app(
         return {
             "status": "success",
             "environment": {
-                "application_name": request.app.state.settings.application_name,
+                "application_name": current_application_context(
+                    request,
+                    _current_user(request),
+                ).application_name,
                 "deployment_mode": (
                     request.app.state.settings.resolved_deployment_mode
                 ),
