@@ -807,6 +807,82 @@ textarea {
 .task-manager-sync-state small { color: var(--muted); font-size: .68rem; }
 .task-manager-sync-state strong { color: var(--ink); font-size: .82rem; }
 .task-manager-sync-state.is-error > span { color: var(--red); background: var(--red-soft); }
+.task-manager-page-header { align-items: flex-start; }
+.task-manager-header-actions { display: grid; justify-items: end; gap: 10px; }
+.task-manager-header-actions > div:last-child { display: flex; gap: 9px; }
+.task-manager-header-actions .button,
+.task-manager-onboarding .button,
+.task-manager-config-dialog footer .button { display: inline-flex; align-items: center; gap: 8px; }
+.task-manager-header-actions .button svg,
+.task-manager-onboarding .button svg,
+.task-manager-config-dialog footer .button svg { width: 16px; }
+.task-manager-onboarding {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 18px;
+  padding: 22px 24px;
+  border: 1px solid #cfdcf1;
+  border-radius: 16px;
+  background: linear-gradient(120deg, #f8faff, #fff);
+  box-shadow: var(--shadow-xs);
+}
+.task-manager-onboarding > span,
+.task-manager-source-summary > span {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  border-radius: 12px;
+  color: var(--blue);
+  background: var(--blue-soft);
+}
+.task-manager-onboarding > span svg,
+.task-manager-source-summary > span svg { width: 19px; }
+.task-manager-onboarding h2 { margin: 4px 0 5px; color: var(--ink); font-size: 1rem; }
+.task-manager-onboarding p { margin: 0; color: var(--muted); font-size: .74rem; line-height: 1.55; }
+.task-manager-source-summary {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  padding: 14px 17px;
+  border: 1px solid #d4e4de;
+  border-radius: 14px;
+  background: #f7fcfa;
+}
+.task-manager-source-summary > span { width: 34px; height: 34px; color: #187056; background: #e3f5ee; }
+.task-manager-source-summary > div { display: grid; gap: 2px; min-width: 0; }
+.task-manager-source-summary small { color: #687b76; font-size: .62rem; }
+.task-manager-source-summary strong { color: #24493e; font-size: .75rem; overflow-wrap: anywhere; }
+.task-manager-source-summary em { margin-left: auto; color: #59726a; font-size: .64rem; font-style: normal; white-space: nowrap; }
+.task-manager-sync-error { margin: 0; }
+.task-manager-config-dialog { width: min(820px, 100%); }
+.task-manager-config-dialog__body { max-height: min(65vh, 680px); overflow-y: auto; padding: 22px 27px 0; }
+.task-manager-config-guidance {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 15px;
+  border: 1px solid #d9e2f3;
+  border-radius: 12px;
+  color: #4c5e79;
+  background: #f6f8fd;
+  font-size: .7rem;
+  line-height: 1.55;
+}
+.task-manager-config-guidance svg { width: 19px; flex: 0 0 auto; color: var(--blue); }
+.task-manager-config-guidance strong { display: block; color: var(--ink); }
+.task-manager-config-dialog .task-manager-config-grid { padding-right: 0; padding-left: 0; }
+.task-manager-config-dialog .task-manager-parameters { padding-right: 0; padding-left: 0; }
+.task-manager-config-dialog > footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 9px;
+  margin: 22px 0 0;
+  padding: 16px 27px;
+  border-top: 1px solid var(--line);
+  background: var(--surface-soft);
+}
 .task-manager-sync-panel,
 .task-manager-list-panel { overflow: hidden; }
 .task-manager-sync-panel .panel-heading,
@@ -904,6 +980,9 @@ textarea {
 .task-manager-status.is-neutral { color: #5e6d82; background: #eef1f5; }
 
 @media (max-width: 980px) {
+  .task-manager-page-header { flex-direction: column; }
+  .task-manager-header-actions { width: 100%; justify-items: stretch; }
+  .task-manager-header-actions > div:last-child { justify-content: flex-end; }
   .task-manager-list-heading { align-items: flex-start !important; flex-direction: column; }
   .task-manager-filters { width: 100%; flex-wrap: wrap; }
   .task-manager-search { flex: 1 1 260px; }
@@ -911,6 +990,11 @@ textarea {
 }
 
 @media (max-width: 700px) {
+  .task-manager-onboarding { grid-template-columns: auto 1fr; }
+  .task-manager-onboarding .button { grid-column: 1 / -1; justify-content: center; }
+  .task-manager-source-summary { align-items: flex-start; flex-wrap: wrap; }
+  .task-manager-source-summary em { width: 100%; margin-left: 47px; white-space: normal; }
+  .task-manager-header-actions > div:last-child { flex-direction: column; }
   .task-manager-config-grid { grid-template-columns: 1fr; }
   .task-manager-sync-panel .panel-heading,
   .task-manager-list-panel .panel-heading,

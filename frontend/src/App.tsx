@@ -381,15 +381,32 @@ export function App() {
     }
   }
 
-  async function synchronizeTaskManager(payload: TaskManagerSyncInput) {
+  async function saveTaskManagerConfiguration(payload: TaskManagerSyncInput) {
     if (!bootstrap) return;
     setBusy(true);
     setError(null);
     try {
-      const response = await api.synchronizeTaskManager(
+      const response = await api.saveTaskManagerConfiguration(
         payload,
         bootstrap.csrf_token
       );
+      setTaskManager(response);
+      setNotice(response.message ?? "Task Manager synchronization source saved.");
+      window.setTimeout(() => setNotice(null), 4500);
+    } catch (reason) {
+      setError(message(reason));
+      throw reason;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function synchronizeTaskManager() {
+    if (!bootstrap) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const response = await api.synchronizeTaskManager(bootstrap.csrf_token);
       setTaskManager(response);
       setNotice(response.message ?? "Task Manager synchronized from Oracle.");
       window.setTimeout(() => setNotice(null), 4500);
@@ -647,7 +664,12 @@ export function App() {
           : <WorkspaceLoading label="Planning cycles" message="Preparing the business calendar and assignment choices…" />
       ) : activeView === "task-manager" ? (
         taskManager
-          ? <TaskManagerWorkspace data={taskManager} busy={busy} onSynchronize={synchronizeTaskManager} />
+          ? <TaskManagerWorkspace
+              data={taskManager}
+              busy={busy}
+              onSaveConfiguration={saveTaskManagerConfiguration}
+              onSynchronize={synchronizeTaskManager}
+            />
           : <WorkspaceLoading label="Task Manager" message="Preparing the latest synchronized Oracle tasks…" />
       ) : activeView === "approvals" ? (
         approvals

@@ -88,7 +88,7 @@ def test_gateway_downloads_report_content_in_memory_from_same_oracle_host() -> N
     )
 
 
-def test_gateway_rejects_report_content_link_for_another_host() -> None:
+def test_gateway_rebases_supported_report_content_link_from_another_host() -> None:
     settings = Settings(
         epm_base_url="https://example.oraclecloud.com",
         epm_username="service.user",
@@ -96,8 +96,22 @@ def test_gateway_rejects_report_content_link_for_another_host() -> None:
         application_name="Vision",
     )
 
-    with pytest.raises(APIRequestError, match="another host"):
+    endpoint = OracleTaskManagerReportGateway(settings)._relative_oracle_endpoint(
+        "https://internal-oracle-host/HyperionPlanning/rest/fcmapi/v1/report.csv"
+    )
+
+    assert endpoint == "HyperionPlanning/rest/fcmapi/v1/report.csv"
+
+
+def test_gateway_rejects_an_unsupported_report_content_path() -> None:
+    settings = Settings(
+        epm_base_url="https://example.oraclecloud.com",
+        epm_username="service.user",
+        epm_password="secret",
+        application_name="Vision",
+    )
+
+    with pytest.raises(APIRequestError, match="unsupported"):
         OracleTaskManagerReportGateway(settings)._relative_oracle_endpoint(
             "https://untrusted.example.com/report.csv"
         )
-

@@ -194,12 +194,19 @@ export const api = {
   taskManager: () => request<TaskManagerSnapshotResponse>(
     "/api/v1/task-manager"
   ),
-  synchronizeTaskManager: (
+  saveTaskManagerConfiguration: (
     payload: TaskManagerSyncInput,
     csrfToken: string
   ) => request<TaskManagerSnapshotResponse>(
+    "/api/v1/task-manager/configuration",
+    { method: "PUT", body: JSON.stringify(payload) },
+    csrfToken
+  ),
+  synchronizeTaskManager: (
+    csrfToken: string
+  ) => request<TaskManagerSnapshotResponse>(
     "/api/v1/task-manager/synchronize",
-    { method: "POST", body: JSON.stringify(payload) },
+    { method: "POST" },
     csrfToken
   ),
   createPlanningCycle: (payload: PlanningCycleCreateInput, csrfToken: string) =>
