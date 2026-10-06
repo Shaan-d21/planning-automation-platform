@@ -28,6 +28,9 @@ schema.
   run profiles. Platform users are deactivated rather than deleted.
 - Do not persist Oracle passwords, API keys, uploaded file contents, Planning
   data grids, or generated reports in the database.
+- Pending browser uploads remain bounded temporary files outside PostgreSQL.
+  Their opaque tokens are held only by the web runtime and require the creating
+  session plus registered application ID for resolution or cleanup.
 
 ## Tables
 

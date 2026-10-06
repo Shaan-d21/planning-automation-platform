@@ -92,9 +92,13 @@ of the Planning compatibility contract. Existing imports continue to consume
   their conversation application, due-work polling is restricted to the
   worker's exact Oracle environment/application, and submitted executions carry
   the schedule application into the durable queue.
-- Uploads, reports, and remaining product-owned catalogs are still deployment-
-  bound and must receive the same ownership boundary before public workspace
-  switching is enabled.
+- Temporary uploads are now owned by both the authenticated platform session
+  and its active registered application. Resolution and terminal cleanup require
+  the same ownership tuple, while logout safely clears every upload owned by
+  that session. Queued work already retains its application identity.
+- Reports and remaining product-owned catalogs are still deployment-bound and
+  must receive the same ownership boundary before public workspace switching is
+  enabled.
 
 The FCCS read contract follows Oracle's supported public REST resources:
 

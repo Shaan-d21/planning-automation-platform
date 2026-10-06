@@ -1374,6 +1374,7 @@ def create_app(
         payload: AgentApprovalDecisionRequest,
     ):
         owner = require_api_session(request)
+        application_id = _active_application_id(request)
         user = _current_user(request)
         assert user is not None
         upload_tokens: tuple[str, ...] = ()
@@ -1447,6 +1448,7 @@ def create_app(
                             str(key): request.app.state.upload_store.resolve(
                                 str(token),
                                 owner=owner,
+                                application_id=application_id,
                             )
                             for key, token in raw_uploads.items()
                         }
@@ -1473,7 +1475,9 @@ def create_app(
                 operation_cleanup=(
                     (
                         lambda: request.app.state.upload_store.delete_many(
-                            upload_tokens
+                            upload_tokens,
+                            owner=owner,
+                            application_id=application_id,
                         )
                     )
                     if upload_tokens and payload.decision == "approve"
@@ -1482,10 +1486,18 @@ def create_app(
             )
         except AgentError as exc:
             if upload_tokens:
-                request.app.state.upload_store.delete_many(upload_tokens)
+                request.app.state.upload_store.delete_many(
+                    upload_tokens,
+                    owner=owner,
+                    application_id=application_id,
+                )
             return _agent_error(exc)
         if upload_tokens and payload.decision == "reject":
-            request.app.state.upload_store.delete_many(upload_tokens)
+            request.app.state.upload_store.delete_many(
+                upload_tokens,
+                owner=owner,
+                application_id=application_id,
+            )
         return {
             "status": "success",
             "message": asdict(result["message"]),
@@ -2242,10 +2254,12 @@ def create_app(
         filename: str,
     ):
         owner = require_api_session(request)
+        application_id = _active_application_id(request)
         try:
             receipt = await request.app.state.upload_store.save(
                 request,
                 owner=owner,
+                application_id=application_id,
                 filename=filename,
             )
         except ConfigurationError as exc:
@@ -2262,6 +2276,7 @@ def create_app(
         payload: PlanningProcessRunRequest,
     ):
         owner = require_api_session(request)
+        application_id = _active_application_id(request)
         service = request.app.state.process_service
         upload_tokens = tuple(payload.pipeline_uploads.values())
         submitted = False
@@ -2275,6 +2290,7 @@ def create_app(
                 key: request.app.state.upload_store.resolve(
                     token,
                     owner=owner,
+                    application_id=application_id,
                 )
                 for key, token in payload.pipeline_uploads.items()
             }
@@ -2290,7 +2306,9 @@ def create_app(
             execution = request.app.state.execution_manager.submit(
                 process_input,
                 cleanup=lambda: request.app.state.upload_store.delete_many(
-                    upload_tokens
+                    upload_tokens,
+                    owner=owner,
+                    application_id=application_id,
                 ),
                 actor=_request_actor(request),
             )
@@ -2309,7 +2327,11 @@ def create_app(
             )
         finally:
             if not submitted:
-                request.app.state.upload_store.delete_many(upload_tokens)
+                request.app.state.upload_store.delete_many(
+                    upload_tokens,
+                    owner=owner,
+                    application_id=application_id,
+                )
         return JSONResponse(
             status_code=202,
             content={
@@ -3269,6 +3291,7 @@ def create_app(
         payload: PipelineRunProfileExecutionRequest,
     ):
         owner = require_api_session(request)
+        application_id = _active_application_id(request)
         designer = request.app.state.process_designer
         upload_tokens = tuple(payload.uploads.values())
         submitted = False
@@ -3303,6 +3326,7 @@ def create_app(
                 key: request.app.state.upload_store.resolve(
                     token,
                     owner=owner,
+                    application_id=application_id,
                 )
                 for key, token in payload.uploads.items()
             }
@@ -3323,7 +3347,9 @@ def create_app(
             execution = request.app.state.execution_manager.submit(
                 process_input,
                 cleanup=lambda: request.app.state.upload_store.delete_many(
-                    upload_tokens
+                    upload_tokens,
+                    owner=owner,
+                    application_id=application_id,
                 ),
                 actor=_request_actor(request),
             )
@@ -3339,7 +3365,11 @@ def create_app(
             )
         finally:
             if not submitted:
-                request.app.state.upload_store.delete_many(upload_tokens)
+                request.app.state.upload_store.delete_many(
+                    upload_tokens,
+                    owner=owner,
+                    application_id=application_id,
+                )
         return JSONResponse(
             status_code=202,
             content={
@@ -3387,6 +3417,7 @@ def create_app(
         payload: PipelineRunRequest,
     ):
         owner = require_api_session(request)
+        application_id = _active_application_id(request)
         upload_tokens = tuple(payload.uploads.values())
         submitted = False
         try:
@@ -3403,6 +3434,7 @@ def create_app(
                 key: request.app.state.upload_store.resolve(
                     token,
                     owner=owner,
+                    application_id=application_id,
                 )
                 for key, token in payload.uploads.items()
             }
@@ -3414,7 +3446,9 @@ def create_app(
             execution = request.app.state.operation_manager.submit(
                 payload.to_domain(upload_paths=upload_paths),
                 cleanup=lambda: request.app.state.upload_store.delete_many(
-                    upload_tokens
+                    upload_tokens,
+                    owner=owner,
+                    application_id=application_id,
                 ),
                 actor=_request_actor(request),
                 on_queued=task_link,
@@ -3424,7 +3458,11 @@ def create_app(
             return _operation_start_error(exc)
         finally:
             if not submitted:
-                request.app.state.upload_store.delete_many(upload_tokens)
+                request.app.state.upload_store.delete_many(
+                    upload_tokens,
+                    owner=owner,
+                    application_id=application_id,
+                )
         return _operation_accepted(
             execution.execution_id,
             planning_task_id=payload.planning_task_id,
@@ -3436,6 +3474,7 @@ def create_app(
         payload: DataIntegrationRunRequest,
     ):
         owner = require_api_session(request)
+        application_id = _active_application_id(request)
         upload_tokens = (
             (payload.upload_token,) if payload.upload_token else ()
         )
@@ -3454,6 +3493,7 @@ def create_app(
                 request.app.state.upload_store.resolve(
                     payload.upload_token,
                     owner=owner,
+                    application_id=application_id,
                 )
                 if payload.upload_token
                 else None
@@ -3470,7 +3510,9 @@ def create_app(
             execution = request.app.state.operation_manager.submit(
                 payload.to_domain(upload_path=upload_path),
                 cleanup=lambda: request.app.state.upload_store.delete_many(
-                    upload_tokens
+                    upload_tokens,
+                    owner=owner,
+                    application_id=application_id,
                 ),
                 actor=_request_actor(request),
                 on_queued=task_link,
@@ -3480,7 +3522,11 @@ def create_app(
             return _operation_start_error(exc)
         finally:
             if not submitted:
-                request.app.state.upload_store.delete_many(upload_tokens)
+                request.app.state.upload_store.delete_many(
+                    upload_tokens,
+                    owner=owner,
+                    application_id=application_id,
+                )
         return _operation_accepted(
             execution.execution_id,
             planning_task_id=payload.planning_task_id,
@@ -3492,6 +3538,7 @@ def create_app(
         payload: MetadataImportRunRequest,
     ):
         owner = require_api_session(request)
+        application_id = _active_application_id(request)
         upload_tokens = (
             (payload.upload_token,) if payload.upload_token else ()
         )
@@ -3525,6 +3572,7 @@ def create_app(
                 request.app.state.upload_store.resolve(
                     payload.upload_token,
                     owner=owner,
+                    application_id=application_id,
                 )
                 if payload.upload_token
                 else None
@@ -3539,7 +3587,9 @@ def create_app(
             execution = request.app.state.operation_manager.submit(
                 payload.to_domain(upload_path=upload_path),
                 cleanup=lambda: request.app.state.upload_store.delete_many(
-                    upload_tokens
+                    upload_tokens,
+                    owner=owner,
+                    application_id=application_id,
                 ),
                 actor=_request_actor(request),
                 on_queued=task_link,
@@ -3549,7 +3599,11 @@ def create_app(
             return _operation_start_error(exc)
         finally:
             if not submitted:
-                request.app.state.upload_store.delete_many(upload_tokens)
+                request.app.state.upload_store.delete_many(
+                    upload_tokens,
+                    owner=owner,
+                    application_id=application_id,
+                )
         return _operation_accepted(
             execution.execution_id,
             planning_task_id=payload.planning_task_id,
@@ -3561,6 +3615,7 @@ def create_app(
         payload: DataImportRunRequest,
     ):
         owner = require_api_session(request)
+        application_id = _active_application_id(request)
         upload_tokens = (
             (payload.upload_token,) if payload.upload_token else ()
         )
@@ -3584,6 +3639,7 @@ def create_app(
                 request.app.state.upload_store.resolve(
                     payload.upload_token,
                     owner=owner,
+                    application_id=application_id,
                 )
                 if payload.upload_token
                 else None
@@ -3600,7 +3656,9 @@ def create_app(
             execution = request.app.state.operation_manager.submit(
                 payload.to_domain(upload_path=upload_path),
                 cleanup=lambda: request.app.state.upload_store.delete_many(
-                    upload_tokens
+                    upload_tokens,
+                    owner=owner,
+                    application_id=application_id,
                 ),
                 actor=_request_actor(request),
                 on_queued=task_link,
@@ -3610,7 +3668,11 @@ def create_app(
             return _operation_start_error(exc)
         finally:
             if not submitted:
-                request.app.state.upload_store.delete_many(upload_tokens)
+                request.app.state.upload_store.delete_many(
+                    upload_tokens,
+                    owner=owner,
+                    application_id=application_id,
+                )
         return _operation_accepted(
             execution.execution_id,
             planning_task_id=payload.planning_task_id,
@@ -3790,6 +3852,7 @@ def create_app(
         payload: StandaloneFlowRecoveryRunRequest,
     ):
         owner = require_api_session(request)
+        application_id = _active_application_id(request)
         _require_operation_execution_access(request, execution_id)
         user = _current_user(request)
         if user is None or not user.has_permission(
@@ -3809,6 +3872,7 @@ def create_app(
                 key: request.app.state.upload_store.resolve(
                     token,
                     owner=owner,
+                    application_id=application_id,
                 )
                 for key, token in payload.replacement_uploads.items()
             }
@@ -3821,7 +3885,9 @@ def create_app(
             execution = request.app.state.operation_manager.submit_flow(
                 recovered,
                 cleanup=lambda: request.app.state.upload_store.delete_many(
-                    upload_tokens
+                    upload_tokens,
+                    owner=owner,
+                    application_id=application_id,
                 ),
                 actor=_request_actor(request),
             )
@@ -3830,7 +3896,11 @@ def create_app(
             return _operation_start_error(exc)
         finally:
             if upload_tokens and not submitted:
-                request.app.state.upload_store.delete_many(upload_tokens)
+                request.app.state.upload_store.delete_many(
+                    upload_tokens,
+                    owner=owner,
+                    application_id=application_id,
+                )
         return JSONResponse(
             status_code=202,
             content={
@@ -4264,6 +4334,11 @@ def _schedule_environment(request: Request) -> OracleEnvironment:
 
 
 def _schedule_application_id(request: Request) -> int:
+    return _active_application_id(request)
+
+
+def _active_application_id(request: Request) -> int:
+    """Return the authorized application owning request-local artifacts."""
     return current_application_context(
         request,
         _current_user(request),

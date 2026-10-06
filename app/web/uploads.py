@@ -25,6 +25,7 @@ class UploadReceipt:
 class _StoredUpload:
     token: str
     owner: str
+    application_id: int
     path: Path
     size: int
     created_at: float
@@ -51,6 +52,7 @@ class ProcessUploadStore:
         request: Request,
         *,
         owner: str,
+        application_id: int,
         filename: str,
     ) -> UploadReceipt:
         """Stream one browser upload to a session-owned temporary file."""
@@ -78,6 +80,7 @@ class ProcessUploadStore:
         stored = _StoredUpload(
             token=token,
             owner=owner,
+            application_id=self._application_id(application_id),
             path=path,
             size=size,
             created_at=time.monotonic(),
@@ -90,14 +93,22 @@ class ProcessUploadStore:
             size=size,
         )
 
-    def resolve(self, token: str, *, owner: str) -> Path:
-        """Resolve an opaque token only for its creating session."""
+    def resolve(
+        self,
+        token: str,
+        *,
+        owner: str,
+        application_id: int,
+    ) -> Path:
+        """Resolve a token only for its creating session and application."""
         self._purge_expired()
+        scoped_application_id = self._application_id(application_id)
         with self._lock:
             upload = self._uploads.get(str(token).strip())
         if (
             upload is None
             or upload.owner != owner
+            or upload.application_id != scoped_application_id
             or not upload.path.is_file()
         ):
             raise ConfigurationError(
@@ -105,13 +116,28 @@ class ProcessUploadStore:
             )
         return upload.path
 
-    def delete_many(self, tokens: tuple[str, ...]) -> None:
-        """Remove temporary files after their process reaches a terminal state."""
+    def delete_many(
+        self,
+        tokens: tuple[str, ...],
+        *,
+        owner: str,
+        application_id: int,
+    ) -> None:
+        """Remove only files owned by the calling session and application."""
+        scoped_application_id = self._application_id(application_id)
+        uploads: list[_StoredUpload] = []
         for token in tokens:
             with self._lock:
-                upload = self._uploads.pop(token, None)
-            if upload is not None:
-                shutil.rmtree(upload.path.parent, ignore_errors=True)
+                candidate = self._uploads.get(str(token).strip())
+                if (
+                    candidate is not None
+                    and candidate.owner == owner
+                    and candidate.application_id == scoped_application_id
+                ):
+                    upload = self._uploads.pop(candidate.token)
+                    uploads.append(upload)
+        for upload in uploads:
+            shutil.rmtree(upload.path.parent, ignore_errors=True)
 
     def delete_owner(self, owner: str) -> None:
         """Remove all pending uploads owned by one browser session."""
@@ -146,3 +172,17 @@ class ProcessUploadStore:
         if not safe_name or safe_name in {".", ".."}:
             raise ConfigurationError("A valid upload filename is required.")
         return safe_name
+
+    @staticmethod
+    def _application_id(value: int) -> int:
+        try:
+            application_id = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ConfigurationError(
+                "A valid Oracle application is required for this upload."
+            ) from exc
+        if application_id <= 0:
+            raise ConfigurationError(
+                "A valid Oracle application is required for this upload."
+            )
+        return application_id
