@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -258,6 +259,33 @@ def test_due_pipeline_is_queued_with_scheduled_audit_actor(
     updated = schedules.get(schedule.schedule_id)
     assert updated.last_outcome is AutomationScheduleOutcome.SUBMITTED
     assert updated.last_execution_id == "execution-1"
+
+
+def test_dispatcher_does_not_claim_another_environment_schedule(
+    tmp_path: Path,
+) -> None:
+    settings, _, manager, schedules, coordinator = _coordinator(tmp_path)
+    due_at = datetime(2027, 1, 1, 6, 0, tzinfo=UTC)
+    local = coordinator.create(
+        _input(settings),
+        now=due_at - timedelta(days=1),
+    )
+    foreign = schedules.create(
+        replace(
+            _input(settings),
+            environment_key="different-environment",
+            name="Foreign Forecast",
+        ),
+        now=due_at - timedelta(days=1),
+    )
+
+    results = coordinator.dispatch_due(now=due_at)
+
+    assert [item.schedule_id for item in results] == [local.schedule_id]
+    assert manager.submit.call_count == 1
+    assert schedules.get(foreign.schedule_id).last_outcome is (
+        AutomationScheduleOutcome.NEVER
+    )
 
 
 def test_active_pipeline_execution_skips_scheduled_occurrence(

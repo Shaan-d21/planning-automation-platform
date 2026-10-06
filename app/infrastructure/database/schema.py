@@ -916,6 +916,11 @@ automation_schedules = Table(
     "automation_schedules",
     metadata,
     Column("schedule_id", IDENTITY_BIGINT, primary_key=True, autoincrement=True),
+    Column(
+        "application_id",
+        IDENTITY_BIGINT,
+        ForeignKey("oracle_applications.application_id", ondelete="RESTRICT"),
+    ),
     Column("environment_key", String(64), nullable=False),
     Column("name", String(160), nullable=False),
     Column("target_type", String(32), nullable=False),
@@ -961,6 +966,12 @@ automation_schedules = Table(
         "'FAILED', 'SKIPPED')",
         name="last_outcome",
     ),
+)
+Index(
+    "ix_automation_schedules_application",
+    automation_schedules.c.application_id,
+    automation_schedules.c.is_enabled,
+    automation_schedules.c.next_run_at,
 )
 Index(
     "uq_automation_schedules_environment_name",

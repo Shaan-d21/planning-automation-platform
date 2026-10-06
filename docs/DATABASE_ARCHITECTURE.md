@@ -163,6 +163,15 @@ receive an external execution identifier before local workflow persistence.
 A partial due-work index supports scheduler polling without scanning archived
 or disabled schedules.
 
+#### `automation_schedules`
+
+Allow-listed unattended Oracle Pipeline and RTP-registry recurrences. Each
+schedule belongs to one registered `oracle_applications` row as well as its
+non-secret environment hash. Browser access, agent schedule changes, due-work
+claims, and resulting durable executions preserve this application boundary.
+Legacy rows that cannot be attributed remain hidden from application-scoped
+APIs.
+
 ### Operational Planning work
 
 #### `planning_cycles`

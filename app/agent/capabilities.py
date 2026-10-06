@@ -53,6 +53,7 @@ from app.models.automation_schedule import (
 )
 from app.models.oracle_artifact import OracleArtifactType, OracleEnvironment
 from app.services.business_rule_rtp_registry import BusinessRuleRTPRegistryService
+from app.services.application_workspace_service import ApplicationWorkspaceService
 from app.services.data_integration_service import DataIntegrationService
 from app.services.data_map_service import DataMapService
 from app.services.data_service import DataService
@@ -110,6 +111,17 @@ class AgentCapabilityGateway:
             settings.epm_base_url,
             settings.application_name,
         ).key
+        schedule_workspace = ApplicationWorkspaceService(
+            settings.database_target
+        ).find_registered(
+            settings.epm_base_url,
+            settings.application_name,
+        )
+        self._schedule_application_id = (
+            schedule_workspace.application_id
+            if schedule_workspace is not None
+            else None
+        )
         self._handlers = {
             "get_environment_summary": self._environment_summary,
             "list_platform_operations": self._platform_operations,
@@ -1624,7 +1636,8 @@ class AgentCapabilityGateway:
                     f"{'Active' if item.enabled else 'Paused'}",
                 )
                 for item in self._schedule_service.list_schedules(
-                    environment_key=self._schedule_environment_key
+                    environment_key=self._schedule_environment_key,
+                    application_id=self._schedule_application_id,
                 )
                 if item.target_type is AutomationTargetType.ORACLE_PIPELINE
                 and item.enabled is desired_enabled
@@ -3259,6 +3272,7 @@ class AgentCapabilityGateway:
             concurrency_policy=AutomationConcurrencyPolicy.SKIP_IF_ACTIVE,
             misfire_policy=misfire_policy,
             enabled=bool(supplied.get("enabled", True)),
+            application_id=self._schedule_application_id,
         )
         try:
             preview = self._schedule_coordinator.preview(schedule_input)

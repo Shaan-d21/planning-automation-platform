@@ -6,9 +6,15 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from sqlalchemy import insert
 
 from app.application.automation_scheduling import (
     AutomationScheduleApplicationService,
+)
+from app.infrastructure.database.engine import database_for
+from app.infrastructure.database.schema import (
+    oracle_applications,
+    oracle_environment_settings,
 )
 from app.models.automation_schedule import (
     AutomationInputPolicy,
@@ -76,6 +82,74 @@ def test_schedule_is_scoped_to_an_oracle_environment(tmp_path: Path) -> None:
     assert first.name == second.name
     assert service.list_schedules(environment_key="environment-a") == (first,)
     assert service.list_schedules(environment_key="environment-b") == (second,)
+
+
+def test_schedule_access_is_scoped_to_registered_application(
+    tmp_path: Path,
+) -> None:
+    database_target = tmp_path / "schedule.sqlite3"
+    database = database_for(database_target)
+    now = datetime(2026, 12, 1, tzinfo=UTC)
+    with database.begin() as connection:
+        connection.execute(
+            insert(oracle_environment_settings).values(
+                base_url="https://example.oraclecloud.com",
+                deployment_mode="CLOUD",
+                discovered_applications=[],
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        planning_id = int(
+            connection.execute(
+                insert(oracle_applications)
+                .values(
+                    environment_base_url="https://example.oraclecloud.com",
+                    application_name="Planning",
+                    business_process="PLANNING",
+                    is_active=True,
+                    created_at=now,
+                    updated_at=now,
+                )
+                .returning(oracle_applications.c.application_id)
+            ).scalar_one()
+        )
+        fccs_id = int(
+            connection.execute(
+                insert(oracle_applications)
+                .values(
+                    environment_base_url="https://example.oraclecloud.com",
+                    application_name="FCCS",
+                    business_process="FCCS",
+                    is_active=True,
+                    created_at=now,
+                    updated_at=now,
+                )
+                .returning(oracle_applications.c.application_id)
+            ).scalar_one()
+        )
+
+    service = AutomationScheduleApplicationService(database_target)
+    planning_input = _input(name="Planning Forecast")
+    planning_input = AutomationScheduleInput(
+        environment_key=planning_input.environment_key,
+        name=planning_input.name,
+        target_type=planning_input.target_type,
+        target_key=planning_input.target_key,
+        frequency=planning_input.frequency,
+        timezone=planning_input.timezone,
+        first_run_local=planning_input.first_run_local,
+        input_policy=planning_input.input_policy,
+        configuration=planning_input.configuration,
+        application_id=planning_id,
+    )
+    saved = service.create(planning_input, now=now)
+
+    assert saved.application_id == planning_id
+    assert service.list_schedules(application_id=planning_id) == (saved,)
+    assert service.list_schedules(application_id=fccs_id) == ()
+    with pytest.raises(AutomationScheduleError, match="was not found"):
+        service.get(saved.schedule_id, application_id=fccs_id)
 
 
 def test_schedule_configuration_rejects_credentials(tmp_path: Path) -> None:

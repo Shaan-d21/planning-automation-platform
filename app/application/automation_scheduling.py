@@ -101,7 +101,10 @@ class AutomationScheduleApplicationService:
         now: datetime | None = None,
     ) -> AutomationSchedule:
         """Validate and replace one schedule definition."""
-        self._repository.require(schedule_id)
+        self._repository.require(
+            schedule_id,
+            application_id=schedule_input.application_id,
+        )
         current = self._utc(now)
         normalized = self._normalize(schedule_input)
         candidate = self.next_occurrence(normalized, after=current)
@@ -119,14 +122,23 @@ class AutomationScheduleApplicationService:
             now=current,
         )
 
-    def get(self, schedule_id: int) -> AutomationSchedule:
+    def get(
+        self,
+        schedule_id: int,
+        *,
+        application_id: int | None = None,
+    ) -> AutomationSchedule:
         """Return one active or paused schedule."""
-        return self._repository.require(schedule_id)
+        return self._repository.require(
+            schedule_id,
+            application_id=application_id,
+        )
 
     def list_schedules(
         self,
         *,
         environment_key: str | None = None,
+        application_id: int | None = None,
     ) -> tuple[AutomationSchedule, ...]:
         """Return schedules, optionally restricted to one environment."""
         normalized_environment = (
@@ -135,7 +147,8 @@ class AutomationScheduleApplicationService:
             else None
         )
         return self._repository.list_active(
-            environment_key=normalized_environment
+            environment_key=normalized_environment,
+            application_id=application_id,
         )
 
     def set_enabled(
@@ -143,10 +156,14 @@ class AutomationScheduleApplicationService:
         schedule_id: int,
         enabled: bool,
         *,
+        application_id: int | None = None,
         now: datetime | None = None,
     ) -> AutomationSchedule:
         """Pause or resume one recurrence."""
-        schedule = self._repository.require(schedule_id)
+        schedule = self._repository.require(
+            schedule_id,
+            application_id=application_id,
+        )
         current = self._utc(now)
         next_run = None
         if enabled:
@@ -162,27 +179,40 @@ class AutomationScheduleApplicationService:
             enabled=bool(enabled),
             next_run_at=next_run,
             now=current,
+            application_id=application_id,
         )
 
     def archive(
         self,
         schedule_id: int,
         *,
+        application_id: int | None = None,
         now: datetime | None = None,
     ) -> None:
         """Archive a schedule while retaining its run history."""
-        self._repository.archive(schedule_id, now=self._utc(now))
+        self._repository.archive(
+            schedule_id,
+            now=self._utc(now),
+            application_id=application_id,
+        )
 
     def claim_due(
         self,
         *,
+        environment_key: str | None = None,
+        application_id: int | None = None,
         now: datetime | None = None,
         limit: int = 100,
     ) -> tuple[AutomationScheduleRun, ...]:
         """Claim due occurrences for a later execution-dispatch step."""
         current = self._utc(now)
         claimed: list[AutomationScheduleRun] = []
-        for schedule in self._repository.list_due(current, limit=limit):
+        for schedule in self._repository.list_due(
+            current,
+            environment_key=environment_key,
+            application_id=application_id,
+            limit=limit,
+        ):
             schedule_input = self._input_from_schedule(schedule, enabled=True)
             next_run = self.next_occurrence(schedule_input, after=current)
             run = self._repository.claim(
@@ -286,16 +316,21 @@ class AutomationScheduleApplicationService:
         self,
         schedule_id: int,
         *,
+        application_id: int | None = None,
         limit: int = 100,
     ) -> tuple[AutomationScheduleRun, ...]:
         """Return recent occurrence evidence for one schedule."""
-        self._repository.require(schedule_id)
+        self._repository.require(
+            schedule_id,
+            application_id=application_id,
+        )
         return self._repository.list_runs(schedule_id, limit=limit)
 
     def list_run_evidence(
         self,
         environment_key: str,
         *,
+        application_id: int | None = None,
         schedule_id: int | None = None,
         status: AutomationScheduleRunStatus | None = None,
         scheduled_from: datetime | None = None,
@@ -327,6 +362,7 @@ class AutomationScheduleApplicationService:
         )
         return self._repository.list_run_evidence(
             normalized_environment,
+            application_id=application_id,
             schedule_id=schedule_id,
             status=normalized_status,
             scheduled_from=scheduled_from,
@@ -447,6 +483,7 @@ class AutomationScheduleApplicationService:
                 schedule_input.misfire_policy
             ),
             enabled=bool(schedule_input.enabled),
+            application_id=schedule_input.application_id,
         )
 
     def _configuration(self, value: dict[str, Any]) -> dict[str, Any]:
@@ -487,6 +524,7 @@ class AutomationScheduleApplicationService:
     @staticmethod
     def _resolved_payload(schedule: AutomationSchedule) -> dict[str, Any]:
         return {
+            "application_id": schedule.application_id,
             "environment_key": schedule.environment_key,
             "target_type": schedule.target_type.value,
             "target_key": schedule.target_key,
@@ -513,6 +551,7 @@ class AutomationScheduleApplicationService:
             concurrency_policy=schedule.concurrency_policy,
             misfire_policy=schedule.misfire_policy,
             enabled=enabled,
+            application_id=schedule.application_id,
         )
 
     @staticmethod

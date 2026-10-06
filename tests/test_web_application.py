@@ -1564,6 +1564,7 @@ def test_pipeline_schedule_preview_and_creation_use_automation_coordinator(
     assert submitted.target_key == "PIPE01"
     assert submitted.configuration["variables"] == {"YEAR": "FY27"}
     assert submitted.first_run_local.tzinfo is None
+    assert submitted.application_id is not None
 
 
 def test_schedule_history_returns_environment_scoped_execution_evidence(

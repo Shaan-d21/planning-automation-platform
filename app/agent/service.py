@@ -1975,9 +1975,18 @@ class AgentApplicationService:
             elif direct_payload is not None and str(
                 direct_payload.get("target_code") or ""
             ).casefold() in PIPELINE_SCHEDULE_ACTIONS:
+                conversation = self._repository.get_conversation(
+                    conversation_id,
+                    user.user_id,
+                )
                 schedule = self._apply_approved_schedule_action(
                     direct_payload,
                     user,
+                    application_id=(
+                        conversation.application_id
+                        if conversation is not None
+                        else None
+                    ),
                 )
                 executed_operation = True
             elif direct_payload is not None:
@@ -2434,8 +2443,19 @@ class AgentApplicationService:
         if decision.execution_id and decision.execution_id.startswith("schedule:"):
             try:
                 schedule_id = int(decision.execution_id.split(":", 1)[1])
+                conversation = self._repository.get_conversation(
+                    decision.conversation_id,
+                    user.user_id,
+                )
                 item = (
-                    self._schedule_service.get(schedule_id)
+                    self._schedule_service.get(
+                        schedule_id,
+                        application_id=(
+                            conversation.application_id
+                            if conversation is not None
+                            else None
+                        ),
+                    )
                     if self._schedule_service is not None
                     else None
                 )
@@ -2585,6 +2605,8 @@ class AgentApplicationService:
         self,
         payload: dict[str, object],
         user: UserAccount,
+        *,
+        application_id: int | None,
     ) -> dict[str, object]:
         """Apply one explicitly approved change through the shared scheduler."""
         if not user.has_permission(Permission.SCHEDULE_MANAGE):
@@ -2642,6 +2664,7 @@ class AgentApplicationService:
                         str(input_values.get("misfire_policy") or "RUN_ONCE")
                     ),
                     enabled=bool(input_values.get("enabled", True)),
+                    application_id=application_id,
                 )
                 schedule = self._schedule_coordinator.create(schedule_input)
             else:
@@ -2652,7 +2675,10 @@ class AgentApplicationService:
                         "The selected automation schedule is no longer available."
                     )
                 schedule_id = int(canonical.split(":", 1)[1])
-                schedule = self._schedule_service.get(schedule_id)
+                schedule = self._schedule_service.get(
+                    schedule_id,
+                    application_id=application_id,
+                )
                 if schedule.environment_key != self._schedule_environment_key:
                     raise AgentConversationError(
                         "The selected automation schedule belongs to another environment."
@@ -2666,6 +2692,7 @@ class AgentApplicationService:
                 schedule = self._schedule_coordinator.set_enabled(
                     schedule_id,
                     action == PIPELINE_SCHEDULE_RESUME,
+                    application_id=application_id,
                 )
         except AgentConversationError:
             raise

@@ -90,6 +90,7 @@ class AutomationSchedule:
     last_execution_id: str | None = None
     last_outcome: AutomationScheduleOutcome = AutomationScheduleOutcome.NEVER
     last_error: str | None = None
+    application_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +111,7 @@ class AutomationScheduleInput:
     )
     misfire_policy: AutomationMisfirePolicy = AutomationMisfirePolicy.RUN_ONCE
     enabled: bool = True
+    application_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

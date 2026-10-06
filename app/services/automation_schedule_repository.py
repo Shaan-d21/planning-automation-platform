@@ -64,7 +64,10 @@ class SQLAutomationScheduleRepository:
                 f"An active schedule named '{schedule_input.name}' already "
                 "exists for this Oracle environment."
             ) from exc
-        return self.require(int(schedule_id))
+        return self.require(
+            int(schedule_id),
+            application_id=schedule_input.application_id,
+        )
 
     def update(
         self,
@@ -81,6 +84,14 @@ class SQLAutomationScheduleRepository:
                     .where(
                         automation_schedules.c.schedule_id == schedule_id,
                         automation_schedules.c.archived_at.is_(None),
+                        *(
+                            (
+                                automation_schedules.c.application_id
+                                == schedule_input.application_id,
+                            )
+                            if schedule_input.application_id is not None
+                            else ()
+                        ),
                     )
                     .values(
                         **self._input_values(schedule_input),
@@ -98,20 +109,38 @@ class SQLAutomationScheduleRepository:
             raise AutomationScheduleError(
                 f"Automation schedule {schedule_id} was not found."
             )
-        return self.require(schedule_id)
+        return self.require(
+            schedule_id,
+            application_id=schedule_input.application_id,
+        )
 
-    def get(self, schedule_id: int) -> AutomationSchedule | None:
+    def get(
+        self,
+        schedule_id: int,
+        *,
+        application_id: int | None = None,
+    ) -> AutomationSchedule | None:
+        conditions = [
+            automation_schedules.c.schedule_id == schedule_id,
+            automation_schedules.c.archived_at.is_(None),
+        ]
+        if application_id is not None:
+            conditions.append(
+                automation_schedules.c.application_id == application_id
+            )
         with self._database.connect() as connection:
             row = connection.execute(
-                select(automation_schedules).where(
-                    automation_schedules.c.schedule_id == schedule_id,
-                    automation_schedules.c.archived_at.is_(None),
-                )
+                select(automation_schedules).where(*conditions)
             ).mappings().one_or_none()
         return self._schedule(row) if row is not None else None
 
-    def require(self, schedule_id: int) -> AutomationSchedule:
-        schedule = self.get(schedule_id)
+    def require(
+        self,
+        schedule_id: int,
+        *,
+        application_id: int | None = None,
+    ) -> AutomationSchedule:
+        schedule = self.get(schedule_id, application_id=application_id)
         if schedule is None:
             raise AutomationScheduleError(
                 f"Automation schedule {schedule_id} was not found."
@@ -122,6 +151,7 @@ class SQLAutomationScheduleRepository:
         self,
         *,
         environment_key: str | None = None,
+        application_id: int | None = None,
     ) -> tuple[AutomationSchedule, ...]:
         statement = select(automation_schedules).where(
             automation_schedules.c.archived_at.is_(None)
@@ -129,6 +159,10 @@ class SQLAutomationScheduleRepository:
         if environment_key is not None:
             statement = statement.where(
                 automation_schedules.c.environment_key == environment_key
+            )
+        if application_id is not None:
+            statement = statement.where(
+                automation_schedules.c.application_id == application_id
             )
         statement = statement.order_by(
             automation_schedules.c.is_enabled.desc(),
@@ -147,17 +181,28 @@ class SQLAutomationScheduleRepository:
         self,
         now: datetime,
         *,
+        environment_key: str | None = None,
+        application_id: int | None = None,
         limit: int = 100,
     ) -> tuple[AutomationSchedule, ...]:
+        conditions = [
+            automation_schedules.c.archived_at.is_(None),
+            automation_schedules.c.is_enabled.is_(True),
+            automation_schedules.c.next_run_at.is_not(None),
+            automation_schedules.c.next_run_at <= now,
+        ]
+        if environment_key is not None:
+            conditions.append(
+                automation_schedules.c.environment_key == environment_key
+            )
+        if application_id is not None:
+            conditions.append(
+                automation_schedules.c.application_id == application_id
+            )
         with self._database.connect() as connection:
             rows = connection.execute(
                 select(automation_schedules)
-                .where(
-                    automation_schedules.c.archived_at.is_(None),
-                    automation_schedules.c.is_enabled.is_(True),
-                    automation_schedules.c.next_run_at.is_not(None),
-                    automation_schedules.c.next_run_at <= now,
-                )
+                .where(*conditions)
                 .order_by(
                     automation_schedules.c.next_run_at,
                     automation_schedules.c.schedule_id,
@@ -222,14 +267,20 @@ class SQLAutomationScheduleRepository:
         enabled: bool,
         next_run_at: datetime | None,
         now: datetime,
+        application_id: int | None = None,
     ) -> AutomationSchedule:
+        conditions = [
+            automation_schedules.c.schedule_id == schedule_id,
+            automation_schedules.c.archived_at.is_(None),
+        ]
+        if application_id is not None:
+            conditions.append(
+                automation_schedules.c.application_id == application_id
+            )
         with self._database.begin() as connection:
             result = connection.execute(
                 update(automation_schedules)
-                .where(
-                    automation_schedules.c.schedule_id == schedule_id,
-                    automation_schedules.c.archived_at.is_(None),
-                )
+                .where(*conditions)
                 .values(
                     is_enabled=enabled,
                     next_run_at=next_run_at,
@@ -241,16 +292,27 @@ class SQLAutomationScheduleRepository:
             raise AutomationScheduleError(
                 f"Automation schedule {schedule_id} was not found."
             )
-        return self.require(schedule_id)
+        return self.require(schedule_id, application_id=application_id)
 
-    def archive(self, schedule_id: int, *, now: datetime) -> None:
+    def archive(
+        self,
+        schedule_id: int,
+        *,
+        now: datetime,
+        application_id: int | None = None,
+    ) -> None:
+        conditions = [
+            automation_schedules.c.schedule_id == schedule_id,
+            automation_schedules.c.archived_at.is_(None),
+        ]
+        if application_id is not None:
+            conditions.append(
+                automation_schedules.c.application_id == application_id
+            )
         with self._database.begin() as connection:
             result = connection.execute(
                 update(automation_schedules)
-                .where(
-                    automation_schedules.c.schedule_id == schedule_id,
-                    automation_schedules.c.archived_at.is_(None),
-                )
+                .where(*conditions)
                 .values(
                     archived_at=now,
                     is_enabled=False,
@@ -350,6 +412,7 @@ class SQLAutomationScheduleRepository:
         self,
         environment_key: str,
         *,
+        application_id: int | None = None,
         schedule_id: int | None = None,
         status: AutomationScheduleRunStatus | None = None,
         scheduled_from: datetime | None = None,
@@ -371,6 +434,10 @@ class SQLAutomationScheduleRepository:
             )
             .where(automation_schedules.c.environment_key == environment_key)
         )
+        if application_id is not None:
+            statement = statement.where(
+                automation_schedules.c.application_id == application_id
+            )
         if schedule_id is not None:
             statement = statement.where(
                 automation_schedule_runs.c.schedule_id == schedule_id
@@ -410,6 +477,7 @@ class SQLAutomationScheduleRepository:
         schedule_input: AutomationScheduleInput,
     ) -> dict[str, Any]:
         return {
+            "application_id": schedule_input.application_id,
             "environment_key": schedule_input.environment_key,
             "name": schedule_input.name,
             "target_type": schedule_input.target_type.value,
@@ -455,6 +523,11 @@ class SQLAutomationScheduleRepository:
             last_error=(
                 str(row["last_error"])
                 if row["last_error"] is not None
+                else None
+            ),
+            application_id=(
+                int(row["application_id"])
+                if row["application_id"] is not None
                 else None
             ),
         )

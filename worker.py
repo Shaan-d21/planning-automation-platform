@@ -28,6 +28,9 @@ from app.services.notification_service import create_notification_service
 from app.services.environment_configuration_service import (
     EnvironmentConfigurationService,
 )
+from app.services.application_workspace_service import (
+    ApplicationWorkspaceService,
+)
 from app.products.registry import PRODUCT_PROVIDER_REGISTRY
 from app.utils.logger import configure_logging
 
@@ -45,6 +48,14 @@ def main() -> int:
         logger=logger.getChild("environment_configuration"),
     )
     resolved_settings = environment_configuration.resolve_startup_settings()
+    application_workspaces = ApplicationWorkspaceService(
+        resolved_settings.database_target
+    )
+    application_workspaces.synchronize(environment_configuration.get())
+    deployment_workspace = application_workspaces.find_registered(
+        resolved_settings.epm_base_url,
+        resolved_settings.application_name,
+    )
     business_process = environment_configuration.active_business_process(
         application_name=resolved_settings.application_name
     )
@@ -98,6 +109,11 @@ def main() -> int:
         ),
         environment_url=settings.epm_base_url,
         application_name=settings.application_name,
+        application_id=(
+            deployment_workspace.application_id
+            if deployment_workspace is not None
+            else None
+        ),
         logger=logger.getChild("automation_schedules"),
     )
     automation_schedule_manager = AutomationScheduleManager(

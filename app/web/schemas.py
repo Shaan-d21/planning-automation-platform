@@ -287,7 +287,12 @@ class AutomationScheduleRequest(BaseModel):
                 )
         return self
 
-    def to_domain(self, environment_key: str) -> AutomationScheduleInput:
+    def to_domain(
+        self,
+        environment_key: str,
+        *,
+        application_id: int | None = None,
+    ) -> AutomationScheduleInput:
         configuration = (
             {
                 "variables": self.variables,
@@ -312,6 +317,7 @@ class AutomationScheduleRequest(BaseModel):
             concurrency_policy=AutomationConcurrencyPolicy.SKIP_IF_ACTIVE,
             misfire_policy=self.misfire_policy,
             enabled=self.enabled,
+            application_id=application_id,
         )
 
 

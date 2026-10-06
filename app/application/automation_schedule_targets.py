@@ -338,6 +338,7 @@ class AutomationScheduleCoordinator:
         notification_service: NotificationService | None = None,
         environment_url: str = "",
         application_name: str = "",
+        application_id: int | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._schedules = schedule_service
@@ -346,6 +347,15 @@ class AutomationScheduleCoordinator:
         self._notification_service = notification_service
         self._environment_url = environment_url
         self._application_name = application_name
+        self._environment_key = (
+            OracleEnvironment.from_settings(
+                environment_url,
+                application_name,
+            ).key
+            if environment_url and application_name
+            else None
+        )
+        self._application_id = application_id
         self._logger = logger or logging.getLogger(__name__)
 
     def preview(
@@ -381,12 +391,21 @@ class AutomationScheduleCoordinator:
         schedule_id: int,
         enabled: bool,
         *,
+        application_id: int | None = None,
         now: datetime | None = None,
     ) -> AutomationSchedule:
         if enabled:
-            schedule = self._schedules.get(schedule_id)
+            schedule = self._schedules.get(
+                schedule_id,
+                application_id=application_id,
+            )
             self._adapter(schedule.target_type).operation_for(schedule)
-        return self._schedules.set_enabled(schedule_id, enabled, now=now)
+        return self._schedules.set_enabled(
+            schedule_id,
+            enabled,
+            application_id=application_id,
+            now=now,
+        )
 
     def dispatch_due(
         self,
@@ -396,7 +415,12 @@ class AutomationScheduleCoordinator:
     ) -> tuple[ScheduledDispatchResult, ...]:
         current = (now or datetime.now(UTC)).astimezone(UTC)
         results: list[ScheduledDispatchResult] = []
-        for run in self._schedules.claim_due(now=current, limit=limit):
+        for run in self._schedules.claim_due(
+            environment_key=self._environment_key,
+            application_id=self._application_id,
+            now=current,
+            limit=limit,
+        ):
             results.append(self._dispatch(run, now=current))
         return tuple(results)
 
@@ -406,7 +430,10 @@ class AutomationScheduleCoordinator:
         *,
         now: datetime,
     ) -> ScheduledDispatchResult:
-        schedule = self._schedules.get(run.schedule_id)
+        schedule = self._schedules.get(
+            run.schedule_id,
+            application_id=self._application_id,
+        )
         try:
             adapter = self._adapter(schedule.target_type)
             operation_input = adapter.operation_for(schedule)
@@ -418,6 +445,7 @@ class AutomationScheduleCoordinator:
                         display_name="Automation Scheduler",
                         trigger_source=TriggerSource.SCHEDULED,
                     ),
+                    application_id=schedule.application_id,
                 )
                 self._schedules.record_submitted(
                     run.run_id,
