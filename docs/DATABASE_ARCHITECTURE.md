@@ -28,6 +28,9 @@ schema.
   run profiles. Platform users are deactivated rather than deleted.
 - Do not persist Oracle passwords, API keys, uploaded file contents, Planning
   data grids, or generated reports in the database.
+- Pending browser uploads remain bounded temporary files outside PostgreSQL.
+  Their opaque tokens are held only by the web runtime and require the creating
+  session plus registered application ID for resolution or cleanup.
 
 ## Tables
 
@@ -162,6 +165,15 @@ correlation value rather than a foreign key because a scheduler handoff can
 receive an external execution identifier before local workflow persistence.
 A partial due-work index supports scheduler polling without scanning archived
 or disabled schedules.
+
+#### `automation_schedules`
+
+Allow-listed unattended Oracle Pipeline and RTP-registry recurrences. Each
+schedule belongs to one registered `oracle_applications` row as well as its
+non-secret environment hash. Browser access, agent schedule changes, due-work
+claims, and resulting durable executions preserve this application boundary.
+Legacy rows that cannot be attributed remain hidden from application-scoped
+APIs.
 
 ### Operational Planning work
 

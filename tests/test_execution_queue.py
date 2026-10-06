@@ -19,6 +19,11 @@ from app.application.execution_worker import DurableExecutionWorker
 from app.application.operations import BusinessRuleOperationInput
 from app.application.planning_process import PlanningProcessInput
 from app.config.settings import Settings
+from app.infrastructure.database.engine import database_for
+from app.infrastructure.database.schema import (
+    oracle_applications,
+    oracle_environment_settings,
+)
 from app.models.access_control import ExecutionActor, TriggerSource
 from app.models.execution_queue import (
     ExecutionJobStatus,
@@ -41,6 +46,51 @@ def _settings(tmp_path: Path, *, runtime: str = "embedded") -> Settings:
         execution_runtime=runtime,
         execution_lease_seconds=60,
     )
+
+
+def _registered_applications(settings: Settings) -> tuple[int, int]:
+    now = datetime.now(UTC)
+    database = database_for(settings.database_target)
+    with database.begin() as connection:
+        for base_url, application_name in (
+            (settings.epm_base_url, settings.application_name),
+            ("https://close.example.oraclecloud.com", "Close"),
+        ):
+            connection.execute(
+                oracle_environment_settings.insert().values(
+                    base_url=base_url,
+                    deployment_mode="cloud",
+                    selected_application=application_name,
+                    selected_business_process=(
+                        "PLANNING" if application_name == "Vision" else "FCCS"
+                    ),
+                    selection_source="ENVIRONMENT",
+                    discovered_applications=[],
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        planning = connection.execute(
+            oracle_applications.insert().values(
+                environment_base_url=settings.epm_base_url,
+                application_name=settings.application_name,
+                business_process="PLANNING",
+                is_active=True,
+                created_at=now,
+                updated_at=now,
+            )
+        ).inserted_primary_key[0]
+        close = connection.execute(
+            oracle_applications.insert().values(
+                environment_base_url="https://close.example.oraclecloud.com",
+                application_name="Close",
+                business_process="FCCS",
+                is_active=True,
+                created_at=now,
+                updated_at=now,
+            )
+        ).inserted_primary_key[0]
+    return int(planning), int(close)
 
 
 def test_queue_claim_heartbeat_and_completion_are_durable(tmp_path: Path) -> None:
@@ -92,6 +142,55 @@ def test_queue_prevents_duplicate_active_target(tmp_path: Path) -> None:
 
     with pytest.raises(ExecutionQueueConflictError, match="run-1"):
         repository.enqueue(replace(first, execution_id="run-2"))
+
+
+def test_queue_concurrency_is_isolated_by_application(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    planning_id, close_id = _registered_applications(settings)
+    repository = SQLExecutionQueueRepository(settings.database_target)
+    first = ExecutionJobSubmission(
+        execution_id="planning-rule",
+        application_id=planning_id,
+        job_type=ExecutionJobType.OPERATION,
+        target_key="BUSINESS_RULE:Calculate Revenue",
+        payload={"version": 1},
+    )
+    repository.enqueue(first)
+    close_job = repository.enqueue(
+        replace(first, execution_id="close-rule", application_id=close_id)
+    )
+
+    assert close_job.application_id == close_id
+    with pytest.raises(ExecutionQueueConflictError, match="planning-rule"):
+        repository.enqueue(replace(first, execution_id="planning-rule-2"))
+
+
+def test_worker_refuses_execution_owned_by_another_application(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path, runtime="worker")
+    _, close_id = _registered_applications(settings)
+    repository = SQLExecutionQueueRepository(settings.database_target)
+    repository.enqueue(
+        ExecutionJobSubmission(
+            execution_id="wrong-application",
+            application_id=close_id,
+            job_type=ExecutionJobType.OPERATION,
+            target_key="BUSINESS_RULE:Consolidate",
+            payload={"version": 1},
+        )
+    )
+    worker = DurableExecutionWorker(
+        settings,
+        worker_id="planning-worker",
+        completion_notifier=lambda _execution_id: None,
+    )
+
+    assert worker.run_once()
+    failed = repository.get("wrong-application")
+    assert failed is not None
+    assert failed.status is ExecutionJobStatus.FAILED
+    assert "another Oracle application" in str(failed.error_message)
 
 
 def test_queue_cancels_unclaimed_work_and_requests_safe_stop_for_running_work(

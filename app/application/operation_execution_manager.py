@@ -56,6 +56,7 @@ from app.models.workflow import (
 from app.models.access_control import ExecutionActor, TriggerSource
 from app.services.workflow_repository import SQLWorkflowRepository
 from app.services.execution_queue_repository import SQLExecutionQueueRepository
+from app.services.application_workspace_service import ApplicationWorkspaceService
 from app.utils.exceptions import ExecutionQueueConflictError
 from app.utils.exceptions import OperationError
 
@@ -98,6 +99,7 @@ class OperationExecutionManager:
             settings.database_target
         )
         self._queue = SQLExecutionQueueRepository(settings.database_target)
+        self._workspaces = ApplicationWorkspaceService(settings.database_target)
         self._embedded = settings.execution_runtime == "embedded"
         self._worker = DurableExecutionWorker(
             settings,
@@ -123,6 +125,7 @@ class OperationExecutionManager:
         cleanup: Callable[[], None] | None = None,
         actor: ExecutionActor | None = None,
         on_queued: Callable[[str], None] | None = None,
+        application_id: int | None = None,
     ) -> ManagedOperationExecution:
         """Queue an operation and return its browser-visible identity."""
         kind, target = self._identity(operation_input)
@@ -132,6 +135,7 @@ class OperationExecutionManager:
             job = self._queue.enqueue(
                 ExecutionJobSubmission(
                     execution_id=execution_id,
+                    application_id=self._application_id(application_id),
                     job_type=ExecutionJobType.OPERATION,
                     target_key=f"{kind.value}:{target}",
                     payload=operation_payload(operation_input, actor),
@@ -149,6 +153,7 @@ class OperationExecutionManager:
             self._repository.save(
                 WorkflowRun(
                     execution_id=execution_id,
+                    application_id=job.application_id,
                     workflow_name=f"{self._display_name(kind)} - {target}",
                     status=WorkflowStatus.QUEUED,
                     started_at=submitted_at,
@@ -198,6 +203,7 @@ class OperationExecutionManager:
         *,
         cleanup: Callable[[], None] | None = None,
         actor: ExecutionActor | None = None,
+        application_id: int | None = None,
     ) -> ManagedOperationExecution:
         """Queue one approved stop-on-failure standalone flow."""
         name = " ".join(str(flow_input.name).split()).strip()
@@ -211,6 +217,7 @@ class OperationExecutionManager:
             job = self._queue.enqueue(
                 ExecutionJobSubmission(
                     execution_id=execution_id,
+                    application_id=self._application_id(application_id),
                     job_type=ExecutionJobType.STANDALONE_FLOW,
                     target_key=f"{OperationKind.STANDALONE_FLOW.value}:{name}",
                     payload=standalone_flow_payload(flow_input, actor),
@@ -226,6 +233,7 @@ class OperationExecutionManager:
             self._repository.save(
                 WorkflowRun(
                     execution_id=execution_id,
+                    application_id=job.application_id,
                     workflow_name=f"Standalone Flow - {name}",
                     status=WorkflowStatus.QUEUED,
                     started_at=submitted_at,
@@ -259,6 +267,15 @@ class OperationExecutionManager:
             )
             self._futures[execution_id] = future
         return execution
+
+    def _application_id(self, supplied: int | None) -> int | None:
+        if supplied is not None:
+            return supplied
+        workspace = self._workspaces.find_registered(
+            self._settings.epm_base_url,
+            self._settings.application_name,
+        )
+        return workspace.application_id if workspace is not None else None
 
     def get_workflow(self, execution_id: str) -> WorkflowRun | None:
         return self._repository.get(execution_id)

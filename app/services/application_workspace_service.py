@@ -200,6 +200,37 @@ class ApplicationWorkspaceService:
             ).mappings().all()
         return tuple(self._workspace(row) for row in rows)
 
+    def get(self, application_id: int) -> ApplicationWorkspace | None:
+        """Return one registered application by its durable identity."""
+
+        with self._database.connect() as connection:
+            row = connection.execute(
+                select(oracle_applications).where(
+                    oracle_applications.c.application_id == application_id,
+                    oracle_applications.c.is_active.is_(True),
+                )
+            ).mappings().one_or_none()
+        return self._workspace(row) if row is not None else None
+
+    def find_registered(
+        self,
+        environment_base_url: str,
+        application_name: str,
+    ) -> ApplicationWorkspace | None:
+        """Resolve the exact deployment application without guessing."""
+
+        with self._database.connect() as connection:
+            row = connection.execute(
+                select(oracle_applications).where(
+                    oracle_applications.c.environment_base_url
+                    == environment_base_url,
+                    oracle_applications.c.application_name
+                    == application_name,
+                    oracle_applications.c.is_active.is_(True),
+                )
+            ).mappings().one_or_none()
+        return self._workspace(row) if row is not None else None
+
     def available_for_user(
         self,
         user_id: int,
@@ -365,6 +396,7 @@ class ApplicationWorkspaceService:
             business_process = BusinessProcessType.UNKNOWN
         return ApplicationWorkspace(
             application_id=int(row["application_id"]),
+            environment_base_url=str(row["environment_base_url"]),
             application_name=str(row["application_name"]),
             business_process=business_process,
             product_type=(

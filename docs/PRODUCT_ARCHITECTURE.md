@@ -78,6 +78,27 @@ of the Planning compatibility contract. Existing imports continue to consume
   deployment application. This deliberate split prevents a session selection
   from redirecting a write until application ownership is persisted on every
   proposal and queued execution.
+- EPM Assistant conversations are now owned by an authorized Oracle
+  application. Conversation lists, messages, approvals, clarifications,
+  inputs, drafts, and deletion fail closed when the active session selects a
+  different application. Existing attributable conversations are backfilled;
+  unattributable legacy rows remain hidden from application-scoped APIs.
+- Durable execution queue entries and workflow evidence now retain the exact
+  application identity. Workers verify that identity against their configured
+  Oracle endpoint and refuse cross-application work before making an Oracle
+  call. Active-target concurrency is isolated per application.
+- Automation schedules now retain the registered application identity. Browser
+  reads and mutations are application-scoped, agent-created schedules inherit
+  their conversation application, due-work polling is restricted to the
+  worker's exact Oracle environment/application, and submitted executions carry
+  the schedule application into the durable queue.
+- Temporary uploads are now owned by both the authenticated platform session
+  and its active registered application. Resolution and terminal cleanup require
+  the same ownership tuple, while logout safely clears every upload owned by
+  that session. Queued work already retains its application identity.
+- Reports and remaining product-owned catalogs are still deployment-bound and
+  must receive the same ownership boundary before public workspace switching is
+  enabled.
 
 The FCCS read contract follows Oracle's supported public REST resources:
 

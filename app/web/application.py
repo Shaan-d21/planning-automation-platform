@@ -209,6 +209,14 @@ def create_app(
         logger=LOGGER.getChild("environment_configuration"),
     )
     resolved_settings = environment_configuration.resolve_startup_settings()
+    application_workspaces = ApplicationWorkspaceService(
+        resolved_settings.database_target
+    )
+    application_workspaces.synchronize(environment_configuration.get())
+    deployment_workspace = application_workspaces.find_registered(
+        resolved_settings.epm_base_url,
+        resolved_settings.application_name,
+    )
     business_process = environment_configuration.active_business_process(
         application_name=resolved_settings.application_name
     )
@@ -259,6 +267,11 @@ def create_app(
         ),
         environment_url=resolved_settings.epm_base_url,
         application_name=resolved_settings.application_name,
+        application_id=(
+            deployment_workspace.application_id
+            if deployment_workspace is not None
+            else None
+        ),
         logger=LOGGER.getChild("automation_schedule_coordinator"),
     )
     automation_schedule_manager = AutomationScheduleManager(
@@ -329,12 +342,7 @@ def create_app(
         resolved_settings,
         logger=LOGGER.getChild("environment_configuration"),
     )
-    app.state.application_workspaces = ApplicationWorkspaceService(
-        resolved_settings.database_target
-    )
-    app.state.application_workspaces.synchronize(
-        app.state.environment_configuration.get()
-    )
+    app.state.application_workspaces = application_workspaces
     app.state.application_contexts = RuntimeApplicationContextResolver(
         resolved_settings,
         workspaces=app.state.application_workspaces,
@@ -879,9 +887,11 @@ def create_app(
         require_api_session(request)
         try:
             environment_key = _schedule_environment(request).key
+            application_id = _schedule_application_id(request)
             schedules = (
                 request.app.state.automation_schedule_service.list_schedules(
-                    environment_key=environment_key
+                    environment_key=environment_key,
+                    application_id=application_id,
                 )
             )
         except EPMError as exc:
@@ -900,7 +910,10 @@ def create_app(
         try:
             preview = await run_in_threadpool(
                 request.app.state.automation_schedule_coordinator.preview,
-                payload.to_domain(_schedule_environment(request).key),
+                payload.to_domain(
+                    _schedule_environment(request).key,
+                    application_id=_schedule_application_id(request),
+                ),
             )
         except EPMError as exc:
             return _schedule_error("Schedule could not be validated.", exc)
@@ -926,7 +939,10 @@ def create_app(
         try:
             schedule = await run_in_threadpool(
                 request.app.state.automation_schedule_coordinator.create,
-                payload.to_domain(_schedule_environment(request).key),
+                payload.to_domain(
+                    _schedule_environment(request).key,
+                    application_id=_schedule_application_id(request),
+                ),
             )
         except EPMError as exc:
             return _schedule_error("Schedule could not be created.", exc)
@@ -948,14 +964,18 @@ def create_app(
         require_api_session(request)
         try:
             existing = request.app.state.automation_schedule_service.get(
-                schedule_id
+                schedule_id,
+                application_id=_schedule_application_id(request),
             )
             if existing.environment_key != _schedule_environment(request).key:
                 raise ConfigurationError("Schedule was not found.")
             schedule = await run_in_threadpool(
                 request.app.state.automation_schedule_coordinator.update,
                 schedule_id,
-                payload.to_domain(_schedule_environment(request).key),
+                payload.to_domain(
+                    _schedule_environment(request).key,
+                    application_id=_schedule_application_id(request),
+                ),
             )
         except EPMError as exc:
             return _schedule_error("Schedule could not be updated.", exc)
@@ -974,7 +994,8 @@ def create_app(
         require_api_session(request)
         try:
             existing = request.app.state.automation_schedule_service.get(
-                schedule_id
+                schedule_id,
+                application_id=_schedule_application_id(request),
             )
             if existing.environment_key != _schedule_environment(request).key:
                 raise ConfigurationError("Schedule was not found.")
@@ -982,6 +1003,7 @@ def create_app(
                 request.app.state.automation_schedule_coordinator.set_enabled,
                 schedule_id,
                 payload.enabled,
+                application_id=_schedule_application_id(request),
             )
         except EPMError as exc:
             return _schedule_error("Schedule status could not be changed.", exc)
@@ -997,12 +1019,14 @@ def create_app(
         require_api_session(request)
         try:
             schedule = request.app.state.automation_schedule_service.get(
-                schedule_id
+                schedule_id,
+                application_id=_schedule_application_id(request),
             )
             if schedule.environment_key != _schedule_environment(request).key:
                 raise ConfigurationError("Schedule was not found.")
             runs = request.app.state.automation_schedule_service.list_runs(
                 schedule_id,
+                application_id=_schedule_application_id(request),
                 limit=100,
             )
         except EPMError as exc:
@@ -1027,6 +1051,7 @@ def create_app(
                 request.app.state.automation_schedule_service
                 .list_run_evidence(
                     _schedule_environment(request).key,
+                    application_id=_schedule_application_id(request),
                     schedule_id=schedule_id,
                     status=status,
                     scheduled_from=scheduled_from,
@@ -1057,13 +1082,15 @@ def create_app(
         require_api_session(request)
         try:
             schedule = request.app.state.automation_schedule_service.get(
-                schedule_id
+                schedule_id,
+                application_id=_schedule_application_id(request),
             )
             if schedule.environment_key != _schedule_environment(request).key:
                 raise ConfigurationError("Schedule was not found.")
             await run_in_threadpool(
                 request.app.state.automation_schedule_service.archive,
                 schedule_id,
+                application_id=_schedule_application_id(request),
             )
         except EPMError as exc:
             return _schedule_error("Schedule could not be deleted.", exc)
@@ -1178,8 +1205,11 @@ def create_app(
         require_api_session(request)
         user = _current_user(request)
         assert user is not None
+        application_context = current_application_context(request, user)
         conversations = await run_in_threadpool(
-            request.app.state.agent_service.list_conversations, user
+            request.app.state.agent_service.list_conversations,
+            user,
+            application_id=application_context.application_id,
         )
         return {
             "status": "success",
@@ -1191,8 +1221,11 @@ def create_app(
         require_api_session(request)
         user = _current_user(request)
         assert user is not None
+        application_context = current_application_context(request, user)
         conversation = await run_in_threadpool(
-            request.app.state.agent_service.create_conversation, user
+            request.app.state.agent_service.create_conversation,
+            user,
+            application_id=application_context.application_id,
         )
         return {"status": "success", "conversation": asdict(conversation)}
 
@@ -1341,6 +1374,7 @@ def create_app(
         payload: AgentApprovalDecisionRequest,
     ):
         owner = require_api_session(request)
+        application_id = _active_application_id(request)
         user = _current_user(request)
         assert user is not None
         upload_tokens: tuple[str, ...] = ()
@@ -1414,6 +1448,7 @@ def create_app(
                             str(key): request.app.state.upload_store.resolve(
                                 str(token),
                                 owner=owner,
+                                application_id=application_id,
                             )
                             for key, token in raw_uploads.items()
                         }
@@ -1440,7 +1475,9 @@ def create_app(
                 operation_cleanup=(
                     (
                         lambda: request.app.state.upload_store.delete_many(
-                            upload_tokens
+                            upload_tokens,
+                            owner=owner,
+                            application_id=application_id,
                         )
                     )
                     if upload_tokens and payload.decision == "approve"
@@ -1449,10 +1486,18 @@ def create_app(
             )
         except AgentError as exc:
             if upload_tokens:
-                request.app.state.upload_store.delete_many(upload_tokens)
+                request.app.state.upload_store.delete_many(
+                    upload_tokens,
+                    owner=owner,
+                    application_id=application_id,
+                )
             return _agent_error(exc)
         if upload_tokens and payload.decision == "reject":
-            request.app.state.upload_store.delete_many(upload_tokens)
+            request.app.state.upload_store.delete_many(
+                upload_tokens,
+                owner=owner,
+                application_id=application_id,
+            )
         return {
             "status": "success",
             "message": asdict(result["message"]),
@@ -2209,10 +2254,12 @@ def create_app(
         filename: str,
     ):
         owner = require_api_session(request)
+        application_id = _active_application_id(request)
         try:
             receipt = await request.app.state.upload_store.save(
                 request,
                 owner=owner,
+                application_id=application_id,
                 filename=filename,
             )
         except ConfigurationError as exc:
@@ -2229,6 +2276,7 @@ def create_app(
         payload: PlanningProcessRunRequest,
     ):
         owner = require_api_session(request)
+        application_id = _active_application_id(request)
         service = request.app.state.process_service
         upload_tokens = tuple(payload.pipeline_uploads.values())
         submitted = False
@@ -2242,6 +2290,7 @@ def create_app(
                 key: request.app.state.upload_store.resolve(
                     token,
                     owner=owner,
+                    application_id=application_id,
                 )
                 for key, token in payload.pipeline_uploads.items()
             }
@@ -2257,7 +2306,9 @@ def create_app(
             execution = request.app.state.execution_manager.submit(
                 process_input,
                 cleanup=lambda: request.app.state.upload_store.delete_many(
-                    upload_tokens
+                    upload_tokens,
+                    owner=owner,
+                    application_id=application_id,
                 ),
                 actor=_request_actor(request),
             )
@@ -2276,7 +2327,11 @@ def create_app(
             )
         finally:
             if not submitted:
-                request.app.state.upload_store.delete_many(upload_tokens)
+                request.app.state.upload_store.delete_many(
+                    upload_tokens,
+                    owner=owner,
+                    application_id=application_id,
+                )
         return JSONResponse(
             status_code=202,
             content={
@@ -3236,6 +3291,7 @@ def create_app(
         payload: PipelineRunProfileExecutionRequest,
     ):
         owner = require_api_session(request)
+        application_id = _active_application_id(request)
         designer = request.app.state.process_designer
         upload_tokens = tuple(payload.uploads.values())
         submitted = False
@@ -3270,6 +3326,7 @@ def create_app(
                 key: request.app.state.upload_store.resolve(
                     token,
                     owner=owner,
+                    application_id=application_id,
                 )
                 for key, token in payload.uploads.items()
             }
@@ -3290,7 +3347,9 @@ def create_app(
             execution = request.app.state.execution_manager.submit(
                 process_input,
                 cleanup=lambda: request.app.state.upload_store.delete_many(
-                    upload_tokens
+                    upload_tokens,
+                    owner=owner,
+                    application_id=application_id,
                 ),
                 actor=_request_actor(request),
             )
@@ -3306,7 +3365,11 @@ def create_app(
             )
         finally:
             if not submitted:
-                request.app.state.upload_store.delete_many(upload_tokens)
+                request.app.state.upload_store.delete_many(
+                    upload_tokens,
+                    owner=owner,
+                    application_id=application_id,
+                )
         return JSONResponse(
             status_code=202,
             content={
@@ -3354,6 +3417,7 @@ def create_app(
         payload: PipelineRunRequest,
     ):
         owner = require_api_session(request)
+        application_id = _active_application_id(request)
         upload_tokens = tuple(payload.uploads.values())
         submitted = False
         try:
@@ -3370,6 +3434,7 @@ def create_app(
                 key: request.app.state.upload_store.resolve(
                     token,
                     owner=owner,
+                    application_id=application_id,
                 )
                 for key, token in payload.uploads.items()
             }
@@ -3381,7 +3446,9 @@ def create_app(
             execution = request.app.state.operation_manager.submit(
                 payload.to_domain(upload_paths=upload_paths),
                 cleanup=lambda: request.app.state.upload_store.delete_many(
-                    upload_tokens
+                    upload_tokens,
+                    owner=owner,
+                    application_id=application_id,
                 ),
                 actor=_request_actor(request),
                 on_queued=task_link,
@@ -3391,7 +3458,11 @@ def create_app(
             return _operation_start_error(exc)
         finally:
             if not submitted:
-                request.app.state.upload_store.delete_many(upload_tokens)
+                request.app.state.upload_store.delete_many(
+                    upload_tokens,
+                    owner=owner,
+                    application_id=application_id,
+                )
         return _operation_accepted(
             execution.execution_id,
             planning_task_id=payload.planning_task_id,
@@ -3403,6 +3474,7 @@ def create_app(
         payload: DataIntegrationRunRequest,
     ):
         owner = require_api_session(request)
+        application_id = _active_application_id(request)
         upload_tokens = (
             (payload.upload_token,) if payload.upload_token else ()
         )
@@ -3421,6 +3493,7 @@ def create_app(
                 request.app.state.upload_store.resolve(
                     payload.upload_token,
                     owner=owner,
+                    application_id=application_id,
                 )
                 if payload.upload_token
                 else None
@@ -3437,7 +3510,9 @@ def create_app(
             execution = request.app.state.operation_manager.submit(
                 payload.to_domain(upload_path=upload_path),
                 cleanup=lambda: request.app.state.upload_store.delete_many(
-                    upload_tokens
+                    upload_tokens,
+                    owner=owner,
+                    application_id=application_id,
                 ),
                 actor=_request_actor(request),
                 on_queued=task_link,
@@ -3447,7 +3522,11 @@ def create_app(
             return _operation_start_error(exc)
         finally:
             if not submitted:
-                request.app.state.upload_store.delete_many(upload_tokens)
+                request.app.state.upload_store.delete_many(
+                    upload_tokens,
+                    owner=owner,
+                    application_id=application_id,
+                )
         return _operation_accepted(
             execution.execution_id,
             planning_task_id=payload.planning_task_id,
@@ -3459,6 +3538,7 @@ def create_app(
         payload: MetadataImportRunRequest,
     ):
         owner = require_api_session(request)
+        application_id = _active_application_id(request)
         upload_tokens = (
             (payload.upload_token,) if payload.upload_token else ()
         )
@@ -3492,6 +3572,7 @@ def create_app(
                 request.app.state.upload_store.resolve(
                     payload.upload_token,
                     owner=owner,
+                    application_id=application_id,
                 )
                 if payload.upload_token
                 else None
@@ -3506,7 +3587,9 @@ def create_app(
             execution = request.app.state.operation_manager.submit(
                 payload.to_domain(upload_path=upload_path),
                 cleanup=lambda: request.app.state.upload_store.delete_many(
-                    upload_tokens
+                    upload_tokens,
+                    owner=owner,
+                    application_id=application_id,
                 ),
                 actor=_request_actor(request),
                 on_queued=task_link,
@@ -3516,7 +3599,11 @@ def create_app(
             return _operation_start_error(exc)
         finally:
             if not submitted:
-                request.app.state.upload_store.delete_many(upload_tokens)
+                request.app.state.upload_store.delete_many(
+                    upload_tokens,
+                    owner=owner,
+                    application_id=application_id,
+                )
         return _operation_accepted(
             execution.execution_id,
             planning_task_id=payload.planning_task_id,
@@ -3528,6 +3615,7 @@ def create_app(
         payload: DataImportRunRequest,
     ):
         owner = require_api_session(request)
+        application_id = _active_application_id(request)
         upload_tokens = (
             (payload.upload_token,) if payload.upload_token else ()
         )
@@ -3551,6 +3639,7 @@ def create_app(
                 request.app.state.upload_store.resolve(
                     payload.upload_token,
                     owner=owner,
+                    application_id=application_id,
                 )
                 if payload.upload_token
                 else None
@@ -3567,7 +3656,9 @@ def create_app(
             execution = request.app.state.operation_manager.submit(
                 payload.to_domain(upload_path=upload_path),
                 cleanup=lambda: request.app.state.upload_store.delete_many(
-                    upload_tokens
+                    upload_tokens,
+                    owner=owner,
+                    application_id=application_id,
                 ),
                 actor=_request_actor(request),
                 on_queued=task_link,
@@ -3577,7 +3668,11 @@ def create_app(
             return _operation_start_error(exc)
         finally:
             if not submitted:
-                request.app.state.upload_store.delete_many(upload_tokens)
+                request.app.state.upload_store.delete_many(
+                    upload_tokens,
+                    owner=owner,
+                    application_id=application_id,
+                )
         return _operation_accepted(
             execution.execution_id,
             planning_task_id=payload.planning_task_id,
@@ -3757,6 +3852,7 @@ def create_app(
         payload: StandaloneFlowRecoveryRunRequest,
     ):
         owner = require_api_session(request)
+        application_id = _active_application_id(request)
         _require_operation_execution_access(request, execution_id)
         user = _current_user(request)
         if user is None or not user.has_permission(
@@ -3776,6 +3872,7 @@ def create_app(
                 key: request.app.state.upload_store.resolve(
                     token,
                     owner=owner,
+                    application_id=application_id,
                 )
                 for key, token in payload.replacement_uploads.items()
             }
@@ -3788,7 +3885,9 @@ def create_app(
             execution = request.app.state.operation_manager.submit_flow(
                 recovered,
                 cleanup=lambda: request.app.state.upload_store.delete_many(
-                    upload_tokens
+                    upload_tokens,
+                    owner=owner,
+                    application_id=application_id,
                 ),
                 actor=_request_actor(request),
             )
@@ -3797,7 +3896,11 @@ def create_app(
             return _operation_start_error(exc)
         finally:
             if upload_tokens and not submitted:
-                request.app.state.upload_store.delete_many(upload_tokens)
+                request.app.state.upload_store.delete_many(
+                    upload_tokens,
+                    owner=owner,
+                    application_id=application_id,
+                )
         return JSONResponse(
             status_code=202,
             content={
@@ -4223,11 +4326,23 @@ def _operation_start_error(exc: EPMError) -> JSONResponse:
 
 
 def _schedule_environment(request: Request) -> OracleEnvironment:
-    settings = request.app.state.settings
+    context = current_application_context(request, _current_user(request))
     return OracleEnvironment.from_settings(
-        settings.epm_base_url,
-        settings.application_name,
+        context.workspace.environment_base_url,
+        context.application_name,
     )
+
+
+def _schedule_application_id(request: Request) -> int:
+    return _active_application_id(request)
+
+
+def _active_application_id(request: Request) -> int:
+    """Return the authorized application owning request-local artifacts."""
+    return current_application_context(
+        request,
+        _current_user(request),
+    ).application_id
 
 
 def _schedule_payload(schedule: AutomationSchedule) -> dict[str, object]:

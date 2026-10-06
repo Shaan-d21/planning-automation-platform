@@ -344,16 +344,58 @@ class AgentApplicationService:
             ),
         }
 
-    def list_conversations(self, user: UserAccount):
+    def list_conversations(
+        self,
+        user: UserAccount,
+        *,
+        application_id: int | None = None,
+    ):
         self._require_agent_use(user)
-        return self._repository.list_conversations(user.user_id)
+        return self._repository.list_conversations(
+            user.user_id,
+            application_id=application_id,
+        )
 
-    def create_conversation(self, user: UserAccount):
+    def create_conversation(
+        self,
+        user: UserAccount,
+        *,
+        application_id: int | None = None,
+    ):
         self._require_agent_use(user)
         return self._repository.create_conversation(
             user_id=user.user_id,
             provider=self._settings.agent_provider,
             model=self._settings.agent_model,
+            application_id=application_id,
+        )
+
+    def require_conversation_application(
+        self,
+        conversation_id: str,
+        user: UserAccount,
+        *,
+        application_id: int,
+    ) -> None:
+        self._require_agent_use(user)
+        self._repository.require_conversation_application(
+            conversation_id,
+            user.user_id,
+            application_id,
+        )
+
+    def require_action_draft_application(
+        self,
+        draft_id: str,
+        user: UserAccount,
+        *,
+        application_id: int,
+    ) -> None:
+        self._require_agent_use(user)
+        self._repository.require_action_draft_application(
+            draft_id,
+            user.user_id,
+            application_id,
         )
 
     def get_messages(self, conversation_id: str, user: UserAccount):
@@ -1933,9 +1975,18 @@ class AgentApplicationService:
             elif direct_payload is not None and str(
                 direct_payload.get("target_code") or ""
             ).casefold() in PIPELINE_SCHEDULE_ACTIONS:
+                conversation = self._repository.get_conversation(
+                    conversation_id,
+                    user.user_id,
+                )
                 schedule = self._apply_approved_schedule_action(
                     direct_payload,
                     user,
+                    application_id=(
+                        conversation.application_id
+                        if conversation is not None
+                        else None
+                    ),
                 )
                 executed_operation = True
             elif direct_payload is not None:
@@ -2392,8 +2443,19 @@ class AgentApplicationService:
         if decision.execution_id and decision.execution_id.startswith("schedule:"):
             try:
                 schedule_id = int(decision.execution_id.split(":", 1)[1])
+                conversation = self._repository.get_conversation(
+                    decision.conversation_id,
+                    user.user_id,
+                )
                 item = (
-                    self._schedule_service.get(schedule_id)
+                    self._schedule_service.get(
+                        schedule_id,
+                        application_id=(
+                            conversation.application_id
+                            if conversation is not None
+                            else None
+                        ),
+                    )
                     if self._schedule_service is not None
                     else None
                 )
@@ -2543,6 +2605,8 @@ class AgentApplicationService:
         self,
         payload: dict[str, object],
         user: UserAccount,
+        *,
+        application_id: int | None,
     ) -> dict[str, object]:
         """Apply one explicitly approved change through the shared scheduler."""
         if not user.has_permission(Permission.SCHEDULE_MANAGE):
@@ -2600,6 +2664,7 @@ class AgentApplicationService:
                         str(input_values.get("misfire_policy") or "RUN_ONCE")
                     ),
                     enabled=bool(input_values.get("enabled", True)),
+                    application_id=application_id,
                 )
                 schedule = self._schedule_coordinator.create(schedule_input)
             else:
@@ -2610,7 +2675,10 @@ class AgentApplicationService:
                         "The selected automation schedule is no longer available."
                     )
                 schedule_id = int(canonical.split(":", 1)[1])
-                schedule = self._schedule_service.get(schedule_id)
+                schedule = self._schedule_service.get(
+                    schedule_id,
+                    application_id=application_id,
+                )
                 if schedule.environment_key != self._schedule_environment_key:
                     raise AgentConversationError(
                         "The selected automation schedule belongs to another environment."
@@ -2624,6 +2692,7 @@ class AgentApplicationService:
                 schedule = self._schedule_coordinator.set_enabled(
                     schedule_id,
                     action == PIPELINE_SCHEDULE_RESUME,
+                    application_id=application_id,
                 )
         except AgentConversationError:
             raise

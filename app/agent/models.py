@@ -32,6 +32,7 @@ class AgentConversation:
 
     conversation_id: str
     user_id: int
+    application_id: int | None
     title: str
     provider: str
     model: str

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from app.agent.repository import SQLAgentRepository
 from app.config.settings import Settings
 from app.services.access_control_service import AccessControlService
 from app.services.application_workspace_service import ApplicationWorkspaceService
@@ -15,7 +16,7 @@ from app.services.environment_configuration_service import (
 )
 from app.services.session_security_service import ClientContext, SessionSecurityService
 from app.products.runtime_context import RuntimeApplicationContextResolver
-from app.utils.exceptions import ConfigurationError
+from app.utils.exceptions import AgentConversationError, ConfigurationError
 
 
 def _settings(database: Path) -> Settings:
@@ -173,6 +174,41 @@ def test_registered_applications_are_isolated_by_membership_and_session(
             "planner-session",
             user_id=planner.user_id,
             application_id=close.application_id,
+        )
+
+    conversations = SQLAgentRepository(settings.database_target)
+    planning_conversation = conversations.create_conversation(
+        user_id=administrator.user_id,
+        application_id=admin_default.application_id,
+        provider="gemini",
+        model="test-model",
+    )
+    fccs_conversation = conversations.create_conversation(
+        user_id=administrator.user_id,
+        application_id=close.application_id,
+        provider="gemini",
+        model="test-model",
+    )
+
+    assert [
+        item.conversation_id
+        for item in conversations.list_conversations(
+            administrator.user_id,
+            application_id=admin_default.application_id,
+        )
+    ] == [planning_conversation.conversation_id]
+    assert [
+        item.conversation_id
+        for item in conversations.list_conversations(
+            administrator.user_id,
+            application_id=close.application_id,
+        )
+    ] == [fccs_conversation.conversation_id]
+    with pytest.raises(AgentConversationError, match="not found"):
+        conversations.require_conversation_application(
+            planning_conversation.conversation_id,
+            administrator.user_id,
+            close.application_id,
         )
 
 

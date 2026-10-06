@@ -31,6 +31,8 @@ from app.infrastructure.database.schema import (
     agent_messages,
     agent_tool_activities,
     agent_turns,
+    oracle_applications,
+    platform_user_applications,
 )
 from app.utils.exceptions import AgentConversationError
 
@@ -48,11 +50,15 @@ class SQLAgentRepository:
         provider: str,
         model: str,
         title: str = "New conversation",
+        application_id: int | None = None,
     ) -> AgentConversation:
+        if application_id is not None:
+            self._require_application_membership(user_id, application_id)
         now = datetime.now(UTC)
         conversation = AgentConversation(
             conversation_id=str(uuid4()),
             user_id=user_id,
+            application_id=application_id,
             title=title,
             provider=provider,
             model=model,
@@ -64,6 +70,7 @@ class SQLAgentRepository:
                 insert(agent_conversations).values(
                     conversation_id=conversation.conversation_id,
                     user_id=user_id,
+                    application_id=application_id,
                     title=title,
                     provider=provider,
                     model=model,
@@ -73,11 +80,21 @@ class SQLAgentRepository:
             )
         return conversation
 
-    def list_conversations(self, user_id: int) -> tuple[AgentConversation, ...]:
+    def list_conversations(
+        self,
+        user_id: int,
+        *,
+        application_id: int | None = None,
+    ) -> tuple[AgentConversation, ...]:
+        conditions = [agent_conversations.c.user_id == user_id]
+        if application_id is not None:
+            conditions.append(
+                agent_conversations.c.application_id == application_id
+            )
         with self._database.connect() as connection:
             rows = connection.execute(
                 select(agent_conversations)
-                .where(agent_conversations.c.user_id == user_id)
+                .where(*conditions)
                 .order_by(agent_conversations.c.updated_at.desc())
             ).mappings().all()
         return tuple(self._conversation(row) for row in rows)
@@ -86,13 +103,20 @@ class SQLAgentRepository:
         self,
         conversation_id: str,
         user_id: int,
+        *,
+        application_id: int | None = None,
     ) -> AgentConversation | None:
+        conditions = [
+            agent_conversations.c.conversation_id == conversation_id,
+            agent_conversations.c.user_id == user_id,
+        ]
+        if application_id is not None:
+            conditions.append(
+                agent_conversations.c.application_id == application_id
+            )
         with self._database.connect() as connection:
             row = connection.execute(
-                select(agent_conversations).where(
-                    agent_conversations.c.conversation_id == conversation_id,
-                    agent_conversations.c.user_id == user_id,
-                )
+                select(agent_conversations).where(*conditions)
             ).mappings().one_or_none()
         return self._conversation(row) if row is not None else None
 
@@ -593,7 +617,17 @@ class SQLAgentRepository:
         self,
         draft_id: str,
         user_id: int,
+        *,
+        application_id: int | None = None,
     ) -> AgentActionDraft:
+        conditions = [
+            agent_action_drafts.c.draft_id == str(draft_id).strip(),
+            agent_conversations.c.user_id == user_id,
+        ]
+        if application_id is not None:
+            conditions.append(
+                agent_conversations.c.application_id == application_id
+            )
         with self._database.connect() as connection:
             row = connection.execute(
                 select(agent_action_drafts)
@@ -602,10 +636,7 @@ class SQLAgentRepository:
                     agent_conversations.c.conversation_id
                     == agent_action_drafts.c.conversation_id,
                 )
-                .where(
-                    agent_action_drafts.c.draft_id == str(draft_id).strip(),
-                    agent_conversations.c.user_id == user_id,
-                )
+                .where(*conditions)
             ).mappings().one_or_none()
         if row is None:
             raise AgentConversationError("Agent action draft was not found.")
@@ -932,11 +963,72 @@ class SQLAgentRepository:
             raise AgentConversationError("Agent conversation was not found.")
         return conversation
 
+    def require_conversation_application(
+        self,
+        conversation_id: str,
+        user_id: int,
+        application_id: int,
+    ) -> AgentConversation:
+        """Fail closed when a conversation belongs to another application."""
+
+        conversation = self.get_conversation(
+            conversation_id,
+            user_id,
+            application_id=application_id,
+        )
+        if conversation is None:
+            raise AgentConversationError("Agent conversation was not found.")
+        return conversation
+
+    def require_action_draft_application(
+        self,
+        draft_id: str,
+        user_id: int,
+        application_id: int,
+    ) -> AgentActionDraft:
+        """Fail closed when a draft belongs to another application."""
+
+        return self.get_action_draft(
+            draft_id,
+            user_id,
+            application_id=application_id,
+        )
+
+    def _require_application_membership(
+        self,
+        user_id: int,
+        application_id: int,
+    ) -> None:
+        with self._database.connect() as connection:
+            allowed = connection.execute(
+                select(platform_user_applications.c.user_id)
+                .join(
+                    oracle_applications,
+                    oracle_applications.c.application_id
+                    == platform_user_applications.c.application_id,
+                )
+                .where(
+                    platform_user_applications.c.user_id == user_id,
+                    platform_user_applications.c.application_id
+                    == application_id,
+                    oracle_applications.c.is_active.is_(True),
+                )
+            ).scalar_one_or_none()
+        if allowed is None:
+            raise AgentConversationError(
+                "The active Oracle application is not assigned to this user."
+            )
+
     @staticmethod
     def _conversation(row) -> AgentConversation:
         return AgentConversation(
             conversation_id=str(row["conversation_id"]),
             user_id=int(row["user_id"]),
+            application_id=(
+                int(row["application_id"])
+                if row["application_id"] is not None
+                else None
+            ),
             title=str(row["title"]),
             provider=str(row["provider"]),
             model=str(row["model"]),

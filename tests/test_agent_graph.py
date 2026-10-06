@@ -3247,6 +3247,243 @@ def test_multi_step_intent_includes_pipeline_and_variable_operations() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "instruction",
+    (
+        "load new Product dimension then run Business Rule Calculate Revenue",
+        "import Account members then run the aggregation rule",
+        "add new Entity hierarchy then refresh the cube",
+    ),
+)
+def test_multi_step_intent_treats_dimension_member_and_hierarchy_loads_as_metadata(
+    instruction: str,
+) -> None:
+    steps = AgentGraphOrchestrator._requested_multi_step_codes(instruction)
+
+    assert steps[0] == "metadata-import"
+
+
+def test_month_close_activity_list_preserves_exact_live_operations_in_order() -> None:
+    class ActivityCatalogGateway:
+        @staticmethod
+        def artifact_catalog(operation_code):
+            return {
+                "substitution-variables": (("CurMonth", "CurMonth"),),
+                "metadata-import": (
+                    (
+                        "Import New Product Dimensions",
+                        "Import New Product Dimensions",
+                    ),
+                ),
+                "data-integrations": (
+                    ("Load Production Units", "Load Production Units"),
+                    ("Load Product Price", "Load Product Price"),
+                ),
+                "business-rules": (
+                    ("Product Revenue Calculation", "Product Revenue Calculation"),
+                ),
+            }.get(operation_code, ())
+
+    graph = object.__new__(AgentGraphOrchestrator)
+    graph._gateway = ActivityCatalogGateway()
+    graph._logger = __import__("logging").getLogger(__name__)
+
+    steps = graph._requested_multi_step_codes_with_artifacts(
+        "update substitution variable CurMonth to Sep, import new product "
+        "dimensions, load production units then load product price then run "
+        "product revenue calculation rule"
+    )
+
+    assert steps == (
+        "substitution-variables",
+        "metadata-import",
+        "data-integrations",
+        "data-integrations",
+        "business-rules",
+    )
+
+
+def test_month_close_plan_preserves_values_and_artifact_intent_per_step() -> None:
+    class ActivityCatalogGateway:
+        @staticmethod
+        def artifact_catalog(operation_code):
+            return {
+                "substitution-variables": (("CurMonth", "CurMonth"),),
+                "metadata-import": (("Product Dimension Load", "Product Dimension Load"),),
+                "data-integrations": (
+                    ("Production Units", "Production Units"),
+                    ("Product Price", "Product Price"),
+                ),
+                "business-rules": (
+                    ("Product Revenue Calculation", "Product Revenue Calculation"),
+                ),
+            }.get(operation_code, ())
+
+    activities = [
+        "update substitution variable CurMonth to Sep",
+        "import new product dimensions",
+        "load production units",
+        "load product price",
+        "run product revenue calculation rule",
+    ]
+    graph = object.__new__(AgentGraphOrchestrator)
+    graph._gateway = ActivityCatalogGateway()
+    graph._logger = __import__("logging").getLogger(__name__)
+
+    call = graph._deterministic_task_plan_call(
+        {
+            "allowed_tool_names": ["plan_multi_step_request"],
+            "task_context": {
+                "intent": "MONTH_CLOSE",
+                "phase": "READY_FOR_PLAN",
+                "parameters": {"period": "Sep", "activities": activities},
+                "objective": "Start the September activities",
+            },
+        }
+    )
+
+    assert call is not None
+    assert call.arguments["requested_steps"] == [
+        "substitution-variables",
+        "metadata-import",
+        "data-integrations",
+        "data-integrations",
+        "business-rules",
+    ]
+    assert call.arguments["step_instructions"] == activities
+
+
+def test_standalone_step_prefill_uses_only_its_own_instruction() -> None:
+    graph = object.__new__(AgentGraphOrchestrator)
+
+    variable = graph._standalone_guided_input_prefill(
+        {"context": {"action": "UPDATE"}},
+        operation_code="substitution-variables",
+        artifact_name="CurMonth",
+        instruction="update substitution variable CurMonth to Sep",
+    )
+    integration = graph._standalone_guided_input_prefill(
+        {"context": {}},
+        operation_code="data-integrations",
+        artifact_name="Load Product Units",
+        instruction="load product units from Jan to Mar for FY27",
+    )
+    metadata = graph._standalone_guided_input_prefill(
+        {"context": {}},
+        operation_code="metadata-import",
+        artifact_name="Product Dimension Load",
+        instruction="import new Product dimension",
+    )
+
+    assert variable["context"]["prefill"] == {"new_value": "Sep"}
+    assert integration["context"]["prefill"] == {
+        "year": "FY27",
+        "start_month": "Jan",
+        "end_month": "Mar",
+    }
+    assert metadata["context"]["task_context"] == {
+        "dimension": "Product"
+    }
+
+
+def test_step_alignment_never_duplicates_complete_request_when_one_step_is_missing() -> None:
+    class ActivityCatalogGateway:
+        @staticmethod
+        def artifact_catalog(operation_code):
+            return {
+                "substitution-variables": (("CurMonth", "CurMonth"),),
+                "metadata-import": (("Product Dimensions", "Product Dimensions"),),
+                "data-integrations": (
+                    ("Production Units", "Production Units"),
+                    ("Product Price", "Product Price"),
+                ),
+                "business-rules": (
+                    ("Product Revenue Calculation", "Product Revenue Calculation"),
+                ),
+            }.get(operation_code, ())
+
+    request = (
+        "update substitution variable CurMonth to Sep then import new product "
+        "dimensions then load production units then load product price then "
+        "run product revenue calculation"
+    )
+    graph = object.__new__(AgentGraphOrchestrator)
+    graph._gateway = ActivityCatalogGateway()
+    graph._logger = __import__("logging").getLogger(__name__)
+
+    instructions = graph._step_instructions_for_codes(
+        request,
+        (
+            "substitution-variables",
+            "metadata-import",
+            "data-integrations",
+            "business-rules",
+        ),
+        explicit_instructions=(request,),
+    )
+
+    assert instructions == (
+        "update substitution variable CurMonth to Sep",
+        "import new product dimensions",
+        "load production units",
+        "run product revenue calculation",
+    )
+    assert len(set(instructions)) == 4
+
+
+def test_ui_standalone_continuation_keeps_clean_step_values_and_artifacts() -> None:
+    class ActivityCatalogGateway:
+        @staticmethod
+        def artifact_catalog(operation_code):
+            return {
+                "substitution-variables": (("CurMonth", "CurMonth"),),
+                "metadata-import": (("Product Dimensions", "Product Dimensions"),),
+                "data-integrations": (
+                    ("Production Units", "Production Units"),
+                    ("Product Price", "Product Price"),
+                ),
+                "business-rules": (
+                    ("Product Revenue Calculation", "Product Revenue Calculation"),
+                ),
+            }.get(operation_code, ())
+
+    graph = object.__new__(AgentGraphOrchestrator)
+    graph._gateway = ActivityCatalogGateway()
+    graph._logger = __import__("logging").getLogger(__name__)
+    request = (
+        "Configure and execute a standalone flow without an Oracle Pipeline "
+        "for these operations: update substitution variable CurMonth to Sep "
+        "then import new product dimensions then load production units then "
+        "load product price then run product revenue calculation. Objective: "
+        "Sep Month Close"
+    )
+
+    call = graph._deterministic_standalone_flow_call(
+        {
+            "allowed_tool_names": ["prepare_standalone_flow_action"],
+            "messages": [
+                {"role": AgentMessageRole.USER.value, "content": request}
+            ],
+        }
+    )
+
+    assert call is not None
+    assert call.arguments["requested_steps"] == [
+        "substitution-variables",
+        "metadata-import",
+        "data-integrations",
+        "data-integrations",
+        "business-rules",
+    ]
+    assert call.arguments["step_instructions"] == [
+        "update substitution variable CurMonth to Sep",
+        "import new product dimensions",
+        "load production units",
+        "load product price",
+        "run product revenue calculation",
+    ]
+
+
 def test_data_integration_name_is_not_also_a_native_data_import() -> None:
     steps = AgentGraphOrchestrator._requested_multi_step_codes(
         "Run Revenue Load Data Integration."

@@ -673,9 +673,10 @@ def test_fccs_bootstrap_and_read_routes_are_product_guarded(
         application_name="Consolidation",
     )
     application_context = RuntimeApplicationContext(
-        workspace=ApplicationWorkspace(
-            application_id=2,
-            application_name="Consolidation",
+            workspace=ApplicationWorkspace(
+                application_id=2,
+                environment_base_url=fccs_settings.epm_base_url,
+                application_name="Consolidation",
             business_process=BusinessProcessType.FCCS,
             product_type="HP",
             application_type="FCCS",
@@ -1141,10 +1142,14 @@ def test_agent_action_draft_preflight_api_is_non_executing(
     client = TestClient(app)
     _login(client)
     repository = SQLiteAgentRepository(settings.workflow_database_file)
+    application_id = app.state.application_workspaces.available_for_user(
+        1
+    )[0].application_id
     conversation = repository.create_conversation(
         user_id=1,
         provider="gemini",
         model="test-model",
+        application_id=application_id,
     )
     assistant = repository.add_message(
         conversation_id=conversation.conversation_id,
@@ -1559,6 +1564,7 @@ def test_pipeline_schedule_preview_and_creation_use_automation_coordinator(
     assert submitted.target_key == "PIPE01"
     assert submitted.configuration["variables"] == {"YEAR": "FY27"}
     assert submitted.first_run_local.tzinfo is None
+    assert submitted.application_id is not None
 
 
 def test_schedule_history_returns_environment_scoped_execution_evidence(

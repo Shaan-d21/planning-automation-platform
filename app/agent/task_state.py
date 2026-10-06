@@ -210,6 +210,8 @@ class AgentTaskInterpreter:
             re.compile(
                 r"\b(?:load|import|update)\b.{0,60}\bmetadata\b|"
                 r"\bmetadata\s+(?:load|import|update)\b|"
+                r"\b(?:dimension|member|hierarchy)\s+"
+                r"(?:load|import|update)\b|"
                 r"\b(?:load|import|update)\s+(?:the\s+)?"
                 r"(?:account|entity|product)\s+metadata\b|"
                 r"\b(?:load|import|update)\s+(?:(?:the|new)\s+){0,2}"
@@ -338,13 +340,26 @@ class AgentTaskInterpreter:
         except ValueError:
             prior_intent = AgentTaskIntent.UNKNOWN
         direct_intent = cls._direct_intent(latest)
+        prior_missing = {
+            str(item).strip()
+            for item in prior.get("missing_parameters", ())
+            if str(item).strip()
+        }
+        answers_pending_activity_slot = (
+            prior_intent is AgentTaskIntent.MONTH_CLOSE
+            and "activities" in prior_missing
+            and cls._contains_activity_description(latest.casefold())
+        )
         if (
             prior_phase == AgentTaskPhase.COLLECTING_INFORMATION.value
             and prior_intent not in {
                 AgentTaskIntent.UNKNOWN,
                 AgentTaskIntent.HELP_EXPLAIN,
             }
-            and direct_intent is AgentTaskIntent.UNKNOWN
+            and (
+                direct_intent is AgentTaskIntent.UNKNOWN
+                or answers_pending_activity_slot
+            )
             and (
                 cls._is_context_reply(latest.casefold())
                 or cls._is_open_slot_reply(latest.casefold())
@@ -461,7 +476,8 @@ class AgentTaskInterpreter:
         ):
             activity_terms = re.findall(
                 r"\b(?:load|import|run|execute|calculate|allocation|refresh|"
-                r"variance|report|pipeline|integration|rule|push)\w*\b",
+                r"variance|report|pipeline|integration|rule|push|update|set|"
+                r"change|seed)\w*\b",
                 latest,
             )
             if len(activity_terms) >= 2 or (
@@ -1148,7 +1164,8 @@ class AgentTaskInterpreter:
         return bool(
             re.search(
                 r"\b(?:load|import|run|execute|calculate|allocation|refresh|"
-                r"variance|report|pipeline|integration|rule|push)\b",
+                r"variance|report|pipeline|integration|rule|push|update|set|"
+                r"change|seed)\b",
                 normalized,
             )
         )

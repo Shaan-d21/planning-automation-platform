@@ -53,6 +53,7 @@ from app.models.automation_schedule import (
 )
 from app.models.oracle_artifact import OracleArtifactType, OracleEnvironment
 from app.services.business_rule_rtp_registry import BusinessRuleRTPRegistryService
+from app.services.application_workspace_service import ApplicationWorkspaceService
 from app.services.data_integration_service import DataIntegrationService
 from app.services.data_map_service import DataMapService
 from app.services.data_service import DataService
@@ -110,6 +111,17 @@ class AgentCapabilityGateway:
             settings.epm_base_url,
             settings.application_name,
         ).key
+        schedule_workspace = ApplicationWorkspaceService(
+            settings.database_target
+        ).find_registered(
+            settings.epm_base_url,
+            settings.application_name,
+        )
+        self._schedule_application_id = (
+            schedule_workspace.application_id
+            if schedule_workspace is not None
+            else None
+        )
         self._handlers = {
             "get_environment_summary": self._environment_summary,
             "list_platform_operations": self._platform_operations,
@@ -464,6 +476,15 @@ class AgentCapabilityGateway:
                             },
                             "minItems": 2,
                         },
+                        "step_instructions": {
+                            "type": "array",
+                            "description": (
+                                "Original user instruction for each requested "
+                                "step, in the same order as requested_steps."
+                            ),
+                            "items": {"type": "string", "maxLength": 1000},
+                            "minItems": 2,
+                        },
                         "prefer_standalone": {
                             "type": "boolean",
                             "description": (
@@ -527,6 +548,16 @@ class AgentCapabilityGateway:
                                     AgentCapabilityGateway._STANDALONE_FLOW_OPERATIONS
                                 ),
                             },
+                            "minItems": 2,
+                            "maxItems": 12,
+                        },
+                        "step_instructions": {
+                            "type": "array",
+                            "description": (
+                                "Original user instruction for each requested "
+                                "step, in the same order as requested_steps."
+                            ),
+                            "items": {"type": "string", "maxLength": 1000},
                             "minItems": 2,
                             "maxItems": 12,
                         },
@@ -632,6 +663,7 @@ class AgentCapabilityGateway:
             "plan_multi_step_request": {
                 "objective",
                 "requested_steps",
+                "step_instructions",
                 "prefer_standalone",
             },
             "prepare_operation_action": {
@@ -643,6 +675,7 @@ class AgentCapabilityGateway:
             "prepare_standalone_flow_action": {
                 "objective",
                 "requested_steps",
+                "step_instructions",
                 "configured_steps",
             },
             "prepare_schedule_action": {
@@ -688,6 +721,10 @@ class AgentCapabilityGateway:
                 + ", ".join(unsupported)
                 + ". Use their governed screen or an Oracle Pipeline."
             )
+        step_instructions = self._normalize_step_instructions(
+            arguments.get("step_instructions"),
+            requested_steps,
+        )
         configured = arguments.get("configured_steps", [])
         if not isinstance(configured, list):
             raise AgentCapabilityError(
@@ -699,6 +736,7 @@ class AgentCapabilityGateway:
                 "display_name": "Standalone Planning Flow",
                 "objective": objective,
                 "requested_steps": list(requested_steps),
+                "step_instructions": list(step_instructions),
                 "configured_steps": configured,
                 "category": "Orchestration",
                 "risk_level": "Elevated",
@@ -710,6 +748,37 @@ class AgentCapabilityGateway:
                 ),
             }
         }
+
+    @staticmethod
+    def _normalize_step_instructions(
+        raw_instructions: Any,
+        requested_steps: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        """Keep user wording aligned with its operation without guessing.
+
+        Older/model-authored calls may omit this optional structure. In that
+        case the operation code is a safe fallback. When instructions are
+        supplied, their cardinality must exactly match the ordered steps so a
+        value or artifact name can never leak into a different operation.
+        """
+        if raw_instructions is None:
+            return requested_steps
+        if not isinstance(raw_instructions, list):
+            raise AgentCapabilityError(
+                "Standalone step instructions must be supplied in execution order."
+            )
+        instructions = tuple(
+            " ".join(str(item or "").split())[:1000]
+            for item in raw_instructions
+        )
+        if (
+            len(instructions) != len(requested_steps)
+            or any(not item for item in instructions)
+        ):
+            raise AgentCapabilityError(
+                "Each requested operation must have one matching step instruction."
+            )
+        return instructions
 
     def _plan_multi_step_request(
         self,
@@ -737,12 +806,17 @@ class AgentCapabilityGateway:
             raise AgentCapabilityError(
                 "A multi-step plan requires at least two available operations."
             )
+        step_instructions = self._normalize_step_instructions(
+            arguments.get("step_instructions"),
+            requested_steps,
+        )
         steps = [
             {
                 "sequence": index,
                 "code": code,
                 "display_name": definitions[code].display_name,
                 "category": definitions[code].category,
+                "instruction": step_instructions[index - 1],
             }
             for index, code in enumerate(requested_steps, start=1)
         ]
@@ -759,6 +833,7 @@ class AgentCapabilityGateway:
         catalog = self._operation_catalog.discover_registered()
         candidates: list[dict[str, Any]] = []
         inspection_errors: list[str] = []
+        matching_objective = " ".join((objective, *step_instructions))
         for pipeline in catalog.pipelines:
             try:
                 preview = self._operation_catalog.preflight_pipeline(
@@ -770,7 +845,7 @@ class AgentCapabilityGateway:
                 )
                 continue
             score, coverage = self._pipeline_match_score(
-                objective=objective,
+                objective=matching_objective,
                 requested_steps=requested_steps,
                 pipeline_code=preview.code,
                 pipeline_name=preview.display_name,
@@ -1624,7 +1699,8 @@ class AgentCapabilityGateway:
                     f"{'Active' if item.enabled else 'Paused'}",
                 )
                 for item in self._schedule_service.list_schedules(
-                    environment_key=self._schedule_environment_key
+                    environment_key=self._schedule_environment_key,
+                    application_id=self._schedule_application_id,
                 )
                 if item.target_type is AutomationTargetType.ORACLE_PIPELINE
                 and item.enabled is desired_enabled
@@ -3259,6 +3335,7 @@ class AgentCapabilityGateway:
             concurrency_policy=AutomationConcurrencyPolicy.SKIP_IF_ACTIVE,
             misfire_policy=misfire_policy,
             enabled=bool(supplied.get("enabled", True)),
+            application_id=self._schedule_application_id,
         )
         try:
             preview = self._schedule_coordinator.preview(schedule_input)

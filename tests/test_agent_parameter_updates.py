@@ -153,3 +153,37 @@ def test_non_correction_does_not_capture_an_unrelated_new_request() -> None:
         _active_context(),
         _interpreted(intent=AgentTaskIntent.UNKNOWN),
     ) is None
+
+
+def test_pending_activity_answer_is_not_misread_as_a_parameter_correction() -> None:
+    interpreted = AgentTaskUnderstanding(
+        intent=AgentTaskIntent.MONTH_CLOSE,
+        phase=AgentTaskPhase.READY_FOR_PLAN,
+        confidence=AgentTaskConfidence.HIGH_CONFIDENCE,
+        parameters={
+            "period": "Sep",
+            "activities": [
+                "update substitution variable CurMonth to Sep",
+                "load production units",
+                "run product revenue calculation rule",
+            ],
+        },
+        objective="Start September month close.",
+    )
+    prior = {
+        "task_id": "month-close-1",
+        "intent": "MONTH_CLOSE",
+        "phase": "COLLECTING_INFORMATION",
+        "objective": "Start September month close.",
+        "parameters": {"period": "Sep"},
+        "missing_parameters": ["activities"],
+    }
+
+    result = AgentParameterDeltaResolver.resolve(
+        "update substitution variable CurMonth to Sep, load production units, "
+        "then run product revenue calculation rule",
+        prior,
+        interpreted,
+    )
+
+    assert result is None

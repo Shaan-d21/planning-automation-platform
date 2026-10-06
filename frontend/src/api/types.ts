@@ -1552,6 +1552,7 @@ export interface AgentStatusResponse {
 export interface AgentConversation {
   conversation_id: string;
   user_id: number;
+  application_id: number | null;
   title: string;
   provider: string;
   model: string;

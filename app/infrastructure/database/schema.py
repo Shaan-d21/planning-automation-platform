@@ -752,6 +752,11 @@ workflow_runs = Table(
     "workflow_runs",
     metadata,
     Column("execution_id", String(64), primary_key=True),
+    Column(
+        "application_id",
+        IDENTITY_BIGINT,
+        ForeignKey("oracle_applications.application_id", ondelete="RESTRICT"),
+    ),
     Column("workflow_name", String(200), nullable=False),
     Column("status", String(20), nullable=False),
     Column("started_at", UTC_TIMESTAMP, nullable=False),
@@ -764,11 +769,21 @@ workflow_runs = Table(
 )
 Index("ix_workflow_runs_started_at", workflow_runs.c.started_at.desc())
 Index("ix_workflow_runs_status_started_at", workflow_runs.c.status, workflow_runs.c.started_at.desc())
+Index(
+    "ix_workflow_runs_application_started",
+    workflow_runs.c.application_id,
+    workflow_runs.c.started_at.desc(),
+)
 
 execution_queue = Table(
     "execution_queue",
     metadata,
     Column("execution_id", String(64), primary_key=True),
+    Column(
+        "application_id",
+        IDENTITY_BIGINT,
+        ForeignKey("oracle_applications.application_id", ondelete="RESTRICT"),
+    ),
     Column("job_type", String(20), nullable=False),
     Column("target_key", String(300), nullable=False),
     Column("payload", JSON_DOCUMENT, nullable=False),
@@ -811,6 +826,7 @@ Index(
 )
 Index(
     "uq_execution_queue_active_target",
+    func.coalesce(execution_queue.c.application_id, 0),
     execution_queue.c.job_type,
     func.lower(execution_queue.c.target_key),
     unique=True,
@@ -822,6 +838,12 @@ Index(
         execution_queue.c.status == "QUEUED",
         execution_queue.c.status == "RUNNING",
     ),
+)
+Index(
+    "ix_execution_queue_application_status",
+    execution_queue.c.application_id,
+    execution_queue.c.status,
+    execution_queue.c.created_at,
 )
 
 workflow_steps = Table(
@@ -894,6 +916,11 @@ automation_schedules = Table(
     "automation_schedules",
     metadata,
     Column("schedule_id", IDENTITY_BIGINT, primary_key=True, autoincrement=True),
+    Column(
+        "application_id",
+        IDENTITY_BIGINT,
+        ForeignKey("oracle_applications.application_id", ondelete="RESTRICT"),
+    ),
     Column("environment_key", String(64), nullable=False),
     Column("name", String(160), nullable=False),
     Column("target_type", String(32), nullable=False),
@@ -939,6 +966,12 @@ automation_schedules = Table(
         "'FAILED', 'SKIPPED')",
         name="last_outcome",
     ),
+)
+Index(
+    "ix_automation_schedules_application",
+    automation_schedules.c.application_id,
+    automation_schedules.c.is_enabled,
+    automation_schedules.c.next_run_at,
 )
 Index(
     "uq_automation_schedules_environment_name",
@@ -1430,6 +1463,11 @@ agent_conversations = Table(
         ForeignKey("platform_users.user_id", ondelete="RESTRICT"),
         nullable=False,
     ),
+    Column(
+        "application_id",
+        IDENTITY_BIGINT,
+        ForeignKey("oracle_applications.application_id", ondelete="RESTRICT"),
+    ),
     Column("title", String(160), nullable=False),
     Column("provider", String(40), nullable=False),
     Column("model", String(120), nullable=False),
@@ -1437,6 +1475,12 @@ agent_conversations = Table(
     Column("updated_at", UTC_TIMESTAMP, nullable=False),
 )
 Index("ix_agent_conversations_user_updated", agent_conversations.c.user_id, agent_conversations.c.updated_at.desc())
+Index(
+    "ix_agent_conversations_application_user_updated",
+    agent_conversations.c.application_id,
+    agent_conversations.c.user_id,
+    agent_conversations.c.updated_at.desc(),
+)
 
 agent_messages = Table(
     "agent_messages",

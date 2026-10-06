@@ -533,6 +533,10 @@ def test_multi_step_planner_resolves_one_live_oracle_pipeline(
             arguments={
                 "objective": "Load forecast data and calculate the revenue forecast.",
                 "requested_steps": ["data-import", "business-rules"],
+                "step_instructions": [
+                    "load forecast data from Jan to Mar",
+                    "run Revenue Forecast rule with Year=FY27",
+                ],
             },
         )
     )
@@ -542,6 +546,12 @@ def test_multi_step_planner_resolves_one_live_oracle_pipeline(
     assert result["pipeline"]["code"] == "PIPE01"
     assert result["pipeline"]["stages"][0]["display_name"] == "Load forecast"
     assert result["requested_steps"][0]["code"] == "data-import"
+    assert result["requested_steps"][0]["instruction"] == (
+        "load forecast data from Jan to Mar"
+    )
+    assert result["requested_steps"][1]["instruction"] == (
+        "run Revenue Forecast rule with Year=FY27"
+    )
 
 
 def test_multi_step_planner_never_chains_operations_without_pipeline_match(

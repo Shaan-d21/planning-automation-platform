@@ -156,7 +156,7 @@ def test_alembic_has_one_production_head() -> None:
     scripts = ScriptDirectory.from_config(
         Config(str(project_root / "alembic.ini"))
     )
-    assert scripts.get_heads() == ["0027_task_manager_sync"]
+    assert scripts.get_heads() == ["0029_schedule_app_scope"]
     assert all(len(revision.revision) <= 32 for revision in scripts.walk_revisions())
 
 
