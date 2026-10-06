@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import type { TaskManagerSnapshotResponse } from "../api/types";
@@ -75,6 +75,7 @@ describe("TaskManagerWorkspace", () => {
       <TaskManagerWorkspace
         data={snapshot}
         busy={false}
+        onSaveConfiguration={vi.fn()}
         onSynchronize={vi.fn()}
       />
     );
@@ -82,29 +83,36 @@ describe("TaskManagerWorkspace", () => {
     expect(screen.getByRole("heading", { name: "Task Manager", level: 1 })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "FY27 Close", level: 3 })).toBeTruthy();
     expect(screen.getAllByText("Load Actuals").length).toBeGreaterThan(0);
-    expect(screen.getByText("No source file retained")).toBeTruthy();
+    expect(screen.getByText(/source file not retained/i)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Synchronize now" })).toBeTruthy();
+    expect(screen.queryByRole("dialog")).toBeNull();
     expect(screen.queryByText("Planning cycle creation")).toBeNull();
   });
 
-  it("submits exact Oracle report configuration and parameters", async () => {
+  it("keeps report configuration in an administrator dialog", async () => {
+    const onSaveConfiguration = vi.fn().mockResolvedValue(undefined);
     const onSynchronize = vi.fn().mockResolvedValue(undefined);
     render(
       <TaskManagerWorkspace
         data={snapshot}
         busy={false}
+        onSaveConfiguration={onSaveConfiguration}
         onSynchronize={onSynchronize}
       />
     );
 
-    fireEvent.change(screen.getByDisplayValue("FY27 Close"), {
+    fireEvent.click(screen.getByRole("button", { name: "Configure source" }));
+    const dialog = screen.getByRole("dialog", { name: "Configure Task Manager source" });
+    fireEvent.change(within(dialog).getByDisplayValue("FY27 Close"), {
       target: { value: "October Close" }
     });
-    fireEvent.click(screen.getByRole("button", { name: "Synchronize from Oracle" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save and synchronize" }));
 
-    await waitFor(() => expect(onSynchronize).toHaveBeenCalledWith({
+    await waitFor(() => expect(onSaveConfiguration).toHaveBeenCalledWith({
       report_group: "Task Manager Reports",
       report_name: "All Tasks",
       parameters: { "Schedule Name": "October Close" }
     }));
+    await waitFor(() => expect(onSynchronize).toHaveBeenCalledOnce());
   });
 });

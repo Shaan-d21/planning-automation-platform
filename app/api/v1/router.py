@@ -454,12 +454,43 @@ async def task_manager_snapshot(request: Request) -> dict[str, object]:
     return _task_manager_snapshot_payload(snapshot, can_sync=can_sync)
 
 
-@router.post("/task-manager/synchronize")
-async def synchronize_task_manager(
+@router.put("/task-manager/configuration")
+async def configure_task_manager(
     request: Request,
     payload: TaskManagerSyncRequest,
 ) -> dict[str, object]:
-    """Generate, parse, and discard an Oracle Task Manager CSV report."""
+    """Save the one-time Oracle report source used by Task Manager sync."""
+
+    user, application_context = _require_task_manager_reader(request)
+    if not user.has_permission(Permission.CATALOG_MANAGE):
+        raise HTTPException(
+            status_code=403,
+            detail="Only a Service Administrator can configure Task Manager.",
+        )
+    validate_csrf(request)
+    service = TaskManagerSyncService(
+        application_context.settings,
+        request.app.state.settings.database_target,
+    )
+    try:
+        snapshot = await run_in_threadpool(
+            service.configure,
+            application_context.application_id,
+            report_group=payload.report_group,
+            report_name=payload.report_name,
+            parameters=payload.parameters,
+            actor_user_id=user.user_id,
+        )
+    except (ConfigurationError, EPMError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    response = _task_manager_snapshot_payload(snapshot, can_sync=True)
+    response["message"] = "Task Manager synchronization source saved."
+    return response
+
+
+@router.post("/task-manager/synchronize")
+async def synchronize_task_manager(request: Request) -> dict[str, object]:
+    """Generate, parse, and discard the configured Task Manager CSV report."""
 
     user, application_context = _require_task_manager_reader(request)
     if not user.has_permission(Permission.CATALOG_MANAGE):
@@ -476,10 +507,6 @@ async def synchronize_task_manager(
         result = await run_in_threadpool(
             service.synchronize,
             application_context.application_id,
-            report_group=payload.report_group,
-            report_name=payload.report_name,
-            parameters=payload.parameters,
-            actor_user_id=user.user_id,
         )
         snapshot = await run_in_threadpool(
             service.snapshot,

@@ -275,18 +275,20 @@ class OracleTaskManagerReportGateway:
     def _relative_oracle_endpoint(self, href: str) -> str:
         parsed = urlparse(href)
         if not parsed.scheme and not parsed.netloc:
-            return href.lstrip("/")
-        base = urlparse(self._settings.epm_base_url)
-        if (parsed.scheme.casefold(), parsed.netloc.casefold()) != (
-            base.scheme.casefold(),
-            base.netloc.casefold(),
-        ):
+            endpoint = href.lstrip("/")
+        else:
+            endpoint = parsed.path.lstrip("/")
+            if parsed.query:
+                endpoint = f"{endpoint}?{parsed.query}"
+        path = endpoint.split("?", 1)[0].casefold()
+        if not path.startswith("hyperionplanning/rest/fcmapi/"):
             raise APIRequestError(
-                "Oracle returned a Task Manager report link for another host."
+                "Oracle returned an unsupported Task Manager report link."
             )
-        endpoint = parsed.path.lstrip("/")
-        if parsed.query:
-            endpoint = f"{endpoint}?{parsed.query}"
+        # Oracle may publish the report link with an internal host or another
+        # alias for the same environment. Only the validated path is retained;
+        # EPMClient always rebuilds the request on the configured base URL, so
+        # Basic Authentication credentials never follow the returned host.
         return endpoint
 
 
@@ -469,7 +471,7 @@ class TaskManagerSyncService:
     def snapshot(self, application_id: int) -> TaskManagerSnapshot:
         return self._repository.snapshot(application_id)
 
-    def synchronize(
+    def configure(
         self,
         application_id: int,
         *,
@@ -477,16 +479,12 @@ class TaskManagerSyncService:
         report_name: str,
         parameters: Mapping[str, str],
         actor_user_id: int,
-    ) -> TaskManagerSyncResult:
-        group = str(report_group).strip()
-        name = str(report_name).strip()
-        if not group or not name:
-            raise ConfigurationError("Report group and report name are required.")
-        cleaned_parameters = {
-            str(key).strip(): str(value).strip()
-            for key, value in parameters.items()
-            if str(key).strip() and str(value).strip()
-        }
+    ) -> TaskManagerSnapshot:
+        group, name, cleaned_parameters = self._configuration(
+            report_group,
+            report_name,
+            parameters,
+        )
         self._repository.save_configuration(
             application_id,
             report_group=group,
@@ -494,11 +492,22 @@ class TaskManagerSyncService:
             parameters=cleaned_parameters,
             actor_user_id=actor_user_id,
         )
+        return self._repository.snapshot(application_id)
+
+    def synchronize(
+        self,
+        application_id: int,
+    ) -> TaskManagerSyncResult:
+        source = self._repository.snapshot(application_id).source
+        if source is None:
+            raise ConfigurationError(
+                "Configure the Oracle Task Manager report before synchronizing."
+            )
         try:
             content = self._gateway.generate_csv(
-                report_group=group,
-                report_name=name,
-                parameters=cleaned_parameters,
+                report_group=source.report_group,
+                report_name=source.report_name,
+                parameters=source.parameters,
             )
             tasks = TaskManagerReportParser.parse(content)
             synchronized_at = self._repository.replace_snapshot(
@@ -517,3 +526,19 @@ class TaskManagerSyncService:
             status_counts=dict(statuses),
         )
 
+    @staticmethod
+    def _configuration(
+        report_group: str,
+        report_name: str,
+        parameters: Mapping[str, str],
+    ) -> tuple[str, str, dict[str, str]]:
+        group = str(report_group).strip()
+        name = str(report_name).strip()
+        if not group or not name:
+            raise ConfigurationError("Report group and report name are required.")
+        cleaned_parameters = {
+            str(key).strip(): str(value).strip()
+            for key, value in parameters.items()
+            if str(key).strip() and str(value).strip()
+        }
+        return group, name, cleaned_parameters
