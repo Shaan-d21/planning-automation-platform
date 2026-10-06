@@ -344,16 +344,58 @@ class AgentApplicationService:
             ),
         }
 
-    def list_conversations(self, user: UserAccount):
+    def list_conversations(
+        self,
+        user: UserAccount,
+        *,
+        application_id: int | None = None,
+    ):
         self._require_agent_use(user)
-        return self._repository.list_conversations(user.user_id)
+        return self._repository.list_conversations(
+            user.user_id,
+            application_id=application_id,
+        )
 
-    def create_conversation(self, user: UserAccount):
+    def create_conversation(
+        self,
+        user: UserAccount,
+        *,
+        application_id: int | None = None,
+    ):
         self._require_agent_use(user)
         return self._repository.create_conversation(
             user_id=user.user_id,
             provider=self._settings.agent_provider,
             model=self._settings.agent_model,
+            application_id=application_id,
+        )
+
+    def require_conversation_application(
+        self,
+        conversation_id: str,
+        user: UserAccount,
+        *,
+        application_id: int,
+    ) -> None:
+        self._require_agent_use(user)
+        self._repository.require_conversation_application(
+            conversation_id,
+            user.user_id,
+            application_id,
+        )
+
+    def require_action_draft_application(
+        self,
+        draft_id: str,
+        user: UserAccount,
+        *,
+        application_id: int,
+    ) -> None:
+        self._require_agent_use(user)
+        self._repository.require_action_draft_application(
+            draft_id,
+            user.user_id,
+            application_id,
         )
 
     def get_messages(self, conversation_id: str, user: UserAccount):

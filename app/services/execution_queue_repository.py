@@ -40,6 +40,7 @@ class SQLExecutionQueueRepository:
         current = _utc(now)
         values = {
             "execution_id": submission.execution_id,
+            "application_id": submission.application_id,
             "job_type": submission.job_type.value,
             "target_key": submission.target_key,
             "payload": submission.payload,
@@ -56,6 +57,7 @@ class SQLExecutionQueueRepository:
             active = self.find_active(
                 submission.job_type,
                 submission.target_key,
+                application_id=submission.application_id,
             )
             if active is not None:
                 raise ExecutionQueueConflictError(
@@ -83,21 +85,28 @@ class SQLExecutionQueueRepository:
         self,
         job_type: ExecutionJobType,
         target_key: str,
+        *,
+        application_id: int | None = None,
     ) -> ExecutionJob | None:
+        conditions = [
+            execution_queue.c.job_type == job_type.value,
+            func.lower(execution_queue.c.target_key)
+            == target_key.casefold(),
+            execution_queue.c.status.in_(
+                (
+                    ExecutionJobStatus.QUEUED.value,
+                    ExecutionJobStatus.RUNNING.value,
+                )
+            ),
+        ]
+        if application_id is not None:
+            conditions.append(
+                execution_queue.c.application_id == application_id
+            )
         with self._database.connect() as connection:
             row = connection.execute(
                 select(execution_queue)
-                .where(
-                    execution_queue.c.job_type == job_type.value,
-                    func.lower(execution_queue.c.target_key)
-                    == target_key.casefold(),
-                    execution_queue.c.status.in_(
-                        (
-                            ExecutionJobStatus.QUEUED.value,
-                            ExecutionJobStatus.RUNNING.value,
-                        )
-                    ),
-                )
+                .where(*conditions)
                 .order_by(execution_queue.c.created_at)
                 .limit(1)
             ).mappings().one_or_none()
@@ -433,6 +442,11 @@ def _job(row) -> ExecutionJob:
             row["cancellation_requested_at"]
         ),
         cancellation_requested_by=row["cancellation_requested_by"],
+        application_id=(
+            int(row["application_id"])
+            if row["application_id"] is not None
+            else None
+        ),
     )
 
 

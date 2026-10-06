@@ -1178,8 +1178,11 @@ def create_app(
         require_api_session(request)
         user = _current_user(request)
         assert user is not None
+        application_context = current_application_context(request, user)
         conversations = await run_in_threadpool(
-            request.app.state.agent_service.list_conversations, user
+            request.app.state.agent_service.list_conversations,
+            user,
+            application_id=application_context.application_id,
         )
         return {
             "status": "success",
@@ -1191,8 +1194,11 @@ def create_app(
         require_api_session(request)
         user = _current_user(request)
         assert user is not None
+        application_context = current_application_context(request, user)
         conversation = await run_in_threadpool(
-            request.app.state.agent_service.create_conversation, user
+            request.app.state.agent_service.create_conversation,
+            user,
+            application_id=application_context.application_id,
         )
         return {"status": "success", "conversation": asdict(conversation)}
 

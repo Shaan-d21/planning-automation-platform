@@ -32,6 +32,7 @@ from app.services.agent_execution_followup_service import (
     AgentExecutionFollowUpService,
 )
 from app.services.workflow_repository import SQLWorkflowRepository
+from app.services.application_workspace_service import ApplicationWorkspaceService
 
 
 class DurableExecutionWorker:
@@ -70,6 +71,7 @@ class DurableExecutionWorker:
         )
         self._queue = SQLExecutionQueueRepository(settings.database_target)
         self._workflows = SQLWorkflowRepository(settings.database_target)
+        self._workspaces = ApplicationWorkspaceService(settings.database_target)
         self._stop = Event()
 
     @property
@@ -157,6 +159,7 @@ class DurableExecutionWorker:
         )
         heartbeat.start()
         try:
+            self._validate_application(job)
             if job.job_type is ExecutionJobType.OPERATION:
                 operation_input, actor = operation_from_payload(job.payload)
                 executor = self._operation_executor_factory(
@@ -213,7 +216,9 @@ class DurableExecutionWorker:
                     f"Unsupported execution job type '{job.job_type.value}'."
                 )
             if isinstance(run, WorkflowRun):
-                self._workflows.save(run)
+                self._workflows.save(
+                    replace(run, application_id=job.application_id)
+                )
             if (
                 isinstance(run, WorkflowRun)
                 and run.status is WorkflowStatus.CANCELLED
@@ -255,6 +260,32 @@ class DurableExecutionWorker:
             heartbeat.join(timeout=2)
             self._cleanup_uploads(job)
 
+    def _validate_application(self, job: ExecutionJob) -> None:
+        """Never execute durable work through another Oracle application."""
+
+        if job.application_id is None:
+            # Compatibility for work queued before application ownership was
+            # introduced. Migration 0028 attributes all safely known rows.
+            return
+        workspace = self._workspaces.get(job.application_id)
+        if workspace is None:
+            raise RuntimeError(
+                "The queued Oracle application is no longer active."
+            )
+        same_environment = (
+            workspace.environment_base_url.rstrip("/").casefold()
+            == self._settings.epm_base_url.rstrip("/").casefold()
+        )
+        same_application = (
+            workspace.application_name.casefold()
+            == self._settings.application_name.casefold()
+        )
+        if not same_environment or not same_application:
+            raise RuntimeError(
+                "The queued execution belongs to another Oracle application; "
+                "this worker refused to run it."
+            )
+
     def _publish_follow_up(self, execution_id: str) -> None:
         try:
             self._completion_notifier(execution_id)
@@ -293,6 +324,7 @@ class DurableExecutionWorker:
         if existing is None:
             existing = WorkflowRun(
                 execution_id=job.execution_id,
+                application_id=job.application_id,
                 workflow_name=job.target_key,
                 status=WorkflowStatus.FAILED,
                 started_at=job.created_at,
@@ -308,6 +340,7 @@ class DurableExecutionWorker:
                 status=WorkflowStatus.FAILED,
                 completed_at=now,
                 error_message=message,
+                application_id=job.application_id,
                 oracle_execution_username=(
                     existing.oracle_execution_username
                     or self._settings.oracle_execution_username
@@ -331,7 +364,15 @@ class DurableExecutionWorker:
         allowed_root = (
             self._settings.runtime_storage_dir / "web_uploads"
         ).resolve()
-        for path in upload_paths(job.payload):
+        try:
+            paths = upload_paths(job.payload)
+        except Exception:
+            self._logger.warning(
+                "Unable to inspect upload cleanup metadata for execution '%s'.",
+                job.execution_id,
+            )
+            return
+        for path in paths:
             try:
                 resolved = path.resolve()
                 if not resolved.is_relative_to(allowed_root):

@@ -51,6 +51,8 @@ class SQLWorkflowRepository:
             "trigger_source": run.trigger_source.value,
             "oracle_execution_username": run.oracle_execution_username,
         }
+        if run.application_id is not None:
+            values["application_id"] = run.application_id
         with self._database.begin() as connection:
             connection.execute(
                 upsert_statement(
@@ -111,6 +113,11 @@ class SQLWorkflowRepository:
             initiated_by_display=row["initiated_by_display"],
             trigger_source=TriggerSource(str(row["trigger_source"])),
             oracle_execution_username=row["oracle_execution_username"],
+            application_id=(
+                int(row["application_id"])
+                if row["application_id"] is not None
+                else None
+            ),
             steps=tuple(
                 WorkflowStepResult(
                     name=str(step["name"]),

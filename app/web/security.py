@@ -14,7 +14,11 @@ from app.models.api_token import ApiTokenScope, AuthenticatedApiToken
 from app.products.contracts import BusinessProcessType
 from app.products.runtime_context import RuntimeApplicationContext
 from app.services.session_security_service import ClientContext
-from app.utils.exceptions import ApiTokenError, ConfigurationError
+from app.utils.exceptions import (
+    AgentConversationError,
+    ApiTokenError,
+    ConfigurationError,
+)
 
 
 def current_user(request: Request) -> UserAccount | None:
@@ -106,6 +110,7 @@ def require_api_session(request: Request) -> str:
             detail="The web session is invalid. Connect again.",
         )
     _require_product_surface(request, user)
+    _require_agent_application_scope(request, user)
     return session_id
 
 
@@ -184,6 +189,44 @@ def _require_product_surface(request: Request, user: UserAccount) -> None:
                 "Oracle EPM application."
             ),
         )
+
+
+def _require_agent_application_scope(
+    request: Request,
+    user: UserAccount,
+) -> None:
+    """Prevent conversations and drafts crossing application workspaces."""
+
+    path = request.url.path.rstrip("/")
+    conversation_prefix = "/api/agent/conversations/"
+    draft_prefix = "/api/agent/action-drafts/"
+    target_kind: str | None = None
+    target_id = ""
+    if path.startswith(conversation_prefix):
+        target_kind = "conversation"
+        target_id = path[len(conversation_prefix):].split("/", 1)[0]
+    elif path.startswith(draft_prefix):
+        target_kind = "draft"
+        target_id = path[len(draft_prefix):].split("/", 1)[0]
+    if target_kind is None or not target_id:
+        return
+
+    context = current_application_context(request, user)
+    try:
+        if target_kind == "conversation":
+            request.app.state.agent_service.require_conversation_application(
+                target_id,
+                user,
+                application_id=context.application_id,
+            )
+        else:
+            request.app.state.agent_service.require_action_draft_application(
+                target_id,
+                user,
+                application_id=context.application_id,
+            )
+    except AgentConversationError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 def require_bearer_token(

@@ -57,6 +57,7 @@ class ExecutionJob:
     error_message: str | None = None
     cancellation_requested_at: datetime | None = None
     cancellation_requested_by: str | None = None
+    application_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,3 +69,4 @@ class ExecutionJobSubmission:
     target_key: str
     payload: dict[str, Any] = field(default_factory=dict)
     priority: int = 100
+    application_id: int | None = None

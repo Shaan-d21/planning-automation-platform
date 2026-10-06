@@ -13,6 +13,7 @@ class ApplicationWorkspace:
     """One Oracle application a platform user is allowed to enter."""
 
     application_id: int
+    environment_base_url: str
     application_name: str
     business_process: BusinessProcessType
     product_type: str | None
@@ -20,4 +21,3 @@ class ApplicationWorkspace:
     active: bool
     last_verified_at: datetime | None
     current: bool = False
-

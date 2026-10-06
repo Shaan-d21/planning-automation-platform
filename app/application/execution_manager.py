@@ -26,6 +26,7 @@ from app.models.workflow import WorkflowRun
 from app.models.workflow import WorkflowStatus
 from app.models.access_control import ExecutionActor, TriggerSource
 from app.services.execution_queue_repository import SQLExecutionQueueRepository
+from app.services.application_workspace_service import ApplicationWorkspaceService
 from app.services.workflow_repository import SQLWorkflowRepository
 from app.utils.exceptions import ExecutionQueueConflictError
 from app.utils.exceptions import PlanningProcessError
@@ -69,6 +70,7 @@ class PlanningProcessExecutionManager:
             settings.database_target
         )
         self._queue = SQLExecutionQueueRepository(settings.database_target)
+        self._workspaces = ApplicationWorkspaceService(settings.database_target)
         self._embedded = settings.execution_runtime == "embedded"
         self._worker = DurableExecutionWorker(
             settings,
@@ -92,6 +94,7 @@ class PlanningProcessExecutionManager:
         *,
         cleanup: Callable[[], None] | None = None,
         actor: ExecutionActor | None = None,
+        application_id: int | None = None,
     ) -> ManagedExecution:
         """Queue one run and reject another active run of the same process."""
         execution_id = str(uuid4())
@@ -100,6 +103,7 @@ class PlanningProcessExecutionManager:
             job = self._queue.enqueue(
                 ExecutionJobSubmission(
                     execution_id=execution_id,
+                    application_id=self._application_id(application_id),
                     job_type=ExecutionJobType.PROCESS,
                     target_key=process_input.process_code,
                     payload=process_payload(process_input, actor),
@@ -115,6 +119,7 @@ class PlanningProcessExecutionManager:
             self._repository.save(
                 WorkflowRun(
                     execution_id=execution_id,
+                    application_id=job.application_id,
                     workflow_name=f"Planning Process - {process_input.process_code}",
                     status=WorkflowStatus.QUEUED,
                     started_at=submitted_at,
@@ -140,6 +145,15 @@ class PlanningProcessExecutionManager:
             )
             self._futures[execution_id] = future
         return execution
+
+    def _application_id(self, supplied: int | None) -> int | None:
+        if supplied is not None:
+            return supplied
+        workspace = self._workspaces.find_registered(
+            self._settings.epm_base_url,
+            self._settings.application_name,
+        )
+        return workspace.application_id if workspace is not None else None
 
     def get(self, execution_id: str) -> ManagedExecution | None:
         """Return in-memory execution metadata."""
