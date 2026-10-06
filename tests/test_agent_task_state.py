@@ -159,6 +159,57 @@ def test_month_close_retains_period_and_collects_activity_reply() -> None:
     assert result.phase is AgentTaskPhase.READY_FOR_PLAN
 
 
+def test_month_close_activity_reply_can_contain_nested_operation_intents() -> None:
+    initial = AgentTaskInterpreter.interpret(
+        _messages("Start the September month-close activities")
+    )
+    result = AgentTaskInterpreter.interpret(
+        _messages(
+            "update substitution variable CurMonth to Sep, import new product "
+            "dimensions, load production units then load product price then "
+            "run product revenue calculation rule"
+        ),
+        prior_context=initial.to_payload(),
+    )
+
+    assert result.intent is AgentTaskIntent.MONTH_CLOSE
+    assert result.phase is AgentTaskPhase.READY_FOR_PLAN
+    assert result.missing_parameters == ()
+    assert result.parameters["period"] == "Sep"
+    assert result.parameters["activities"] == [
+        "update substitution variable CurMonth to Sep",
+        "import new product dimensions",
+        "load production units",
+        "load product price",
+        "run product revenue calculation rule",
+    ]
+
+
+@pytest.mark.parametrize(
+    "reply",
+    (
+        "set substitution variable CurMonth to Sep, then run allocations",
+        "change CurMonth to Sep; seed forecast; generate variance report",
+        "update metadata, load data, refresh cube",
+    ),
+)
+def test_month_close_pending_activities_are_not_reclassified_as_new_tasks(
+    reply: str,
+) -> None:
+    initial = AgentTaskInterpreter.interpret(
+        _messages("Start September month close")
+    )
+
+    result = AgentTaskInterpreter.interpret(
+        _messages(reply),
+        prior_context=initial.to_payload(),
+    )
+
+    assert result.intent is AgentTaskIntent.MONTH_CLOSE
+    assert result.phase is AgentTaskPhase.READY_FOR_PLAN
+    assert result.parameters["activities"]
+
+
 def test_metadata_load_collects_dimension_then_file_preference() -> None:
     initial = AgentTaskInterpreter.interpret(_messages("Load metadata."))
     dimension = AgentTaskInterpreter.interpret(
@@ -890,6 +941,23 @@ def test_month_close_enters_the_existing_multi_step_planner() -> None:
         "business-rules",
         "data-maps",
     ]
+    assert call.arguments["step_instructions"] == [
+        "Run Data Integration",
+        "Business Rule",
+        "Data Map",
+    ]
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    ("Prepare a dimension load", "Run the member load", "Start hierarchy import"),
+)
+def test_metadata_operation_nouns_are_recognized_without_exact_dimension_name(
+    prompt: str,
+) -> None:
+    task = AgentTaskInterpreter.interpret(_messages(prompt))
+
+    assert task.intent is AgentTaskIntent.METADATA_LOAD
 
 
 def test_task_context_is_added_to_provider_instruction_without_credentials() -> None:

@@ -781,6 +781,7 @@ interface AgentMultiStepPlanStep {
   code: string;
   display_name: string;
   category: string;
+  instruction?: string;
 }
 
 interface AgentMultiStepPipeline {
@@ -815,12 +816,19 @@ function AgentMultiStepPlanCard({ plan, busy, onPrepare }: {
   const preparationPrompt = pipeline
     ? `Prepare and run Oracle Pipeline ${pipeline.code} for this multi-step objective: ${plan.objective}`
     : "Show me the registered Oracle Pipelines so I can identify one for this multi-step request.";
-  const standalonePrompt = `Configure and execute a standalone flow without an Oracle Pipeline for these operations: ${plan.requested_steps.map((step) => step.display_name).join(" -> ")}. Objective: ${plan.objective}`;
+  const stepInstructions = plan.requested_steps.map((step) => step.instruction || step.display_name);
+  const uniqueStepInstructions = [...new Set(stepInstructions.map((item) => item.trim()).filter(Boolean))];
+  // Older saved plan cards may contain the same full request on every step.
+  // Send it once so continuing cannot multiply the operation sequence.
+  const standaloneOperations = uniqueStepInstructions.length === 1
+    ? uniqueStepInstructions[0]
+    : stepInstructions.join(" -> ");
+  const standalonePrompt = `Configure and execute a standalone flow without an Oracle Pipeline for these operations: ${standaloneOperations}. Objective: ${plan.objective}`;
   return <article className={`assistant-multi-plan${canContinue ? " is-matched" : " is-design-only"}`} aria-label="Multi-step Planning process">
     <header><span className="assistant-guided-input__icon"><Icon name={canContinue || standaloneDraft ? "check" : "alert"} /></span><div><span className="eyebrow">{canContinue ? "Oracle Pipeline match" : standaloneDraft ? "Standalone flow draft" : "Design review only"}</span><h3>{pipeline ? pipeline.display_name : standaloneDraft ? "Platform-managed sequence" : "No safe executable match"}</h3><p>{plan.message}</p></div>{canContinue && <span className="assistant-multi-plan__badge">One governed run</span>}</header>
     <section className="assistant-multi-plan__request"><strong>Requested business outcome</strong><p>{plan.objective}</p></section>
     <div className="assistant-multi-plan__flow">
-      {plan.requested_steps.map((step) => <div key={`${step.sequence}-${step.code}`}><span>{String(step.sequence).padStart(2, "0")}</span><div><strong>{step.display_name}</strong><small>{step.category}</small></div></div>)}
+      {plan.requested_steps.map((step) => <div key={`${step.sequence}-${step.code}`}><span>{String(step.sequence).padStart(2, "0")}</span><div><strong>{step.display_name}</strong><small>{step.instruction || step.category}</small></div></div>)}
     </div>
     {pipeline ? <>
       <section className="assistant-multi-plan__pipeline"><header><div><span className="eyebrow">Live Oracle definition</span><h4>{pipeline.display_name} <small>{pipeline.code}</small></h4></div><span>{Math.round(plan.confidence * 100)}% match</span></header><div>{pipeline.stages.length ? pipeline.stages.map((stage, index) => <div key={`${stage.name}-${index}`}><span>{index + 1}</span><div><strong>{stage.display_name}</strong><small>{stage.job_count} configured job{stage.job_count === 1 ? "" : "s"}{stage.runs_in_parallel ? " · Parallel" : ""}</small></div></div>) : <p>Oracle returned no visible stage labels. The governed preflight will verify the definition again.</p>}</div></section>

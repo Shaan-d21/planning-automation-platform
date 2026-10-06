@@ -188,6 +188,29 @@
       "expected_missing_parameters": ["activities"]
     },
     {
+      "id": "understand-month-close-detailed-activity-reply",
+      "category": "business-task-understanding",
+      "severity": "critical",
+      "kind": "task_understanding",
+      "turns": [
+        "Start the September month-close activities",
+        "update substitution variable CurMonth to Sep, import new product dimensions, load production units then load product price then run product revenue calculation rule"
+      ],
+      "expected_task_intent": "MONTH_CLOSE",
+      "expected_phase": "READY_FOR_PLAN",
+      "expected_parameters": {
+        "period": "Sep",
+        "activities": [
+          "update substitution variable CurMonth to Sep",
+          "import new product dimensions",
+          "load production units",
+          "load product price",
+          "run product revenue calculation rule"
+        ]
+      },
+      "expected_missing_parameters": []
+    },
+    {
       "id": "understand-cube-refresh-followup",
       "category": "business-task-understanding",
       "severity": "critical",

@@ -95,6 +95,31 @@ class AgentParameterDeltaResolver:
         }:
             return None
 
+        # A response to the slot the assistant just requested is task input,
+        # even when it contains words such as "update" or "change" as part of
+        # an operation description.  Let the normal context resolver merge the
+        # completed slot instead of misclassifying the whole answer as a
+        # correction to an older value (for example, Month Close activities
+        # beginning with "update substitution variable").
+        prior_missing = {
+            str(item).strip()
+            for item in prior.get("missing_parameters", ())
+            if str(item).strip()
+        }
+        if (
+            active
+            and interpreted.intent is prior_intent
+            and any(
+                name in interpreted.parameters
+                and interpreted.parameters[name] is not None
+                and interpreted.parameters[name] != ""
+                and interpreted.parameters[name] != ()
+                and interpreted.parameters[name] != []
+                for name in prior_missing
+            )
+        ):
+            return None
+
         correction = active and bool(_CORRECTION_SIGNAL.search(text))
         conflicts, directed = cls._slot_analysis(text, intent, correction)
         if conflicts:

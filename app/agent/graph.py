@@ -1017,6 +1017,11 @@ class AgentGraphOrchestrator:
         )
         if len(requested_steps) < 2:
             return None
+        step_instructions = self._step_instructions_for_codes(
+            activity_text,
+            requested_steps,
+            explicit_instructions=activities,
+        )
         period = str(task_parameters.get("period") or "").strip()
         objective = str(context.get("objective") or "").strip()
         return AgentToolCall(
@@ -1026,6 +1031,7 @@ class AgentGraphOrchestrator:
                     f"{period} Month Close: {objective}" if period else objective
                 )[:1000],
                 "requested_steps": list(requested_steps),
+                "step_instructions": list(step_instructions),
                 "prefer_standalone": False,
             },
             call_id="deterministic-task-month-close-plan",
@@ -1828,11 +1834,16 @@ class AgentGraphOrchestrator:
         steps = self._requested_multi_step_codes_with_artifacts(step_text)
         if len(steps) < 2:
             return None
+        step_instructions = self._step_instructions_for_codes(
+            step_text,
+            steps,
+        )
         return AgentToolCall(
             name="prepare_standalone_flow_action",
             arguments={
                 "objective": " ".join(latest.split())[:500],
                 "requested_steps": list(steps),
+                "step_instructions": list(step_instructions),
             },
             call_id="deterministic-standalone-flow-preparation",
         )
@@ -1863,11 +1874,16 @@ class AgentGraphOrchestrator:
         steps = self._requested_multi_step_codes_with_artifacts(normalized)
         if len(steps) < 2:
             return None
+        step_instructions = self._step_instructions_for_codes(
+            latest,
+            steps,
+        )
         return AgentToolCall(
             name="plan_multi_step_request",
             arguments={
                 "objective": " ".join(latest.split())[:1000],
                 "requested_steps": list(steps),
+                "step_instructions": list(step_instructions),
                 "prefer_standalone": cls._requests_standalone_flow(normalized),
             },
             call_id="deterministic-multi-step-planning",
@@ -1894,7 +1910,12 @@ class AgentGraphOrchestrator:
             "pipelines": r"\b(?:oracle\s+)?pipelines?\b",
             "metadata-import": (
                 r"\b(?:metadata\s+import|import\s+metadata|metadata\s+load|"
-                r"load\s+metadata|update\s+metadata)\b"
+                r"load\s+metadata|update\s+metadata|"
+                r"(?:dimension|member|hierarchy)\s+"
+                r"(?:load|import|update)|"
+                r"(?:load|import|add|update)(?:\s+(?:new|the|a|an))?"
+                r"(?:\s+[a-z0-9.-]+){0,6}\s+"
+                r"(?:dimensions?|members?|hierarch(?:y|ies)))\b"
             ),
             "data-integrations": (
                 r"\b(?:data\s+integrations?|integration\s+load|integration)\b"
@@ -2050,6 +2071,129 @@ class AgentGraphOrchestrator:
             )
         occurrences.sort(key=lambda item: item[0])
         return tuple(code for _position, code in occurrences)
+
+    def _step_instructions_for_codes(
+        self,
+        text: str,
+        codes: Sequence[str],
+        *,
+        explicit_instructions: Sequence[Any] | None = None,
+    ) -> tuple[str, ...]:
+        """Align each operation with the user's own instruction.
+
+        The execution planner previously retained only operation codes. That
+        erased variable values, metadata intent, and artifact names before the
+        guided forms were opened. Alignment is deliberately positional and
+        strict: if the sentence cannot be split one-to-one, every step keeps
+        the complete request rather than receiving another step's parameters.
+        """
+        normalized_codes = tuple(str(code).strip().casefold() for code in codes)
+        raw_sources = (
+            tuple(str(item or "") for item in explicit_instructions)
+            if explicit_instructions is not None
+            else (str(text or ""),)
+        )
+        fragments = tuple(
+            fragment
+            for source in raw_sources
+            for fragment in self._split_step_instructions(source)
+        )
+        if len(fragments) == len(normalized_codes):
+            return fragments
+
+        # A catalog can fail to classify one clause even though the remaining
+        # steps are sound. Align every known operation with the closest
+        # operation-bearing clause instead of copying the complete request to
+        # all steps (which multiplies operations when the UI continues).
+        candidates = tuple(
+            self._instruction_operation_candidates(fragment)
+            for fragment in fragments
+        )
+        aligned: list[str] = []
+        cursor = 0
+        used: set[int] = set()
+        for code in normalized_codes:
+            matching_index = next(
+                (
+                    index
+                    for index in range(cursor, len(fragments))
+                    if index not in used and code in candidates[index]
+                ),
+                None,
+            )
+            if matching_index is None:
+                matching_index = next(
+                    (
+                        index
+                        for index in range(cursor, len(fragments))
+                        if index not in used
+                    ),
+                    None,
+                )
+            if matching_index is None:
+                matching_index = next(
+                    (
+                        index
+                        for index in range(len(fragments))
+                        if index not in used
+                    ),
+                    None,
+                )
+            if matching_index is None:
+                # This only occurs for malformed/model-authored calls with
+                # more operation codes than user clauses. The operation name
+                # is safer than reusing another step's values or artifact.
+                aligned.append(code)
+                continue
+            aligned.append(fragments[matching_index])
+            used.add(matching_index)
+            cursor = matching_index + 1
+        return tuple(aligned)
+
+    @staticmethod
+    def _split_step_instructions(text: str) -> tuple[str, ...]:
+        """Split business steps without breaking comma-separated RTP values."""
+        source = " ".join(str(text or "").split())
+        action = (
+            r"(?:prepare|run|execute|start|calculate|launch|push|publish|"
+            r"import|load|update|set|change|assign|create|add|refresh|"
+            r"generate|export|seed)"
+        )
+        parts = re.split(
+            rf"\s*(?:->|→|;|\bthen\b|\bnext\b|\bfollowed\s+by\b|"
+            rf"\bafter\s+that\b|,(?=\s*{action}\b))\s*",
+            source,
+            flags=re.IGNORECASE,
+        )
+        return tuple(
+            fragment.strip(" ,;.-")[:1000]
+            for fragment in parts
+            if fragment.strip(" ,;.-")
+        )
+
+    def _instruction_operation_candidates(
+        self,
+        instruction: str,
+    ) -> frozenset[str]:
+        """Return only deterministic operation meanings for one clause."""
+        candidates = {
+            code
+            for _position, code in self._requested_multi_step_occurrences(
+                instruction
+            )
+        }
+        for operation_code in (
+            *MULTI_STEP_ARTIFACT_OPERATION_CODES,
+            "substitution-variables",
+            "user-variables",
+        ):
+            try:
+                catalog = self._gateway.artifact_catalog(operation_code)
+            except Exception:
+                continue
+            if self._artifact_mentions_in_user_text(catalog, instruction):
+                candidates.add(operation_code)
+        return frozenset(candidates)
 
     @staticmethod
     def _has_multi_step_signal(
@@ -3966,9 +4110,24 @@ class AgentGraphOrchestrator:
             for item in prepared.get("requested_steps", ())
             if str(item).strip()
         )
+        raw_step_instructions = prepared.get("step_instructions")
+        step_instructions = (
+            tuple(
+                " ".join(str(item or "").split())
+                for item in raw_step_instructions
+            )
+            if isinstance(raw_step_instructions, list)
+            else ()
+        )
+        if (
+            len(step_instructions) != len(requested_steps)
+            or any(not item for item in step_instructions)
+        ):
+            step_instructions = tuple(objective for _item in requested_steps)
         configured_steps: list[dict[str, Any]] = []
         occurrence_by_operation: dict[str, int] = {}
         for index, operation_code in enumerate(requested_steps, start=1):
+            step_instruction = step_instructions[index - 1]
             operation_occurrence = occurrence_by_operation.get(
                 operation_code,
                 0,
@@ -3978,7 +4137,7 @@ class AgentGraphOrchestrator:
                 name="prepare_operation_action",
                 arguments={
                     "operation_code": operation_code,
-                    "objective": objective,
+                    "objective": step_instruction,
                 },
                 call_id=f"standalone-flow-step-{index}",
             )
@@ -4006,15 +4165,19 @@ class AgentGraphOrchestrator:
                 identifier
                 for _position, identifier in self._artifact_mentions_in_user_text(
                     artifact_catalog,
-                    objective,
+                    step_instruction,
                 )
             )
             selected = (
                 mentioned_artifacts[operation_occurrence]
                 if operation_occurrence < len(mentioned_artifacts)
                 else (
-                    self._artifact_alias_named_in_user_text(labels, objective)
-                    or self._artifact_named_in_user_text(choices, objective)
+                    self._artifact_alias_named_in_user_text(
+                        labels, step_instruction
+                    )
+                    or self._artifact_named_in_user_text(
+                        choices, step_instruction
+                    )
                 )
             )
             if selected is None and len(choices) == 1:
@@ -4024,7 +4187,7 @@ class AgentGraphOrchestrator:
             )
             if selected is None and (choices or recovery):
                 recommendations = recommend_artifacts(
-                    objective,
+                    step_instruction,
                     tuple(
                         (item, labels.get(item, item)) for item in choices
                     ),
@@ -4045,7 +4208,7 @@ class AgentGraphOrchestrator:
                             item.as_payload() for item in recommendations
                         ],
                         "catalog_recovery": recovery,
-                        "search_context": objective,
+                        "search_context": step_instruction,
                     }
                 )
                 selected = str(
@@ -4075,11 +4238,18 @@ class AgentGraphOrchestrator:
             )
             input_values: dict[str, Any] = {}
             if guided is not None:
+                guided = self._standalone_guided_input_prefill(
+                    guided,
+                    operation_code=operation_code,
+                    artifact_name=canonical,
+                    instruction=step_instruction,
+                )
                 context = dict(guided.get("context") or {})
                 context["flow_step"] = {
                     "sequence": index,
                     "total": len(requested_steps),
                 }
+                context["step_instruction"] = step_instruction
                 answer = interrupt(
                     {
                         "kind": "operation_input_collection",
@@ -4112,7 +4282,7 @@ class AgentGraphOrchestrator:
                 name="prepare_operation_action",
                 arguments={
                     "operation_code": operation_code,
-                    "objective": objective,
+                    "objective": step_instruction,
                     "artifact_name": canonical,
                     "input_values": input_values,
                 },
@@ -4134,6 +4304,7 @@ class AgentGraphOrchestrator:
                         validated.get("display_name") or operation_code
                     ),
                     "artifact_name": canonical,
+                    "instruction": step_instruction,
                     "input_values": dict(
                         validated.get("input_values") or {}
                     ),
@@ -4191,6 +4362,122 @@ class AgentGraphOrchestrator:
             "pending_tool_calls": pending_payloads,
             "approval_decision": decision,
         }
+
+    def _standalone_guided_input_prefill(
+        self,
+        guided: dict[str, Any],
+        *,
+        operation_code: str,
+        artifact_name: str,
+        instruction: str,
+    ) -> dict[str, Any]:
+        """Carry explicit step values into a standalone-flow input card."""
+        context = dict(guided.get("context") or {})
+        if operation_code == "substitution-variables":
+            creating = str(context.get("action") or "") == "CREATE"
+            if creating:
+                prefill = self._substitution_variable_creation_prefill(
+                    instruction,
+                    tuple(str(item) for item in context.get("scopes", ())),
+                )
+            else:
+                replacement = self._variable_replacement_prefill(instruction)
+                prefill = {"new_value": replacement} if replacement else {}
+            if prefill:
+                context["prefill"] = prefill
+        elif operation_code == "user-variables":
+            replacement = self._variable_replacement_prefill(instruction)
+            if replacement:
+                context["prefill"] = {"new_member": replacement}
+        elif operation_code == "business-rules":
+            rtp_definition = context.get("rtp_definition")
+            prompts = self._business_rule_rtp_prefill(
+                instruction,
+                rtp_definition if isinstance(rtp_definition, dict) else {},
+            )
+            if prompts:
+                context["prefill"] = {
+                    "runtime_prompt_mode": "Provide runtime prompt values",
+                    "runtime_prompts": prompts,
+                }
+            else:
+                unnamed_value = self._unnamed_business_rule_rtp_value(
+                    instruction
+                )
+                if unnamed_value:
+                    context["prefill"] = {
+                        "runtime_prompt_mode": "Provide runtime prompt values",
+                    }
+        elif operation_code == "data-integrations":
+            period_prefill = self._data_integration_period_prefill(instruction)
+            if period_prefill:
+                existing = context.get("prefill")
+                context["prefill"] = {
+                    **(existing if isinstance(existing, dict) else {}),
+                    **period_prefill,
+                }
+        elif operation_code == "metadata-import":
+            metadata_context = self._metadata_instruction_context(instruction)
+            if metadata_context:
+                context["task_context"] = metadata_context
+        return {**guided, "context": context}
+
+    @staticmethod
+    def _data_integration_period_prefill(
+        instruction: str,
+    ) -> dict[str, str]:
+        """Extract explicit Planning year and month range from one load step."""
+        text = " ".join(str(instruction or "").split())
+        month_names = {
+            "jan": "Jan", "january": "Jan",
+            "feb": "Feb", "february": "Feb",
+            "mar": "Mar", "march": "Mar",
+            "apr": "Apr", "april": "Apr",
+            "may": "May",
+            "jun": "Jun", "june": "Jun",
+            "jul": "Jul", "july": "Jul",
+            "aug": "Aug", "august": "Aug",
+            "sep": "Sep", "sept": "Sep", "september": "Sep",
+            "oct": "Oct", "october": "Oct",
+            "nov": "Nov", "november": "Nov",
+            "dec": "Dec", "december": "Dec",
+        }
+        month_pattern = "|".join(month_names)
+        months = tuple(
+            month_names[match.group(1).casefold()]
+            for match in re.finditer(
+                rf"\b({month_pattern})\b",
+                text,
+                re.IGNORECASE,
+            )
+        )
+        result: dict[str, str] = {}
+        if months:
+            result["start_month"] = months[0]
+            result["end_month"] = months[-1]
+        year = re.search(r"\bFY\s*[-_]?\s*(\d{2,4})\b", text, re.IGNORECASE)
+        if year:
+            result["year"] = f"FY{year.group(1)}"
+        return result
+
+    @staticmethod
+    def _metadata_instruction_context(instruction: str) -> dict[str, str]:
+        """Expose explicitly named metadata subjects without inventing them."""
+        text = " ".join(str(instruction or "").split())
+        match = re.search(
+            r"\b(?:load|import|add|update)\s+(?:new\s+)?(.+?)\s+"
+            r"(dimensions?|members?|hierarch(?:y|ies))\b",
+            text,
+            re.IGNORECASE,
+        )
+        if match is None:
+            return {}
+        subject = match.group(1).strip(" ,.;")
+        kind = match.group(2).strip().lower()
+        if not subject or len(subject) > 160:
+            return {}
+        key = "dimension" if kind.startswith("dimension") else "requested_member"
+        return {key: subject}
 
     def _artifact_catalog_snapshot(
         self,
