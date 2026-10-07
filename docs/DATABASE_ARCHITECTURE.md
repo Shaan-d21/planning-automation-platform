@@ -31,6 +31,11 @@ schema.
 - Pending browser uploads remain bounded temporary files outside PostgreSQL.
   Their opaque tokens are held only by the web runtime and require the creating
   session plus registered application ID for resolution or cleanup.
+- Saved report/Data Explorer catalogs and generated workbooks remain outside
+  PostgreSQL in the persistent report volume. Their directories are keyed by
+  registered application ID; download and Data Review resolution use only the
+  authenticated session's active application namespace. The original catalog
+  is retained only as the one-time seed for the deployment application.
 
 ## Tables
 

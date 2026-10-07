@@ -108,10 +108,12 @@ class StandaloneFlowCommandExecutor:
         self,
         settings: Settings,
         *,
+        application_id: int | None = None,
         operation_executor_factory: Callable[..., object] | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._settings = settings
+        self._application_id = application_id
         self._logger = logger or logging.getLogger(__name__)
         self._operation_executor_factory = (
             operation_executor_factory or OperationCommandExecutor
@@ -171,6 +173,7 @@ class StandaloneFlowCommandExecutor:
             try:
                 child = self._operation_executor_factory(
                     self._settings,
+                    application_id=self._application_id,
                     logger=self._logger.getChild(f"step_{index}"),
                 ).execute(
                     step.operation_input,

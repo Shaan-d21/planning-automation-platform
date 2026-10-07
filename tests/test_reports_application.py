@@ -121,6 +121,71 @@ def test_report_workspace_registers_and_immediately_lists_definition(
     ]
 
 
+def test_report_workspace_isolates_catalog_and_output_by_application(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    first = ReportWorkspaceService(
+        settings,
+        application_id=11,
+        seed_catalog_file=settings.report_catalog_file,
+    )
+    second = ReportWorkspaceService(settings, application_id=12)
+
+    assert [item.name for item in first.catalog()] == ["Revenue Report"]
+    assert second.catalog() == ()
+    assert first.catalog_file != second.catalog_file
+    assert first.output_dir != second.output_dir
+    assert first.catalog_file.is_relative_to(settings.report_output_dir)
+    assert second.output_dir.is_relative_to(settings.report_output_dir)
+
+    second.register(
+        DataSliceReportDefinition(
+            name="FCCS Balance Sheet",
+            title="FCCS Balance Sheet",
+            cube="Consol",
+            pov=(("Year", "FY26"),),
+            columns=(
+                ReportAxisSegment(
+                    dimensions=("Period",),
+                    members=(("Jan",),),
+                ),
+            ),
+            rows=(
+                ReportAxisSegment(
+                    dimensions=("Account",),
+                    members=(("Total Assets",),),
+                ),
+            ),
+        )
+    )
+
+    assert [item.name for item in first.catalog()] == ["Revenue Report"]
+    assert [item.name for item in second.catalog()] == [
+        "FCCS Balance Sheet"
+    ]
+
+
+def test_report_workspace_seed_does_not_overwrite_scoped_catalog(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    workspace = ReportWorkspaceService(
+        settings,
+        application_id=11,
+        seed_catalog_file=settings.report_catalog_file,
+    )
+    workspace.delete("Revenue Report")
+
+    reloaded = ReportWorkspaceService(
+        settings,
+        application_id=11,
+        seed_catalog_file=settings.report_catalog_file,
+    )
+
+    assert reloaded.catalog() == ()
+
+
 def test_report_input_rejects_duplicate_pov_dimensions() -> None:
     with pytest.raises(ReportGenerationError, match="more than once"):
         ReportWorkspaceService.normalize_input(

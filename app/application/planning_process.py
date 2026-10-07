@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from app.application.reports import ReportWorkspaceService
 from app.clients.epm_client import EPMClient
 from app.config.email_settings import EmailNotificationSettings
 from app.config.settings import Settings
@@ -135,9 +136,18 @@ class PlanningProcessApplicationService:
         self,
         settings: Settings,
         *,
+        application_id: int | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
-        self._settings = settings
+        report_workspace = ReportWorkspaceService(
+            settings,
+            application_id=application_id,
+        )
+        self._settings = replace(
+            settings,
+            report_catalog_file=report_workspace.catalog_file,
+            report_output_dir=report_workspace.output_dir,
+        )
         self._logger = logger or logging.getLogger(__name__)
 
     def get_definition(self, code: str) -> PlanningProcessDefinition:
@@ -544,9 +554,18 @@ class PlanningProcessCommandExecutor:
         self,
         settings: Settings,
         *,
+        application_id: int | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
-        self._settings = settings
+        report_workspace = ReportWorkspaceService(
+            settings,
+            application_id=application_id,
+        )
+        self._settings = replace(
+            settings,
+            report_catalog_file=report_workspace.catalog_file,
+            report_output_dir=report_workspace.output_dir,
+        )
         self._logger = logger or logging.getLogger(__name__)
 
     def execute(

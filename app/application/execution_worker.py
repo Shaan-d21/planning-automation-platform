@@ -164,6 +164,7 @@ class DurableExecutionWorker:
                 operation_input, actor = operation_from_payload(job.payload)
                 executor = self._operation_executor_factory(
                     self._settings,
+                    application_id=job.application_id,
                     logger=self._logger.getChild(job.execution_id[:8]),
                 )
                 arguments = {
@@ -180,6 +181,7 @@ class DurableExecutionWorker:
                 process_input, actor = process_from_payload(job.payload)
                 executor = self._process_executor_factory(
                     self._settings,
+                    application_id=job.application_id,
                     logger=self._logger.getChild(job.execution_id[:8]),
                 )
                 arguments = {
@@ -196,6 +198,7 @@ class DurableExecutionWorker:
                 flow_input, actor = standalone_flow_from_payload(job.payload)
                 executor = self._standalone_flow_executor_factory(
                     self._settings,
+                    application_id=job.application_id,
                     logger=self._logger.getChild(job.execution_id[:8]),
                 )
                 arguments = {

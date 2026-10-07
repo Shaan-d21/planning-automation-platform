@@ -1081,9 +1081,11 @@ class OperationCommandExecutor:
         self,
         settings: Settings,
         *,
+        application_id: int | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._settings = settings
+        self._application_id = application_id
         self._logger = logger or logging.getLogger(__name__)
 
     def execute(
@@ -1690,6 +1692,7 @@ class OperationCommandExecutor:
             if isinstance(operation_input, ReportGenerationOperationInput):
                 result = ReportWorkspaceService(
                     self._settings,
+                    application_id=self._application_id,
                     logger=self._logger.getChild("report_workspace"),
                 ).generate(
                     client,

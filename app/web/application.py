@@ -285,6 +285,11 @@ def create_app(
     )
     process_service = PlanningProcessApplicationService(
         resolved_settings,
+        application_id=(
+            deployment_workspace.application_id
+            if deployment_workspace is not None
+            else None
+        ),
         logger=LOGGER.getChild("process_service"),
     )
     process_designer = ProcessDesignerApplicationService(
@@ -327,6 +332,11 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.settings = resolved_settings
+    app.state.deployment_application_id = (
+        deployment_workspace.application_id
+        if deployment_workspace is not None
+        else None
+    )
     app.state.business_process = business_process
     app.state.product_provider = product_provider
     app.state.navigation_definitions = PRODUCT_PROVIDER_REGISTRY.navigation_for(
@@ -410,12 +420,25 @@ def create_app(
     )
     app.state.report_workspace = ReportWorkspaceService(
         resolved_settings,
+        application_id=app.state.deployment_application_id,
+        seed_catalog_file=(
+            resolved_settings.report_catalog_file
+            if app.state.deployment_application_id is not None
+            else None
+        ),
         logger=LOGGER.getChild("report_workspace"),
     )
+    app.state.report_workspaces = {
+        app.state.deployment_application_id: app.state.report_workspace
+    }
     app.state.data_review = DataReviewWorkspaceService(
         resolved_settings,
+        report_catalog_file=app.state.report_workspace.catalog_file,
         logger=LOGGER.getChild("data_review"),
     )
+    app.state.data_review_workspaces = {
+        app.state.deployment_application_id: app.state.data_review
+    }
     app.state.identity_access = IdentityAccessApplicationService(
         resolved_settings
     )
@@ -1794,7 +1817,7 @@ def create_app(
         require_api_session(request)
         try:
             cubes = await run_in_threadpool(
-                request.app.state.data_review.list_cubes
+                _data_review_workspace_for_request(request).list_cubes
             )
         except EPMError as exc:
             return _data_review_error("Cubes could not be loaded.", exc)
@@ -1808,7 +1831,7 @@ def create_app(
         require_api_session(request)
         try:
             dimensions = await run_in_threadpool(
-                request.app.state.data_review.list_dimensions,
+                _data_review_workspace_for_request(request).list_dimensions,
                 cube,
             )
         except EPMError as exc:
@@ -1836,7 +1859,7 @@ def create_app(
         require_api_session(request)
         try:
             result = await run_in_threadpool(
-                request.app.state.data_review.search_members,
+                _data_review_workspace_for_request(request).search_members,
                 cube,
                 dimension,
                 query=q,
@@ -1858,7 +1881,7 @@ def create_app(
         require_api_session(request)
         try:
             grid = await run_in_threadpool(
-                request.app.state.data_review.load_slice,
+                _data_review_workspace_for_request(request).load_slice,
                 payload.to_domain(),
             )
         except EPMError as exc:
@@ -1873,12 +1896,15 @@ def create_app(
         require_api_session(request)
         try:
             grid = await run_in_threadpool(
-                request.app.state.data_review.load_slice,
+                _data_review_workspace_for_request(request).load_slice,
                 payload.to_domain(),
             )
             content = await run_in_threadpool(
                 ExcelFormReportRenderer().render_bytes,
-                application_name=resolved_settings.application_name,
+                application_name=current_application_context(
+                    request,
+                    _current_user(request),
+                ).application_name,
                 form_name=grid.form_name,
                 title=f"{grid.cube} Data Review",
                 grid=grid.grid,
@@ -1896,7 +1922,7 @@ def create_app(
         require_api_session(request)
         try:
             grid = await run_in_threadpool(
-                request.app.state.data_review.load_slice,
+                _data_review_workspace_for_request(request).load_slice,
                 payload.to_domain(),
             )
             content = await run_in_threadpool(_data_review_csv, grid.grid)
@@ -1921,7 +1947,7 @@ def create_app(
         require_api_session(request)
         try:
             validation = await run_in_threadpool(
-                request.app.state.data_review.validate_slice,
+                _data_review_workspace_for_request(request).validate_slice,
                 payload.slice.to_domain(),
                 payload.rules.to_domain(),
             )
@@ -1955,13 +1981,16 @@ def create_app(
         selection = payload.slice.to_domain()
         try:
             validation = await run_in_threadpool(
-                request.app.state.data_review.validate_slice,
+                _data_review_workspace_for_request(request).validate_slice,
                 selection,
                 payload.rules.to_domain(),
             )
             content = await run_in_threadpool(
                 DataValidationExcelRenderer().render_quality,
-                application_name=resolved_settings.application_name,
+                application_name=current_application_context(
+                    request,
+                    _current_user(request),
+                ).application_name,
                 cube=validation.cube,
                 pov=selection.pov,
                 result=validation.result,
@@ -1978,7 +2007,7 @@ def create_app(
         require_api_session(request)
         try:
             comparison = await run_in_threadpool(
-                request.app.state.data_review.compare_slices,
+                _data_review_workspace_for_request(request).compare_slices,
                 payload.source.to_domain(),
                 payload.target.to_domain(),
                 tolerance=payload.tolerance,
@@ -2020,7 +2049,7 @@ def create_app(
         target = payload.target.to_domain()
         try:
             comparison = await run_in_threadpool(
-                request.app.state.data_review.compare_slices,
+                _data_review_workspace_for_request(request).compare_slices,
                 source,
                 target,
                 tolerance=payload.tolerance,
@@ -2029,7 +2058,10 @@ def create_app(
             )
             content = await run_in_threadpool(
                 DataValidationExcelRenderer().render_comparison,
-                application_name=resolved_settings.application_name,
+                application_name=current_application_context(
+                    request,
+                    _current_user(request),
+                ).application_name,
                 source_cube=comparison.source_cube,
                 target_cube=comparison.target_cube,
                 source_pov=source.pov,
@@ -2049,13 +2081,17 @@ def create_app(
         redirect = require_session(request)
         if redirect is not None:
             return redirect
-        directory = resolved_settings.report_output_dir.resolve()
-        candidate = (directory / filename).resolve()
-        if (
-            candidate.parent != directory
-            or candidate.suffix.casefold() != ".xlsx"
-            or not candidate.is_file()
-        ):
+        candidate = None
+        for directory in _report_output_dirs_for_request(request):
+            resolved = (directory / filename).resolve()
+            if (
+                resolved.parent == directory
+                and resolved.suffix.casefold() == ".xlsx"
+                and resolved.is_file()
+            ):
+                candidate = resolved
+                break
+        if candidate is None:
             raise HTTPException(status_code=404, detail="Report not found.")
         return FileResponse(
             candidate,
@@ -2071,7 +2107,7 @@ def create_app(
         require_api_session(request)
         try:
             reports = await run_in_threadpool(
-                request.app.state.report_workspace.catalog
+                _report_workspace_for_request(request).catalog
             )
         except EPMError as exc:
             return JSONResponse(
@@ -2093,7 +2129,7 @@ def create_app(
         require_api_session(request)
         try:
             views = await run_in_threadpool(
-                request.app.state.report_workspace.catalog
+                _report_workspace_for_request(request).catalog
             )
         except EPMError as exc:
             return _data_review_error("Saved views could not be loaded.", exc)
@@ -2115,7 +2151,7 @@ def create_app(
         require_api_session(request)
         try:
             saved = await run_in_threadpool(
-                request.app.state.report_workspace.register,
+                _report_workspace_for_request(request).register,
                 payload.to_domain(),
             )
         except EPMError as exc:
@@ -2135,7 +2171,7 @@ def create_app(
         require_api_session(request)
         try:
             deleted = await run_in_threadpool(
-                request.app.state.report_workspace.delete,
+                _report_workspace_for_request(request).delete,
                 name,
             )
         except EPMError as exc:
@@ -2153,7 +2189,7 @@ def create_app(
         require_api_session(request)
         try:
             registered = await run_in_threadpool(
-                request.app.state.report_workspace.register,
+                _report_workspace_for_request(request).register,
                 payload.to_domain(),
             )
         except EPMError as exc:
@@ -2184,7 +2220,7 @@ def create_app(
         require_api_session(request)
         try:
             preflight = await run_in_threadpool(
-                request.app.state.report_workspace.preflight,
+                _report_workspace_for_request(request).preflight,
                 payload.form_name,
             )
         except EPMError as exc:
@@ -2211,6 +2247,7 @@ def create_app(
             execution = request.app.state.operation_manager.submit(
                 payload.to_domain(),
                 actor=_request_actor(request),
+                application_id=_active_application_id(request),
             )
         except EPMError as exc:
             return _operation_start_error(exc)
@@ -2348,6 +2385,7 @@ def create_app(
             request.app.state.execution_manager,
             execution_id,
             resolved_settings,
+            report_output_dirs=_report_output_dirs_for_request(request),
         )
         if payload is None:
             raise HTTPException(status_code=404, detail="Execution not found.")
@@ -2981,6 +3019,10 @@ def create_app(
             request.app.state.operation_manager,
             execution_id,
             request.app.state.settings,
+            report_output_dirs=(
+                request.app.state.report_workspace.output_dir.resolve(),
+                request.app.state.settings.report_output_dir.resolve(),
+            ),
         )
         if payload is None:
             raise HTTPException(status_code=404, detail="Execution not found.")
@@ -3782,6 +3824,7 @@ def create_app(
             request.app.state.operation_manager,
             execution_id,
             request.app.state.settings,
+            report_output_dirs=_report_output_dirs_for_request(request),
         )
         if payload is None:
             raise HTTPException(status_code=404, detail="Execution not found.")
@@ -4030,7 +4073,13 @@ def _validate_process_files(
                 )
 
 
-def _execution_payload(manager, execution_id: str, settings: Settings):
+def _execution_payload(
+    manager,
+    execution_id: str,
+    settings: Settings,
+    *,
+    report_output_dirs: tuple[Path, ...] | None = None,
+):
     """Combine temporary background state with durable workflow history."""
     managed = manager.get(execution_id)
     workflow = manager.get_workflow(execution_id)
@@ -4086,14 +4135,21 @@ def _execution_payload(manager, execution_id: str, settings: Settings):
         for item in steps
     )
     artifacts: list[dict[str, str]] = []
-    report_root = settings.report_output_dir.resolve()
+    report_roots = tuple(
+        dict.fromkeys(
+            path.resolve()
+            for path in (
+                report_output_dirs or (settings.report_output_dir,)
+            )
+        )
+    )
     for step in steps:
         raw_output = step["details"].get("output_path")
         if not raw_output:
             continue
         path = Path(str(raw_output)).resolve()
         if (
-            path.parent == report_root
+            path.parent in report_roots
             and path.suffix.casefold() == ".xlsx"
             and path.is_file()
         ):
@@ -4345,6 +4401,75 @@ def _active_application_id(request: Request) -> int:
     ).application_id
 
 
+def _report_workspace_for_request(request: Request) -> ReportWorkspaceService:
+    """Return the report workspace owned by the active Oracle application."""
+    context = current_application_context(request, _current_user(request))
+    if context.application_id == request.app.state.deployment_application_id:
+        primary = request.app.state.report_workspace
+        request.app.state.report_workspaces[context.application_id] = primary
+        return primary
+    cached = request.app.state.report_workspaces.get(context.application_id)
+    if cached is not None:
+        return cached
+    seed = (
+        request.app.state.settings.report_catalog_file
+        if context.application_id
+        == request.app.state.deployment_application_id
+        else None
+    )
+    workspace = ReportWorkspaceService(
+        context.settings,
+        application_id=context.application_id,
+        seed_catalog_file=seed,
+        logger=LOGGER.getChild(
+            f"report_workspace.application_{context.application_id}"
+        ),
+    )
+    request.app.state.report_workspaces[context.application_id] = workspace
+    return workspace
+
+
+def _data_review_workspace_for_request(
+    request: Request,
+) -> DataReviewWorkspaceService:
+    """Return a cached Data Review service bound to the active application."""
+    context = current_application_context(request, _current_user(request))
+    if context.application_id == request.app.state.deployment_application_id:
+        primary = request.app.state.data_review
+        request.app.state.data_review_workspaces[context.application_id] = primary
+        return primary
+    cached = request.app.state.data_review_workspaces.get(
+        context.application_id
+    )
+    if cached is not None:
+        return cached
+    workspace = DataReviewWorkspaceService(
+        context.settings,
+        report_catalog_file=_report_workspace_for_request(
+            request
+        ).catalog_file,
+        logger=LOGGER.getChild(
+            f"data_review.application_{context.application_id}"
+        ),
+    )
+    request.app.state.data_review_workspaces[context.application_id] = (
+        workspace
+    )
+    return workspace
+
+
+def _report_output_dirs_for_request(request: Request) -> tuple[Path, ...]:
+    """Return scoped report roots plus the deployment's legacy root."""
+    context = current_application_context(request, _current_user(request))
+    scoped = _report_workspace_for_request(request).output_dir.resolve()
+    roots = [scoped]
+    if context.application_id == request.app.state.deployment_application_id:
+        legacy = request.app.state.settings.report_output_dir.resolve()
+        if legacy != scoped:
+            roots.append(legacy)
+    return tuple(roots)
+
+
 def _schedule_payload(schedule: AutomationSchedule) -> dict[str, object]:
     """Return a JSON-safe schedule representation."""
     variables = schedule.configuration.get("variables", {})
@@ -4442,6 +4567,8 @@ def _operation_execution_payload(
     manager,
     execution_id: str,
     settings: Settings,
+    *,
+    report_output_dirs: tuple[Path, ...] | None = None,
 ):
     managed = manager.get(execution_id)
     workflow = manager.get_workflow(execution_id)
@@ -4498,17 +4625,32 @@ def _operation_execution_payload(
         for item in steps
     )
     artifacts: list[dict[str, str]] = []
-    report_root = settings.report_output_dir.resolve()
+    report_roots = tuple(
+        dict.fromkeys(
+            path.resolve()
+            for path in (
+                report_output_dirs or (settings.report_output_dir,)
+            )
+        )
+    )
     for step in steps:
         raw_output = step["details"].get("output_file")
         if not raw_output:
             continue
-        path = (report_root / Path(str(raw_output)).name).resolve()
-        if (
-            path.parent == report_root
-            and path.suffix.casefold() == ".xlsx"
-            and path.is_file()
-        ):
+        filename = Path(str(raw_output)).name
+        path = next(
+            (
+                candidate
+                for root in report_roots
+                if (
+                    (candidate := (root / filename).resolve()).parent == root
+                    and candidate.suffix.casefold() == ".xlsx"
+                    and candidate.is_file()
+                )
+            ),
+            None,
+        )
+        if path is not None:
             artifacts.append(
                 {
                     "name": path.name,

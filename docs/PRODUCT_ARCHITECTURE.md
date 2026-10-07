@@ -96,9 +96,16 @@ of the Planning compatibility contract. Existing imports continue to consume
   and its active registered application. Resolution and terminal cleanup require
   the same ownership tuple, while logout safely clears every upload owned by
   that session. Queued work already retains its application identity.
-- Reports and remaining product-owned catalogs are still deployment-bound and
-  must receive the same ownership boundary before public workspace switching is
-  enabled.
+- Saved report/Data Explorer definitions and generated Excel workbooks now use
+  application-specific persistent namespaces. The deployment application's
+  existing JSON catalog is copied once into its scoped catalog; other
+  applications start empty and cannot resolve that catalog or its downloads.
+  Report operations carry the active application into the durable queue, and
+  Data Review resolves the catalog and Oracle client settings from the active
+  request context.
+- Remaining product-owned catalogs and execution-evidence download surfaces
+  must receive the same ownership boundary before public workspace switching
+  is enabled.
 
 The FCCS read contract follows Oracle's supported public REST resources:
 

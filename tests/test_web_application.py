@@ -65,6 +65,7 @@ from app.application.user_variables import UserVariableCatalog
 from app.application.reports import (
     ReportCatalogItem,
     ReportPreflight,
+    ReportWorkspaceService,
 )
 from app.config.settings import Settings
 from app.models.data_integration_catalog import DataIntegrationDefinition
@@ -2107,6 +2108,46 @@ def test_report_download_rejects_non_excel_artifact(
     response = client.get("/app/reports/debug.log")
 
     assert response.status_code == 404
+
+
+def test_report_download_is_bound_to_active_application(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    settings = _settings(tmp_path)
+    app = create_app(
+        settings,
+        session_secret="test-secret",
+        connection_use_case_factory=lambda settings: _SuccessfulConnection(),
+    )
+    client = TestClient(app)
+    _login(client)
+    primary = app.state.report_workspace
+    primary.output_dir.mkdir(parents=True, exist_ok=True)
+    (primary.output_dir / "shared-name.xlsx").write_bytes(b"primary")
+
+    secondary_settings = replace(settings, application_name="FCCS")
+    secondary = ReportWorkspaceService(
+        secondary_settings,
+        application_id=999,
+    )
+    monkeypatch.setattr(
+        web_application,
+        "current_application_context",
+        lambda request, user=None: SimpleNamespace(
+            application_id=999,
+            settings=secondary_settings,
+        ),
+    )
+
+    unavailable = client.get("/app/reports/shared-name.xlsx")
+    secondary.output_dir.mkdir(parents=True, exist_ok=True)
+    (secondary.output_dir / "shared-name.xlsx").write_bytes(b"secondary")
+    available = client.get("/app/reports/shared-name.xlsx")
+
+    assert unavailable.status_code == 404
+    assert available.status_code == 200
+    assert available.content == b"secondary"
 
 
 def test_report_catalog_preflight_and_generation_start(
