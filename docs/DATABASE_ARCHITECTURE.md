@@ -36,6 +36,14 @@ schema.
   registered application ID; download and Data Review resolution use only the
   authenticated session's active application namespace. The original catalog
   is retained only as the one-time seed for the deployment application.
+- Pipeline, Data Integration, Planning Process, and Planning Cycle JSON
+  allow-lists also live in persistent application-ID namespaces. Configured
+  JSON files are immutable deployment seeds; they are copied only for the
+  deployment application, while newly registered applications start empty.
+- Process Designer versions and run presets retain their existing relational
+  schema but use an internal application-qualified storage key. User-facing
+  process codes remain unchanged, the same code can exist in two applications,
+  and pre-workspace records are copied once into the deployment namespace.
 
 ## Tables
 
@@ -221,6 +229,14 @@ index prevents concurrent queued/running work for the same target.
 An expired `RUNNING` lease becomes `RECOVERY_REQUIRED`; it is never
 automatically requeued. This avoids silently executing a non-idempotent Oracle
 job twice when the first worker's final outcome is uncertain.
+
+Workflow history reads are filtered by `application_id` for browser and agent
+surfaces. An execution identifier alone never authorizes access to its detail,
+logs, or downloadable evidence. Retained Oracle error files and Data
+Integration logs remain outside PostgreSQL under
+`job-evidence/application-<id>/<execution-id>`; the deployment application's
+legacy evidence directory is read only when the workflow is attributed to that
+application.
 
 #### `workflow_runs`
 

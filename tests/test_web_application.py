@@ -171,6 +171,10 @@ def test_failed_flow_recovery_requires_review_and_queues_new_execution(
         steps=(SimpleNamespace(),),
     )
     app.state.operation_manager = Mock()
+    app.state.operation_manager.get_workflow.return_value = SimpleNamespace(
+        application_id=app.state.deployment_application_id
+    )
+    app.state.operation_manager.get.return_value = None
     app.state.operation_manager.submit_flow.return_value = SimpleNamespace(
         execution_id="recovery-flow"
     )
@@ -207,6 +211,10 @@ def test_standalone_flow_stop_requests_safe_worker_boundary(
     client = TestClient(app)
     _login(client)
     app.state.operation_manager = Mock()
+    app.state.operation_manager.get_workflow.return_value = SimpleNamespace(
+        application_id=app.state.deployment_application_id
+    )
+    app.state.operation_manager.get.return_value = None
     app.state.operation_manager.request_flow_stop.return_value = SimpleNamespace(
         execution_id="active-flow",
         status=OperationExecutionStatus.RUNNING,
@@ -1414,7 +1422,10 @@ def test_v1_access_control_uses_only_four_primary_roles(tmp_path: Path) -> None:
 
 
 def test_v1_jobs_activity_returns_safe_step_evidence(tmp_path: Path) -> None:
-    settings = _settings(tmp_path)
+    settings = replace(
+        _settings(tmp_path),
+        runtime_data_dir=tmp_path / "runtime",
+    )
     app = create_app(settings, session_secret="test-secret")
     client = TestClient(app)
     _login(client)
@@ -1422,6 +1433,7 @@ def test_v1_jobs_activity_returns_safe_step_evidence(tmp_path: Path) -> None:
     SQLWorkflowRepository(settings.database_target).save(
         WorkflowRun(
             execution_id="job-test-001",
+            application_id=app.state.deployment_application_id,
             workflow_name="Load July Actuals",
             status=WorkflowStatus.FAILED,
             started_at=now - timedelta(seconds=45),
@@ -1448,10 +1460,36 @@ def test_v1_jobs_activity_returns_safe_step_evidence(tmp_path: Path) -> None:
                             "records_rejected": 3,
                             "details": [],
                         },
+                        "artifacts": [
+                            {
+                                "artifact_id": "rejections-001",
+                                "stored_name": "rejections.csv",
+                                "name": "July Rejections.csv",
+                                "kind": "REJECTED_RECORDS",
+                                "size_bytes": 12,
+                            }
+                        ],
                     },
                     error_message="Three records contain invalid members.",
                 ),
             ),
+        )
+    )
+    evidence_directory = (
+        settings.runtime_data_dir
+        / "job-evidence"
+        / f"application-{app.state.deployment_application_id}"
+        / "job-test-001"
+    )
+    evidence_directory.mkdir(parents=True)
+    (evidence_directory / "rejections.csv").write_bytes(b"bad,member\n")
+    SQLWorkflowRepository(settings.database_target).save(
+        WorkflowRun(
+            execution_id="legacy-unscoped-job",
+            workflow_name="Unattributed Legacy Run",
+            status=WorkflowStatus.SUCCESS,
+            started_at=now - timedelta(seconds=60),
+            completed_at=now - timedelta(seconds=50),
         )
     )
 
@@ -1474,6 +1512,13 @@ def test_v1_jobs_activity_returns_safe_step_evidence(tmp_path: Path) -> None:
         "records_rejected": 3,
         "details": [],
     }
+    artifact = client.get(
+        "/api/v1/jobs/job-test-001/artifacts/rejections-001"
+    )
+    assert artifact.status_code == 200
+    assert artifact.content == b"bad,member\n"
+    hidden = client.get("/api/v1/jobs/legacy-unscoped-job")
+    assert hidden.status_code == 404
 
 
 def test_schedule_workspace_and_list_require_verified_session(

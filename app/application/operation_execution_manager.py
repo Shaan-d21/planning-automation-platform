@@ -78,6 +78,7 @@ class ManagedOperationExecution:
     status: OperationExecutionStatus
     submitted_at: datetime
     log_file: Path
+    application_id: int | None = None
     error_message: str | None = None
     cancellation_requested_at: datetime | None = None
     cancellation_requested_by: str | None = None
@@ -386,6 +387,7 @@ class OperationExecutionManager:
                 / "operation_logs"
                 / f"{job.execution_id}.log"
             ),
+            application_id=job.application_id,
             error_message=job.error_message,
             cancellation_requested_at=job.cancellation_requested_at,
             cancellation_requested_by=job.cancellation_requested_by,

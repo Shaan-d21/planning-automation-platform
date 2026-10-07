@@ -29,6 +29,9 @@ from app.models.planning_process import (
 from app.models.workflow import WorkflowRun
 from app.models.access_control import ExecutionActor
 from app.services.form_service import PlanningFormService
+from app.services.application_catalog_workspace import (
+    ApplicationCatalogWorkspace,
+)
 from app.services.job_service import JobService
 from app.services.notification_service import create_notification_service
 from app.services.pipeline_preflight_service import PipelinePreflightService
@@ -137,8 +140,14 @@ class PlanningProcessApplicationService:
         settings: Settings,
         *,
         application_id: int | None = None,
+        seed_catalogs: bool = False,
         logger: logging.Logger | None = None,
     ) -> None:
+        catalogs = ApplicationCatalogWorkspace(
+            settings,
+            application_id=application_id,
+            seed_from_configuration=seed_catalogs,
+        )
         report_workspace = ReportWorkspaceService(
             settings,
             application_id=application_id,
@@ -147,13 +156,23 @@ class PlanningProcessApplicationService:
             settings,
             report_catalog_file=report_workspace.catalog_file,
             report_output_dir=report_workspace.output_dir,
+            planning_process_catalog_file=(
+                catalogs.planning_process_catalog_file
+            ),
+            planning_cycle_catalog_file=(
+                catalogs.planning_cycle_catalog_file
+            ),
         )
+        self._application_id = application_id
+        self._adopt_legacy_catalogs = seed_catalogs
         self._logger = logger or logging.getLogger(__name__)
 
     def get_definition(self, code: str) -> PlanningProcessDefinition:
         """Return one configured process for presentation."""
         return PlanningProcessCatalogService(
-            self._settings.database_target
+            self._settings.database_target,
+            application_id=self._application_id,
+            adopt_legacy=self._adopt_legacy_catalogs,
         ).get(
             self._settings.planning_process_catalog_file,
             code,
@@ -166,7 +185,9 @@ class PlanningProcessApplicationService:
         """Validate live Oracle artifacts without changing Oracle state."""
         definition = self.get_definition(process_input.process_code)
         cycle_definition = PlanningCycleCatalogService(
-            self._settings.database_target
+            self._settings.database_target,
+            application_id=self._application_id,
+            adopt_legacy=self._adopt_legacy_catalogs,
         ).get(
             self._settings.planning_cycle_catalog_file,
             definition.cycle_code,
@@ -557,6 +578,11 @@ class PlanningProcessCommandExecutor:
         application_id: int | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
+        catalogs = ApplicationCatalogWorkspace(
+            settings,
+            application_id=application_id,
+            seed_from_configuration=application_id is not None,
+        )
         report_workspace = ReportWorkspaceService(
             settings,
             application_id=application_id,
@@ -565,7 +591,14 @@ class PlanningProcessCommandExecutor:
             settings,
             report_catalog_file=report_workspace.catalog_file,
             report_output_dir=report_workspace.output_dir,
+            planning_process_catalog_file=(
+                catalogs.planning_process_catalog_file
+            ),
+            planning_cycle_catalog_file=(
+                catalogs.planning_cycle_catalog_file
+            ),
         )
+        self._application_id = application_id
         self._logger = logger or logging.getLogger(__name__)
 
     def execute(
@@ -615,6 +648,8 @@ class PlanningProcessCommandExecutor:
             process_input.variable_updates,
         )
         setattr(arguments, "_execution_id_override", execution_id)
+        setattr(arguments, "_application_id", self._application_id)
+        setattr(arguments, "_adopt_legacy_process_catalog", True)
         log_file.parent.mkdir(parents=True, exist_ok=True)
 
         email_settings = self._settings.email_notifications

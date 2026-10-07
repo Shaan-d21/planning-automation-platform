@@ -60,6 +60,9 @@ from app.products.contracts import (
 from app.products.registry import PRODUCT_PROVIDER_REGISTRY
 from app.services.business_rule_service import BusinessRuleService
 from app.services.application_service import ApplicationService
+from app.services.application_catalog_workspace import (
+    ApplicationCatalogWorkspace,
+)
 from app.services.cube_refresh_service import CubeRefreshService
 from app.services.data_integration_catalog_service import (
     DataIntegrationCatalogService,
@@ -291,9 +294,23 @@ class OperationCatalogService:
         settings: Settings,
         *,
         business_process: BusinessProcessType = BusinessProcessType.PLANNING,
+        application_id: int | None = None,
+        seed_catalogs: bool = False,
         logger: logging.Logger | None = None,
     ) -> None:
-        self._settings = settings
+        catalogs = ApplicationCatalogWorkspace(
+            settings,
+            application_id=application_id,
+            seed_from_configuration=seed_catalogs,
+        )
+        self._settings = replace(
+            settings,
+            pipeline_catalog_file=catalogs.pipeline_catalog_file,
+            data_integration_catalog_file=(
+                catalogs.data_integration_catalog_file
+            ),
+        )
+        self._application_id = application_id
         self._business_process = business_process
         self._logger = logger or logging.getLogger(__name__)
 
@@ -1187,6 +1204,7 @@ class OperationCommandExecutor:
                 log_evidence = OracleJobEvidenceService(
                     FileService(client, allow_any_extension=True),
                     self._settings.runtime_data_dir,
+                    application_id=self._application_id,
                     logger=self._logger.getChild("oracle_job_evidence"),
                 ).capture_data_integration_log(
                     execution_id=execution_id,
@@ -1237,6 +1255,7 @@ class OperationCommandExecutor:
                 artifact_evidence = OracleJobEvidenceService(
                     FileService(client, allow_any_extension=True),
                     self._settings.runtime_data_dir,
+                    application_id=self._application_id,
                     logger=self._logger.getChild("oracle_job_evidence"),
                 ).capture_error_file(
                     execution_id=execution_id,
@@ -2068,6 +2087,7 @@ class OperationCommandExecutor:
                         OracleJobEvidenceService(
                             FileService(client, allow_any_extension=True),
                             self._settings.runtime_data_dir,
+                            application_id=self._application_id,
                             logger=self._logger.getChild("oracle_job_evidence"),
                         ).capture_error_file(
                             execution_id=execution_id,

@@ -93,6 +93,46 @@ def _registered_applications(settings: Settings) -> tuple[int, int]:
     return int(planning), int(close)
 
 
+def test_workflow_history_is_filtered_by_registered_application(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    planning_id, close_id = _registered_applications(settings)
+    repository = SQLWorkflowRepository(settings.database_target)
+    now = datetime.now(UTC)
+    repository.save(
+        WorkflowRun(
+            execution_id="planning-run",
+            application_id=planning_id,
+            workflow_name="Planning Run",
+            status=WorkflowStatus.SUCCESS,
+            started_at=now,
+            completed_at=now,
+        )
+    )
+    repository.save(
+        WorkflowRun(
+            execution_id="fccs-run",
+            application_id=close_id,
+            workflow_name="FCCS Run",
+            status=WorkflowStatus.SUCCESS,
+            started_at=now,
+            completed_at=now,
+        )
+    )
+
+    planning = repository.list_recent(
+        limit=10,
+        application_id=planning_id,
+    )
+
+    assert [run.execution_id for run in planning] == ["planning-run"]
+    assert repository.get(
+        "fccs-run",
+        application_id=planning_id,
+    ) is None
+
+
 def test_queue_claim_heartbeat_and_completion_are_durable(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     repository = SQLExecutionQueueRepository(settings.database_target)

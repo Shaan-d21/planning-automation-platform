@@ -103,9 +103,21 @@ of the Planning compatibility contract. Existing imports continue to consume
   Report operations carry the active application into the durable queue, and
   Data Review resolves the catalog and Oracle client settings from the active
   request context.
-- Remaining product-owned catalogs and execution-evidence download surfaces
-  must receive the same ownership boundary before public workspace switching
-  is enabled.
+- Jobs history, execution detail, operation/process logs, agent execution
+  evidence, dashboard run metrics, and retained Oracle rejection/log artifacts
+  now resolve only workflow rows owned by the active registered application.
+  Newly retained Oracle files use application-specific persistent directories;
+  legacy files are visible only to the deployment application and only through
+  an attributed workflow. Unattributed legacy workflow rows fail closed.
+- Local Pipeline, Data Integration, Planning Process, and Planning Cycle
+  allow-lists now use persistent application-specific namespaces. Only the
+  deployment application receives the legacy JSON seeds. Process Designer
+  versions and run presets use application-qualified storage identities, so
+  two applications can safely publish the same visible process code; existing
+  designer records are adopted only by the deployment application.
+- Operational Planning-cycle/task records and the retired legacy process-
+  schedule subsystem still require application ownership (or removal) before
+  public workspace switching is enabled.
 
 The FCCS read contract follows Oracle's supported public REST resources:
 

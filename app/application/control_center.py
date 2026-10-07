@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
@@ -11,6 +11,9 @@ from app.config.settings import Settings
 from app.models.workflow import WorkflowRun, WorkflowStatus
 from app.services.planning_process_catalog_service import (
     PlanningProcessCatalogService,
+)
+from app.services.application_catalog_workspace import (
+    ApplicationCatalogWorkspace,
 )
 from app.services.pipeline_process_repository import (
     SQLPipelineProcessRepository,
@@ -81,22 +84,46 @@ class ControlCenterService:
         self,
         settings: Settings,
         *,
+        application_id: int | None = None,
+        seed_catalogs: bool = False,
         process_catalog: PlanningProcessCatalogService | None = None,
         repository: SQLWorkflowRepository | None = None,
     ) -> None:
-        self._settings = settings
+        catalogs = ApplicationCatalogWorkspace(
+            settings,
+            application_id=application_id,
+            seed_from_configuration=seed_catalogs,
+        )
+        self._settings = replace(
+            settings,
+            planning_process_catalog_file=(
+                catalogs.planning_process_catalog_file
+            ),
+        )
         self._process_catalog = (
             process_catalog
-            or PlanningProcessCatalogService(settings.database_target)
+            or PlanningProcessCatalogService(
+                settings.database_target,
+                application_id=application_id,
+                adopt_legacy=seed_catalogs,
+            )
         )
         self._repository = repository or SQLWorkflowRepository(
             settings.database_target
         )
         self._process_designs = SQLPipelineProcessRepository(
-            settings.database_target
+            settings.database_target,
+            application_id=application_id,
+            adopt_legacy=seed_catalogs,
         )
 
-    def snapshot(self, *, history_limit: int = 8) -> ControlCenterSnapshot:
+    def snapshot(
+        self,
+        *,
+        history_limit: int = 8,
+        application_id: int | None = None,
+        report_output_dir: Path | None = None,
+    ) -> ControlCenterSnapshot:
         """Return current catalog, history, and artifact metrics."""
         definitions = self._process_catalog.load(
             self._settings.planning_process_catalog_file
@@ -119,7 +146,10 @@ class ControlCenterService:
             )
             for definition in definitions
         )
-        runs = self._repository.list_recent(limit=history_limit)
+        runs = self._repository.list_recent(
+            limit=history_limit,
+            application_id=application_id,
+        )
         recent_runs = tuple(self._run_view(run) for run in runs)
         successful = sum(
             run.status is WorkflowStatus.SUCCESS for run in runs
@@ -139,16 +169,22 @@ class ControlCenterService:
             deployment_mode=self._settings.resolved_deployment_mode,
             processes=processes,
             recent_runs=recent_runs,
-            report_count=len(self.list_artifacts()),
+            report_count=len(
+                self.list_artifacts(directory=report_output_dir)
+            ),
             success_rate=success_rate,
             successful_runs=successful,
             failed_runs=failed,
             running_runs=running,
         )
 
-    def list_artifacts(self) -> tuple[ArtifactView, ...]:
+    def list_artifacts(
+        self,
+        *,
+        directory: Path | None = None,
+    ) -> tuple[ArtifactView, ...]:
         """Return generated Excel reports in newest-first order."""
-        directory = self._settings.report_output_dir
+        directory = directory or self._settings.report_output_dir
         if not directory.exists():
             return ()
         paths = sorted(
@@ -162,13 +198,29 @@ class ControlCenterService:
         )
         return tuple(self._artifact_view(path) for path in paths)
 
-    def list_workflow_runs(self, *, limit: int = 100) -> tuple[WorkflowRun, ...]:
+    def list_workflow_runs(
+        self,
+        *,
+        limit: int = 100,
+        application_id: int | None = None,
+    ) -> tuple[WorkflowRun, ...]:
         """Return durable Oracle automation runs for the Jobs workspace."""
-        return self._repository.list_recent(limit=limit)
+        return self._repository.list_recent(
+            limit=limit,
+            application_id=application_id,
+        )
 
-    def get_workflow_run(self, execution_id: str) -> WorkflowRun | None:
+    def get_workflow_run(
+        self,
+        execution_id: str,
+        *,
+        application_id: int | None = None,
+    ) -> WorkflowRun | None:
         """Return one durable execution aggregate including its steps."""
-        return self._repository.get(str(execution_id).strip())
+        return self._repository.get(
+            str(execution_id).strip(),
+            application_id=application_id,
+        )
 
     @staticmethod
     def _visible_process_steps(definition) -> tuple[str, ...]:

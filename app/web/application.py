@@ -217,6 +217,11 @@ def create_app(
         resolved_settings.epm_base_url,
         resolved_settings.application_name,
     )
+    deployment_application_id = (
+        deployment_workspace.application_id
+        if deployment_workspace is not None
+        else None
+    )
     business_process = environment_configuration.active_business_process(
         application_name=resolved_settings.application_name
     )
@@ -249,6 +254,8 @@ def create_app(
     operation_catalog = OperationCatalogService(
         resolved_settings,
         business_process=business_process,
+        application_id=deployment_application_id,
+        seed_catalogs=deployment_application_id is not None,
         logger=LOGGER.getChild("operation_catalog"),
     )
     automation_schedule_service = AutomationScheduleApplicationService(
@@ -267,11 +274,7 @@ def create_app(
         ),
         environment_url=resolved_settings.epm_base_url,
         application_name=resolved_settings.application_name,
-        application_id=(
-            deployment_workspace.application_id
-            if deployment_workspace is not None
-            else None
-        ),
+        application_id=deployment_application_id,
         logger=LOGGER.getChild("automation_schedule_coordinator"),
     )
     automation_schedule_manager = AutomationScheduleManager(
@@ -285,15 +288,14 @@ def create_app(
     )
     process_service = PlanningProcessApplicationService(
         resolved_settings,
-        application_id=(
-            deployment_workspace.application_id
-            if deployment_workspace is not None
-            else None
-        ),
+        application_id=deployment_application_id,
+        seed_catalogs=deployment_application_id is not None,
         logger=LOGGER.getChild("process_service"),
     )
     process_designer = ProcessDesignerApplicationService(
         resolved_settings,
+        application_id=deployment_application_id,
+        seed_catalogs=deployment_application_id is not None,
         logger=LOGGER.getChild("process_designer"),
     )
     recovery_worker = DurableExecutionWorker(
@@ -332,11 +334,7 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.settings = resolved_settings
-    app.state.deployment_application_id = (
-        deployment_workspace.application_id
-        if deployment_workspace is not None
-        else None
-    )
+    app.state.deployment_application_id = deployment_application_id
     app.state.business_process = business_process
     app.state.product_provider = product_provider
     app.state.navigation_definitions = PRODUCT_PROVIDER_REGISTRY.navigation_for(
@@ -385,7 +383,11 @@ def create_app(
     app.state.connection_use_case_factory = (
         connection_use_case_factory or VerifyConnection
     )
-    app.state.control_center = ControlCenterService(resolved_settings)
+    app.state.control_center = ControlCenterService(
+        resolved_settings,
+        application_id=deployment_application_id,
+        seed_catalogs=deployment_application_id is not None,
+    )
     app.state.process_service = process_service
     app.state.process_designer = process_designer
     app.state.automation_schedule_service = automation_schedule_service
@@ -769,9 +771,14 @@ def create_app(
     @app.get("/api/control-panel/snapshot")
     async def control_panel_snapshot(request: Request):
         require_api_session(request)
+        application_id = _active_application_id(request)
         snapshot = await run_in_threadpool(
             request.app.state.control_center.snapshot,
             history_limit=8,
+            application_id=application_id,
+            report_output_dir=_report_workspace_for_request(
+                request
+            ).output_dir,
         )
         return {
             "status": "success",
@@ -2381,6 +2388,11 @@ def create_app(
     @app.get("/api/runs/{execution_id}")
     async def get_process_run(request: Request, execution_id: str):
         require_api_session(request)
+        _require_execution_application(
+            request,
+            request.app.state.execution_manager,
+            execution_id,
+        )
         payload = _execution_payload(
             request.app.state.execution_manager,
             execution_id,
@@ -3990,6 +4002,11 @@ def create_app(
         redirect = require_session(request)
         if redirect is not None:
             return redirect
+        _require_execution_application(
+            request,
+            request.app.state.execution_manager,
+            execution_id,
+        )
         execution = request.app.state.execution_manager.get(execution_id)
         if execution is None or not execution.log_file.is_file():
             raise HTTPException(
@@ -4985,6 +5002,11 @@ def _require_operation_execution_access(
     execution_id: str,
 ) -> None:
     """Restrict process-only users to executions linked to their own tasks."""
+    _require_execution_application(
+        request,
+        request.app.state.operation_manager,
+        execution_id,
+    )
     user = _current_user(request)
     assert user is not None
     if user.has_permission(Permission.OPERATION_EXECUTE) or user.has_permission(
@@ -5000,6 +5022,27 @@ def _require_operation_execution_access(
         status_code=403,
         detail="This execution is not linked to one of your assigned tasks.",
     )
+
+
+def _require_execution_application(
+    request: Request,
+    manager,
+    execution_id: str,
+) -> None:
+    """Hide workflow and queued evidence owned by another application."""
+    application_id = _active_application_id(request)
+    workflow = manager.get_workflow(execution_id)
+    managed = manager.get(execution_id)
+    owners = {
+        owner
+        for owner in (
+            getattr(workflow, "application_id", None),
+            getattr(managed, "application_id", None),
+        )
+        if owner is not None
+    }
+    if owners != {application_id}:
+        raise HTTPException(status_code=404, detail="Execution not found.")
 
 
 def _access_error(message: str, *, status_code: int) -> JSONResponse:

@@ -735,11 +735,15 @@ For a Pipeline:
 
 Oracle's public Pipeline details API requires an exact Pipeline code and does
 not provide a supported list-all operation. `config/pipelines.json` therefore
-acts as the seed allowlist. Pipelines verified from either the Pipelines page
-or Automation Designer are added to the shared PostgreSQL catalog and remain
-available after restart. Registration stores only the code, Oracle display
-name, and descriptive metadata; the stages and runtime requirements are
-always retrieved live from Oracle.
+acts as the deployment application's seed allowlist. At runtime, Pipeline,
+Data Integration, Planning Process, and Planning Cycle allow-lists are copied
+into persistent application-specific namespaces; another registered Oracle
+application starts with empty local allow-lists. Pipelines verified from
+either the Pipelines page or Automation Designer are added to that Oracle
+environment/application's PostgreSQL artifact catalog and remain available
+after restart. Registration stores only the code, Oracle display name, and
+descriptive metadata; the stages and runtime requirements are always
+retrieved live from Oracle.
 
 For a Data Integration:
 

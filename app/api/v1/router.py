@@ -90,6 +90,7 @@ from app.application.execution_evidence import (
     aggregate_record_statistics,
 )
 from app.services.task_manager_service import TaskManagerSyncService
+from app.services.oracle_job_evidence_service import OracleJobEvidenceService
 
 
 router = APIRouter(prefix="/api/v1", tags=["frontend-v1"])
@@ -1116,9 +1117,13 @@ async def list_jobs_activity(
 ) -> dict[str, object]:
     """Return retained execution summaries for authorized operators."""
     require_api_session(request)
+    user = current_user(request)
+    assert user is not None
+    application = current_application_context(request, user)
     bounded_limit = min(max(limit, 1), 250)
     runs = request.app.state.control_center.list_workflow_runs(
         limit=bounded_limit,
+        application_id=application.application_id,
     )
     terminal = [
         run for run in runs if run.status.value in {"SUCCESS", "FAILED"}
@@ -1148,7 +1153,13 @@ async def job_activity_detail(
 ) -> dict[str, object]:
     """Return step-level evidence for one retained execution."""
     require_api_session(request)
-    run = request.app.state.control_center.get_workflow_run(execution_id)
+    user = current_user(request)
+    assert user is not None
+    application = current_application_context(request, user)
+    run = request.app.state.control_center.get_workflow_run(
+        execution_id,
+        application_id=application.application_id,
+    )
     if run is None:
         raise HTTPException(status_code=404, detail="The requested job was not found.")
     return {"status": "success", "job": _job_detail_payload(run)}
@@ -1162,7 +1173,13 @@ async def download_job_artifact(
 ):
     """Download a retained Oracle-generated artifact for an authorized user."""
     require_api_session(request)
-    run = request.app.state.control_center.get_workflow_run(execution_id)
+    user = current_user(request)
+    assert user is not None
+    application = current_application_context(request, user)
+    run = request.app.state.control_center.get_workflow_run(
+        execution_id,
+        application_id=application.application_id,
+    )
     if run is None:
         raise HTTPException(status_code=404, detail="The requested job was not found.")
     stored_name = None
@@ -1179,17 +1196,31 @@ async def download_job_artifact(
             break
     if not stored_name or stored_name != Path(stored_name).name:
         raise HTTPException(status_code=404, detail="The requested artifact was not found.")
-    evidence_root = (
-        request.app.state.settings.runtime_data_dir / "job-evidence"
-    ).resolve()
-    root = (evidence_root / execution_id).resolve()
-    if root.parent != evidence_root:
-        raise HTTPException(
-            status_code=404,
-            detail="The requested artifact was not found.",
-        )
-    path = (root / stored_name).resolve()
-    if path.parent != root or not path.is_file():
+    storage_roots = [
+        OracleJobEvidenceService.storage_root(
+            request.app.state.settings.runtime_data_dir,
+            application_id=application.application_id,
+        ).resolve()
+    ]
+    if (
+        application.application_id
+        == request.app.state.deployment_application_id
+    ):
+        legacy = OracleJobEvidenceService.storage_root(
+            request.app.state.settings.runtime_data_dir
+        ).resolve()
+        if legacy not in storage_roots:
+            storage_roots.append(legacy)
+    path = None
+    for evidence_root in storage_roots:
+        root = (evidence_root / execution_id).resolve()
+        if root.parent != evidence_root:
+            continue
+        candidate = (root / stored_name).resolve()
+        if candidate.parent == root and candidate.is_file():
+            path = candidate
+            break
+    if path is None:
         raise HTTPException(status_code=404, detail="The requested artifact was not found.")
     return FileResponse(path, filename=display_name or stored_name)
 

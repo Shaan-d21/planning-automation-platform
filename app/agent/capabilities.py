@@ -1025,7 +1025,14 @@ class AgentCapabilityGateway:
         return {"count": len(items), "operations": items}
 
     def _configured_processes(self, _: dict[str, Any]) -> dict[str, Any]:
-        processes = self._control_center.snapshot(history_limit=1).processes
+        snapshot_arguments: dict[str, Any] = {"history_limit": 1}
+        if self._schedule_application_id is not None:
+            snapshot_arguments["application_id"] = (
+                self._schedule_application_id
+            )
+        processes = self._control_center.snapshot(
+            **snapshot_arguments
+        ).processes
         items = [
             {
                 "code": item.code,
@@ -1043,7 +1050,14 @@ class AgentCapabilityGateway:
         except (TypeError, ValueError) as exc:
             raise AgentCapabilityError("History limit must be an integer.") from exc
         limit = max(1, min(limit, 10))
-        runs = self._control_center.snapshot(history_limit=limit).recent_runs
+        snapshot_arguments: dict[str, Any] = {"history_limit": limit}
+        if self._schedule_application_id is not None:
+            snapshot_arguments["application_id"] = (
+                self._schedule_application_id
+            )
+        runs = self._control_center.snapshot(
+            **snapshot_arguments
+        ).recent_runs
         items = [
             {
                 "execution_id": item.execution_id,
@@ -1075,9 +1089,22 @@ class AgentCapabilityGateway:
             )
 
         if execution_id:
-            run = self._control_center.get_workflow_run(execution_id)
+            if self._schedule_application_id is None:
+                run = self._control_center.get_workflow_run(execution_id)
+            else:
+                run = self._control_center.get_workflow_run(
+                    execution_id,
+                    application_id=self._schedule_application_id,
+                )
         else:
-            runs = self._control_center.list_workflow_runs(limit=100)
+            history_arguments: dict[str, Any] = {"limit": 100}
+            if self._schedule_application_id is not None:
+                history_arguments["application_id"] = (
+                    self._schedule_application_id
+                )
+            runs = self._control_center.list_workflow_runs(
+                **history_arguments
+            )
             if selector == "latest_failed":
                 run = next(
                     (item for item in runs if item.status.value == "FAILED"),
