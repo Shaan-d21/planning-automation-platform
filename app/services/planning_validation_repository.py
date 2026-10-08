@@ -5,10 +5,15 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import insert, select, update
+from sqlalchemy import insert, select, true, update
 
 from app.infrastructure.database.engine import DatabaseTarget, database_for, utc_datetime
-from app.infrastructure.database.schema import planning_task_validations
+from app.infrastructure.database.schema import (
+    planning_cycle_stages,
+    planning_cycles,
+    planning_task_validations,
+    planning_tasks,
+)
 from app.models.planning_validation import (
     PlanningValidationEvidence,
     PlanningValidationStatus,
@@ -20,8 +25,14 @@ from app.utils.exceptions import PlanningWorkflowError
 class PlanningValidationRepository:
     """Store validation summaries while Oracle remains the data system of record."""
 
-    def __init__(self, database_target: DatabaseTarget) -> None:
+    def __init__(
+        self,
+        database_target: DatabaseTarget,
+        *,
+        application_id: int | None = None,
+    ) -> None:
         self._database = database_for(database_target)
+        self._application_id = application_id
 
     def record(
         self,
@@ -41,6 +52,10 @@ class PlanningValidationRepository:
     ) -> PlanningValidationEvidence:
         now = datetime.now(UTC)
         with self._database.begin() as connection:
+            if not self._task_exists(connection, task_id):
+                raise PlanningWorkflowError(
+                    f"Planning task {task_id} was not found."
+                )
             validation_id = int(
                 connection.execute(
                     insert(planning_task_validations)
@@ -67,8 +82,9 @@ class PlanningValidationRepository:
     def latest_for_task(self, task_id: int) -> PlanningValidationEvidence | None:
         with self._database.connect() as connection:
             row = connection.execute(
-                select(planning_task_validations)
-                .where(planning_task_validations.c.task_id == task_id)
+                self._validation_select().where(
+                    planning_task_validations.c.task_id == task_id
+                )
                 .order_by(
                     planning_task_validations.c.performed_at.desc(),
                     planning_task_validations.c.validation_id.desc(),
@@ -92,8 +108,10 @@ class PlanningValidationRepository:
         now = datetime.now(UTC)
         with self._database.begin() as connection:
             row = connection.execute(
-                select(planning_task_validations)
-                .where(planning_task_validations.c.validation_id == validation_id)
+                self._validation_select()
+                .where(
+                    planning_task_validations.c.validation_id == validation_id
+                )
                 .with_for_update()
             ).mappings().one_or_none()
             if row is None:
@@ -117,7 +135,7 @@ class PlanningValidationRepository:
     def require(self, validation_id: int) -> PlanningValidationEvidence:
         with self._database.connect() as connection:
             row = connection.execute(
-                select(planning_task_validations).where(
+                self._validation_select().where(
                     planning_task_validations.c.validation_id == validation_id
                 )
             ).mappings().one_or_none()
@@ -126,6 +144,51 @@ class PlanningValidationRepository:
                 f"Planning validation {validation_id} was not found."
             )
         return self._evidence(row)
+
+    def _validation_select(self):
+        return (
+            select(planning_task_validations)
+            .join(
+                planning_tasks,
+                planning_tasks.c.task_id
+                == planning_task_validations.c.task_id,
+            )
+            .join(
+                planning_cycle_stages,
+                planning_cycle_stages.c.stage_id
+                == planning_tasks.c.stage_id,
+            )
+            .join(
+                planning_cycles,
+                planning_cycles.c.cycle_id
+                == planning_cycle_stages.c.cycle_id,
+            )
+            .where(self._application_scope())
+        )
+
+    def _task_exists(self, connection, task_id: int) -> bool:
+        found = connection.execute(
+            select(planning_tasks.c.task_id)
+            .join(
+                planning_cycle_stages,
+                planning_cycle_stages.c.stage_id == planning_tasks.c.stage_id,
+            )
+            .join(
+                planning_cycles,
+                planning_cycles.c.cycle_id
+                == planning_cycle_stages.c.cycle_id,
+            )
+            .where(
+                planning_tasks.c.task_id == task_id,
+                self._application_scope(),
+            )
+        ).scalar_one_or_none()
+        return found is not None
+
+    def _application_scope(self):
+        if self._application_id is None:
+            return true()
+        return planning_cycles.c.application_id == self._application_id
 
     @staticmethod
     def _evidence(row) -> PlanningValidationEvidence:

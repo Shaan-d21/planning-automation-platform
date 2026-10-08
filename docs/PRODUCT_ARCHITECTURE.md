@@ -115,9 +115,12 @@ of the Planning compatibility contract. Existing imports continue to consume
   versions and run presets use application-qualified storage identities, so
   two applications can safely publish the same visible process code; existing
   designer records are adopted only by the deployment application.
-- Operational Planning-cycle/task records and the retired legacy process-
-  schedule subsystem still require application ownership (or removal) before
-  public workspace switching is enabled.
+- Operational Planning cycles now belong to one registered Oracle application.
+  Their stages, tasks, execution attempts, validation evidence, approvals, and
+  notifications are resolved through that root ownership and fail closed in a
+  different workspace. The disconnected first-generation process scheduler
+  and its table were removed; the active `automation_schedules` service is the
+  only unattended scheduling runtime.
 
 The FCCS read contract follows Oracle's supported public REST resources:
 

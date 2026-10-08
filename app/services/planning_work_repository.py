@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import UTC, datetime
 
-from sqlalchemy import and_, func, insert, or_, select, update
+from sqlalchemy import and_, func, insert, or_, select, true, update
 from sqlalchemy.exc import IntegrityError
 
 from app.infrastructure.database.engine import (
@@ -42,8 +42,14 @@ from app.utils.exceptions import PlanningWorkflowError
 class PlanningWorkRepository:
     """Persist complete cycle aggregates with explicit transaction boundaries."""
 
-    def __init__(self, database_target: DatabaseTarget) -> None:
+    def __init__(
+        self,
+        database_target: DatabaseTarget,
+        *,
+        application_id: int | None = None,
+    ) -> None:
         self._database = database_for(database_target)
+        self._application_id = application_id
 
     def create_cycle(
         self,
@@ -58,6 +64,7 @@ class PlanningWorkRepository:
                     connection.execute(
                         insert(planning_cycles)
                         .values(
+                            application_id=self._application_id,
                             code=draft.code,
                             name=draft.name,
                             cycle_type=draft.cycle_type,
@@ -152,7 +159,10 @@ class PlanningWorkRepository:
         with self._database.connect() as connection:
             rows = connection.execute(
                 select(planning_cycles)
-                .where(planning_cycles.c.archived_at.is_(None))
+                .where(
+                    planning_cycles.c.archived_at.is_(None),
+                    self._application_scope(),
+                )
                 .order_by(
                     planning_cycles.c.due_date,
                     func.lower(planning_cycles.c.name),
@@ -166,6 +176,7 @@ class PlanningWorkRepository:
                 select(planning_cycles).where(
                     planning_cycles.c.cycle_id == cycle_id,
                     planning_cycles.c.archived_at.is_(None),
+                    self._application_scope(),
                 )
             ).mappings().one_or_none()
         if row is None:
@@ -175,6 +186,7 @@ class PlanningWorkRepository:
         return self._cycle(row)
 
     def list_stages(self, cycle_id: int) -> tuple[PlanningCycleStage, ...]:
+        self.require_cycle(cycle_id)
         with self._database.connect() as connection:
             rows = connection.execute(
                 select(planning_cycle_stages)
@@ -241,6 +253,7 @@ class PlanningWorkRepository:
         task_id: int,
         status: PlanningTaskStatus,
     ) -> PlanningTask:
+        self.require_task(task_id)
         now = datetime.now(UTC)
         with self._database.begin() as connection:
             row = connection.execute(
@@ -283,6 +296,7 @@ class PlanningWorkRepository:
         initiated_by_user_id: int,
     ) -> PlanningTaskExecution:
         """Create the next immutable attempt and move its task in progress."""
+        self.require_task(task_id)
         now = datetime.now(UTC)
         try:
             with self._database.begin() as connection:
@@ -376,12 +390,36 @@ class PlanningWorkRepository:
                     workflow_runs.c.completed_at.label("workflow_completed_at"),
                     workflow_runs.c.error_message.label("workflow_error"),
                 )
+                .join(
+                    planning_tasks,
+                    planning_tasks.c.task_id
+                    == planning_task_executions.c.task_id,
+                )
+                .join(
+                    planning_cycle_stages,
+                    planning_cycle_stages.c.stage_id
+                    == planning_tasks.c.stage_id,
+                )
+                .join(
+                    planning_cycles,
+                    planning_cycles.c.cycle_id
+                    == planning_cycle_stages.c.cycle_id,
+                )
                 .outerjoin(
                     workflow_runs,
-                    workflow_runs.c.execution_id
-                    == planning_task_executions.c.execution_id,
+                    and_(
+                        workflow_runs.c.execution_id
+                        == planning_task_executions.c.execution_id,
+                        (
+                            true()
+                            if self._application_id is None
+                            else workflow_runs.c.application_id
+                            == self._application_id
+                        ),
+                    ),
                 )
                 .where(
+                    self._application_scope(),
                     planning_task_executions.c.status.in_(
                         (
                             PlanningTaskExecutionStatus.QUEUED.value,
@@ -477,7 +515,25 @@ class PlanningWorkRepository:
         with self._database.connect() as connection:
             rows = connection.execute(
                 select(planning_task_executions)
-                .where(planning_task_executions.c.task_id.in_(task_ids))
+                .join(
+                    planning_tasks,
+                    planning_tasks.c.task_id
+                    == planning_task_executions.c.task_id,
+                )
+                .join(
+                    planning_cycle_stages,
+                    planning_cycle_stages.c.stage_id
+                    == planning_tasks.c.stage_id,
+                )
+                .join(
+                    planning_cycles,
+                    planning_cycles.c.cycle_id
+                    == planning_cycle_stages.c.cycle_id,
+                )
+                .where(
+                    planning_task_executions.c.task_id.in_(task_ids),
+                    self._application_scope(),
+                )
                 .order_by(
                     planning_task_executions.c.task_id,
                     planning_task_executions.c.attempt_number.desc(),
@@ -492,8 +548,25 @@ class PlanningWorkRepository:
         """Resolve a retained execution to its owning business task."""
         with self._database.connect() as connection:
             task_id = connection.execute(
-                select(planning_task_executions.c.task_id).where(
-                    planning_task_executions.c.execution_id == execution_id
+                select(planning_task_executions.c.task_id)
+                .join(
+                    planning_tasks,
+                    planning_tasks.c.task_id
+                    == planning_task_executions.c.task_id,
+                )
+                .join(
+                    planning_cycle_stages,
+                    planning_cycle_stages.c.stage_id
+                    == planning_tasks.c.stage_id,
+                )
+                .join(
+                    planning_cycles,
+                    planning_cycles.c.cycle_id
+                    == planning_cycle_stages.c.cycle_id,
+                )
+                .where(
+                    planning_task_executions.c.execution_id == execution_id,
+                    self._application_scope(),
                 )
             ).scalar_one_or_none()
         return int(task_id) if task_id is not None else None
@@ -530,8 +603,7 @@ class PlanningWorkRepository:
             )
         return None, int(role_id)
 
-    @staticmethod
-    def _task_select():
+    def _task_select(self):
         return (
             select(
                 planning_tasks,
@@ -554,8 +626,16 @@ class PlanningWorkRepository:
                 platform_roles,
                 platform_roles.c.role_id == planning_tasks.c.assigned_role_id,
             )
-            .where(planning_cycles.c.archived_at.is_(None))
+            .where(
+                planning_cycles.c.archived_at.is_(None),
+                self._application_scope(),
+            )
         )
+
+    def _application_scope(self):
+        if self._application_id is None:
+            return true()
+        return planning_cycles.c.application_id == self._application_id
 
     def _tasks_with_dependencies(self, connection, rows) -> tuple[PlanningTask, ...]:
         if not rows:

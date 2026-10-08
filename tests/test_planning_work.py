@@ -7,9 +7,15 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
+from sqlalchemy import insert
 
 from app.application.planning_work import PlanningWorkApplicationService
 from app.config.settings import Settings
+from app.infrastructure.database.engine import database_for
+from app.infrastructure.database.schema import (
+    oracle_applications,
+    oracle_environment_settings,
+)
 from app.models.access_control import RoleCode
 from app.models.workflow import WorkflowRun, WorkflowStatus
 from app.models.planning_workflow import (
@@ -153,6 +159,82 @@ def test_only_cycle_designers_can_create_operational_cycles(
 
     with pytest.raises(PlanningWorkflowError, match="does not permit"):
         service.create_cycle(_draft(), actor=auditor)
+
+
+def test_cycles_are_isolated_by_oracle_application(tmp_path: Path) -> None:
+    database = tmp_path / "planning-work-applications.sqlite3"
+    access = AccessControlService(database)
+    administrator = access.bootstrap_administrator(
+        username="admin",
+        display_name="Test Administrator",
+        email="admin@example.com",
+        password="Test password 123!",
+    )
+    settings = Settings(
+        epm_base_url="https://example.invalid",
+        epm_username="oracle-user",
+        epm_password="secret",
+        application_name="Vision",
+        workflow_database_file=database,
+    )
+    now = datetime.now(UTC)
+    with database_for(settings.database_target).begin() as connection:
+        connection.execute(
+            insert(oracle_environment_settings).values(
+                base_url="https://example.invalid",
+                deployment_mode="cloud",
+                discovered_applications=[],
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        application_ids = tuple(
+            int(value)
+            for value in connection.execute(
+                insert(oracle_applications)
+                .values(
+                    [
+                        {
+                            "environment_base_url": "https://example.invalid",
+                            "application_name": "Plan",
+                            "business_process": "PLANNING",
+                            "created_at": now,
+                            "updated_at": now,
+                        },
+                        {
+                            "environment_base_url": "https://example.invalid",
+                            "application_name": "Close",
+                            "business_process": "FCCS",
+                            "created_at": now,
+                            "updated_at": now,
+                        },
+                    ]
+                )
+                .returning(oracle_applications.c.application_id)
+            ).scalars()
+        )
+
+    planning = PlanningWorkApplicationService(
+        settings,
+        application_id=application_ids[0],
+    )
+    close = PlanningWorkApplicationService(
+        settings,
+        application_id=application_ids[1],
+    )
+    planning.create_cycle(_draft(), actor=administrator)
+    close.create_cycle(_draft(), actor=administrator)
+
+    planning_cycle = planning.list_cycles(actor=administrator)[0]
+    close_cycle = close.list_cycles(actor=administrator)[0]
+    assert planning_cycle.name == "August Forecast FY27"
+    assert close_cycle.name == "August Forecast FY27"
+    assert planning_cycle.cycle_id != close_cycle.cycle_id
+    with pytest.raises(PlanningWorkflowError, match="was not found"):
+        planning.cycle_detail(
+            close_cycle.cycle_id,
+            actor=administrator,
+        )
 
 
 def test_cycle_creation_rejects_dependency_cycles_and_secret_fields(

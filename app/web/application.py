@@ -445,7 +445,8 @@ def create_app(
         resolved_settings
     )
     app.state.planning_work = PlanningWorkApplicationService(
-        resolved_settings
+        resolved_settings,
+        application_id=app.state.deployment_application_id,
     )
     app.state.agent_service = AgentApplicationService(
         resolved_settings,
