@@ -65,19 +65,29 @@ of the Planning compatibility contract. Existing imports continue to consume
   explicit user memberships, and a durable active-application field on each
   platform session. Existing deployments are backfilled into one default
   workspace without changing their runtime behavior.
-- The public workspace catalog is read-only for this increment. Switching is
-  intentionally disabled until Oracle clients, provider composition, durable
-  work, and product-owned records resolve their application from the request
-  or queued execution rather than process-global settings.
+- The workspace catalog now exposes a fail-closed session switcher. The
+  deployment application remains fully available, and registered FCCS
+  applications may be selected because their Oracle services are request-
+  scoped and read-only. FCCS may reside at a different registered Oracle base
+  URL: the selected workspace supplies both its verified URL and application
+  name to the request context. Additional Planning applications remain visible
+  but unavailable until every Planning write service is request-scoped.
+- A System Administrator can submit another Oracle environment URL for live
+  discovery with the deployment-owned service credential. The URL is
+  normalized and retained server-side, while browser responses expose only a
+  neutral environment label and verified application metadata. Removing a
+  secondary application deactivates its memberships and active sessions but
+  preserves historical executions and audit evidence. The deployment
+  application remains protected while it is configured by server environment.
 - Authenticated requests now resolve an authorized runtime application context
   from the durable session. Bootstrap identity, navigation, product
   capabilities, standalone operation presentation, Planning route guards, and
   FCCS read-only Oracle clients use that context instead of process-global
   product composition.
-- Write services, schedules, the agent, and durable workers remain bound to the
-  deployment application. This deliberate split prevents a session selection
-  from redirecting a write until application ownership is persisted on every
-  proposal and queued execution.
+- Planning write managers, the agent runtime, and durable workers remain bound
+  to the deployment application. Switched FCCS navigation omits the assistant,
+  and direct agent or Planning-route requests fail closed, preventing a session
+  selection from redirecting a write to the wrong Oracle application.
 - EPM Assistant conversations are now owned by an authorized Oracle
   application. Conversation lists, messages, approvals, clarifications,
   inputs, drafts, and deletion fail closed when the active session selects a
@@ -146,10 +156,13 @@ authorization policy, review flow, audit evidence, and live UAT.
 
 ## Multi-application release gate
 
-Application registration alone does not make this deployment multi-
-application. Before the UI switcher is enabled, every request and queued job
-must carry an authorized application identifier; Oracle clients and product
-providers must be created from that context; and conversations, catalogs,
-schedules, artifacts, uploads, reports, and execution evidence must be scoped
-to it. Until those conditions are met, a session is bound to the deployment's
-existing active application and cannot switch through the public API.
+Application registration alone does not make every application executable.
+The public switcher currently permits the deployment application and assigned
+read-only FCCS applications, including FCCS applications registered from a
+different Oracle environment URL. Every selection is persisted on the
+authenticated session and resolves both URL and application through membership
+before navigation or Oracle reads are composed. Enabling a second Planning
+application still requires request-scoped agent, operation-manager,
+schedule-coordinator, artifact/RTP, variable, and Oracle file services; until
+then that target is returned as unavailable and a direct switch attempt
+receives a conflict response.

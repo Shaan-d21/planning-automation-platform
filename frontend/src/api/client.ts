@@ -1,5 +1,6 @@
 import type {
   BootstrapResponse,
+  ApplicationWorkspaceListResponse,
   InitialAdministratorInput,
   AccessControlResponse,
   IdentitySyncApplyResponse,
@@ -176,6 +177,15 @@ async function requestBlob(
 
 export const api = {
   bootstrap: () => request<BootstrapResponse>("/api/v1/bootstrap"),
+  selectWorkspace: (applicationId: number, csrfToken: string) =>
+    request<ApplicationWorkspaceListResponse>(
+      "/api/v1/workspaces/current",
+      {
+        method: "PUT",
+        body: JSON.stringify({ application_id: applicationId })
+      },
+      csrfToken
+    ),
   bootstrapAdministrator: (
     payload: InitialAdministratorInput,
     csrfToken: string
@@ -244,6 +254,16 @@ export const api = {
   setSystemAdministrator: (userId: number, enabled: boolean, csrfToken: string) => request<{ status: string; message: string }>(
     `/api/v1/system-administration/users/${userId}/role`,
     { method: "PATCH", body: JSON.stringify({ enabled }) },
+    csrfToken
+  ),
+  registerOracleEnvironment: (baseUrl: string, csrfToken: string) => request<{ status: string; message: string }>(
+    "/api/v1/system-administration/oracle-environments",
+    { method: "POST", body: JSON.stringify({ base_url: baseUrl }) },
+    csrfToken
+  ),
+  removeOracleApplication: (applicationId: number, csrfToken: string) => request<{ status: string; message: string }>(
+    `/api/v1/system-administration/applications/${applicationId}`,
+    { method: "DELETE" },
     csrfToken
   ),
   previewIdentitySync: (csrfToken: string) => request<IdentitySyncPreviewResponse>(

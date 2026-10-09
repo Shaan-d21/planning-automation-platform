@@ -53,6 +53,24 @@ export interface NavigationItem {
   group: string;
 }
 
+export interface ApplicationWorkspaceSummary {
+  application_id: number;
+  application_name: string;
+  business_process: "PLANNING" | "FCCS" | "UNKNOWN";
+  product_type: string | null;
+  application_type: string | null;
+  current: boolean;
+  switchable: boolean;
+  unavailable_reason: string | null;
+}
+
+export interface ApplicationWorkspaceListResponse {
+  status: string;
+  switching_enabled: boolean;
+  applications: ApplicationWorkspaceSummary[];
+  message: string;
+}
+
 export interface FeatureAvailability {
   legacy_ui: boolean;
   task_engine: boolean;
@@ -78,6 +96,8 @@ export interface BootstrapResponse {
   environment: EnvironmentSummary | null;
   user: CurrentUser | null;
   navigation: NavigationItem[];
+  workspaces?: ApplicationWorkspaceSummary[];
+  workspace_switching_enabled?: boolean;
   features: FeatureAvailability;
 }
 
@@ -468,6 +488,19 @@ export interface ConcurrentAccount {
   ip_addresses: string[];
 }
 
+export interface SystemApplicationRegistration {
+  application_id: number;
+  application_name: string;
+  business_process: "PLANNING" | "FCCS" | "UNKNOWN";
+  product_type: string | null;
+  application_type: string | null;
+  environment_label: string;
+  deployment_application: boolean;
+  current: boolean;
+  removable: boolean;
+  last_verified_at: string | null;
+}
+
 export interface SystemSecurityResponse {
   status: string;
   summary: {
@@ -479,6 +512,7 @@ export interface SystemSecurityResponse {
   concurrent_accounts: ConcurrentAccount[];
   sessions: SecuritySession[];
   events: AuthenticationActivity[];
+  applications: SystemApplicationRegistration[];
   administrators: Array<{
     user_id: number;
     username: string;

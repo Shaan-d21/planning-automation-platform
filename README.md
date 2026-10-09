@@ -80,10 +80,13 @@ interfaces.
 Platform security administration is separated from Oracle EPM operations. A
 dedicated System Administrator role can review retained login activity, see
 concurrent sessions and IP addresses, delegate the security role to another
-existing platform user, and revoke a browser session. Session identifiers are
-stored only as SHA-256 hashes in PostgreSQL. The first existing Service
-Administrator receives the initial System Administrator role during upgrade;
-the two roles can then be assigned to different people.
+existing platform user, revoke a browser session, register another Oracle EPM
+environment, and remove a secondary application from active platform use.
+Registered Oracle URLs remain server-side and are not returned by browser
+APIs. Application removal preserves historical executions and audit evidence.
+Session identifiers are stored only as SHA-256 hashes in PostgreSQL. The first
+existing Service Administrator receives the initial System Administrator role
+during upgrade; the two roles can then be assigned to different people.
 
 An optional provider-neutral notification layer sends success and failure
 emails. SMTP is implemented for development; a corporate Microsoft Graph
@@ -296,6 +299,24 @@ configuration. `EPM_DEPLOYMENT_MODE=auto` recognizes Oracle Cloud hostnames
 and enables Cloud-first capabilities. Set it explicitly to `cloud` when a
 reverse proxy or custom hostname hides the Oracle Cloud hostname, or to
 `on_premises` for an on-premises Planning server.
+
+`EPM_BASE_URL` is the deployment's default Oracle environment, not the only
+environment the platform can know. A System Administrator can register an
+additional Planning or FCCS environment from **System Administration**. The
+platform verifies the submitted URL with the configured integration account,
+discovers the applications visible there, and retains the normalized URL only
+in PostgreSQL. The application selector exposes names and product types, never
+the stored URL. For this release the same `EPM_INTEGRATION_USERNAME` and
+`EPM_INTEGRATION_PASSWORD` are used for every registered URL; environment-
+specific service credentials are a later secret-management phase.
+
+The deployment application keeps full Planning behavior. An assigned FCCS
+application can be selected even when it belongs to another registered URL,
+but remains read-only. Additional Planning applications remain unavailable in
+the selector until the agent and all write-capable services are fully request-
+scoped. The deployment application cannot be removed while it remains the
+server default; secondary registrations can be deactivated by a System
+Administrator without deleting their audit history.
 
 At startup, the platform first uses the application selection previously saved
 for the configured base URL. When no selection exists, `APPLICATION_NAME` is

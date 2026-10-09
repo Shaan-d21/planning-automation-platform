@@ -13,6 +13,7 @@ from unittest.mock import ANY, Mock, call
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import insert
 from sqlalchemy.exc import OperationalError
 
 from app.agent.models import AgentMessageRole, AgentToolActivity
@@ -68,6 +69,7 @@ from app.application.reports import (
     ReportWorkspaceService,
 )
 from app.config.settings import Settings
+from app.infrastructure.database.schema import oracle_environment_settings
 from app.models.data_integration_catalog import DataIntegrationDefinition
 from app.models.api_token import ApiTokenScope
 from app.models.access_control import RoleCode, TriggerSource
@@ -386,7 +388,7 @@ def test_environment_configuration_exposes_only_non_secret_selection(
     assert "administrator" not in response.text
 
 
-def test_session_workspace_catalog_is_scoped_and_not_switchable_yet(
+def test_single_session_workspace_does_not_enable_switching(
     tmp_path: Path,
 ) -> None:
     app = create_app(_settings(tmp_path), session_secret="test-secret")
@@ -406,6 +408,127 @@ def test_session_workspace_catalog_is_scoped_and_not_switchable_yet(
     assert workspace["current"] is True
     assert "epm.internal" not in response.text
     assert "secret" not in response.text
+
+
+def test_session_can_switch_between_deployment_planning_and_read_only_fccs(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    app = create_app(settings, session_secret="test-secret")
+    client = TestClient(app)
+    _login(client)
+    configuration = EnvironmentConfiguration(
+        base_url=settings.epm_base_url,
+        deployment_mode="on_premises",
+        selected_application="Vision",
+        selection_source="ENVIRONMENT",
+        applications=(
+            ApplicationInfo(
+                name="Vision",
+                product_type="HP",
+                application_type="PBCS",
+            ),
+            ApplicationInfo(
+                name="Forecast",
+                product_type="HP",
+                application_type="PBCS",
+            ),
+        ),
+        last_discovered_at=datetime.now(UTC),
+        last_discovery_error=None,
+        selected_at=datetime.now(UTC),
+        selected_by_user_id=1,
+    )
+    app.state.application_workspaces.synchronize(
+        configuration,
+        actor_user_id=1,
+    )
+    secondary_url = "https://close.example.oraclecloud.com"
+    now = datetime.now(UTC)
+    with app.state.platform_database.begin() as connection:
+        connection.execute(
+            insert(oracle_environment_settings).values(
+                base_url=secondary_url,
+                deployment_mode="cloud",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    app.state.application_workspaces.synchronize(
+        EnvironmentConfiguration(
+            base_url=secondary_url,
+            deployment_mode="cloud",
+            selected_application=None,
+            selection_source=None,
+            applications=(
+                ApplicationInfo(
+                    name="Close",
+                    product_type="HP",
+                    application_type="FCCS",
+                ),
+            ),
+            last_discovered_at=now,
+            last_discovery_error=None,
+            selected_at=None,
+            selected_by_user_id=None,
+        ),
+        actor_user_id=1,
+    )
+
+    catalog = client.get("/api/v1/workspaces")
+    assert catalog.status_code == 200
+    assert catalog.json()["switching_enabled"] is True
+    close = next(
+        item
+        for item in catalog.json()["applications"]
+        if item["application_name"] == "Close"
+    )
+    assert close["switchable"] is True
+    forecast = next(
+        item
+        for item in catalog.json()["applications"]
+        if item["application_name"] == "Forecast"
+    )
+    assert forecast["switchable"] is False
+    assert client.put(
+        "/api/v1/workspaces/current",
+        json={"application_id": forecast["application_id"]},
+    ).status_code == 409
+
+    selected = client.put(
+        "/api/v1/workspaces/current",
+        json={"application_id": close["application_id"]},
+    )
+    assert selected.status_code == 200
+    assert next(
+        item
+        for item in selected.json()["applications"]
+        if item["current"]
+    )["application_name"] == "Close"
+
+    bootstrap = client.get("/api/v1/bootstrap").json()
+    assert bootstrap["environment"]["application_name"] == "Close"
+    assert bootstrap["environment"]["business_process"] == "FCCS"
+    navigation = {item["code"] for item in bootstrap["navigation"]}
+    assert "fccs-overview" in navigation
+    assert "assistant" not in navigation
+    assert client.get("/api/v1/planning-tasks").status_code == 404
+    assert client.get("/api/agent/status").status_code == 404
+    assert client.get("/api/v1/notifications").json()["notifications"] == []
+
+    vision = next(
+        item
+        for item in selected.json()["applications"]
+        if item["application_name"] == "Vision"
+    )
+    restored = client.put(
+        "/api/v1/workspaces/current",
+        json={"application_id": vision["application_id"]},
+    )
+    assert restored.status_code == 200
+    assert client.get("/api/v1/bootstrap").json()["environment"][
+        "application_name"
+    ] == "Vision"
 
 
 def test_environment_application_discovery_and_selection_are_governed(
@@ -903,6 +1026,10 @@ def test_system_administration_lists_concurrent_sessions_and_revokes_one(
     payload = security.json()
     assert payload["summary"]["active_sessions"] == 2
     assert payload["summary"]["concurrent_accounts"] == 1
+    assert payload["applications"][0]["application_name"] == "Vision"
+    assert payload["applications"][0]["removable"] is False
+    assert "base_url" not in security.text
+    assert "epm.internal" not in security.text
     target = next(item for item in payload["sessions"] if not item["current"])
 
     revoked = first.post(
@@ -910,6 +1037,86 @@ def test_system_administration_lists_concurrent_sessions_and_revokes_one(
     )
     assert revoked.status_code == 200
     assert second.get("/api/v1/bootstrap").json()["authenticated"] is False
+
+
+def test_system_administrator_registers_and_removes_secondary_application(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    app = create_app(settings, session_secret="test-secret")
+    client = TestClient(app)
+    _login(client)
+    secondary_url = "https://close.example.oraclecloud.com"
+    now = datetime.now(UTC)
+    with app.state.platform_database.begin() as connection:
+        connection.execute(
+            insert(oracle_environment_settings).values(
+                base_url=secondary_url,
+                deployment_mode="cloud",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    registered = app.state.application_workspaces.synchronize(
+        EnvironmentConfiguration(
+            base_url=secondary_url,
+            deployment_mode="cloud",
+            selected_application=None,
+            selection_source=None,
+            applications=(
+                ApplicationInfo(
+                    name="Close",
+                    product_type="HP",
+                    application_type="FCCS",
+                ),
+            ),
+            last_discovered_at=now,
+            last_discovery_error=None,
+            selected_at=None,
+            selected_by_user_id=None,
+        ),
+        actor_user_id=1,
+    )
+    registry = Mock()
+    registry.register.return_value = registered
+    app.state.oracle_environment_registry = registry
+
+    created = client.post(
+        "/api/v1/system-administration/oracle-environments",
+        json={"base_url": f"{secondary_url}/"},
+    )
+
+    assert created.status_code == 200
+    assert "Close" in created.json()["message"]
+    registry.register.assert_called_once_with(
+        f"{secondary_url}/",
+        actor_user_id=1,
+    )
+    security = client.get("/api/v1/system-administration/security")
+    close = next(
+        item
+        for item in security.json()["applications"]
+        if item["application_name"] == "Close"
+    )
+    assert close["environment_label"].startswith("Oracle environment")
+    assert close["removable"] is True
+    assert secondary_url not in security.text
+
+    removed = client.delete(
+        f"/api/v1/system-administration/applications/{close['application_id']}"
+    )
+    protected = client.delete(
+        "/api/v1/system-administration/applications/"
+        f"{app.state.deployment_application_id}"
+    )
+
+    assert removed.status_code == 200
+    assert "Historical audit records were retained" in removed.json()["message"]
+    assert protected.status_code == 409
+    remaining = client.get("/api/v1/system-administration/security").json()
+    assert [
+        item["application_name"] for item in remaining["applications"]
+    ] == ["Vision"]
 
 
 def test_cloudflare_client_ip_is_used_only_when_explicitly_trusted(

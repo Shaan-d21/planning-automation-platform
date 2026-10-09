@@ -1,6 +1,7 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, type FormEvent } from "react";
 
-import type { SystemSecurityResponse } from "../api/types";
+import type { SystemApplicationRegistration, SystemSecurityResponse } from "../api/types";
+import { ConfirmationDialog } from "./Feedback";
 import { Icon } from "./Icon";
 
 interface Props {
@@ -9,18 +10,43 @@ interface Props {
   onRevoke: (sessionKey: string) => Promise<void>;
   busyUserId: number | null;
   onAdministratorChange: (userId: number, enabled: boolean) => Promise<void>;
+  busyApplication: number | "register" | null;
+  onRegisterEnvironment: (baseUrl: string) => Promise<void>;
+  onRemoveApplication: (applicationId: number) => Promise<void>;
 }
 
-export function SystemAdministrationWorkspace({ data, busySessionKey, onRevoke, busyUserId, onAdministratorChange }: Props) {
+export function SystemAdministrationWorkspace({ data, busySessionKey, onRevoke, busyUserId, onAdministratorChange, busyApplication, onRegisterEnvironment, onRemoveApplication }: Props) {
   const [showEnded, setShowEnded] = useState(false);
+  const [environmentUrl, setEnvironmentUrl] = useState("");
+  const [removingApplication, setRemovingApplication] = useState<SystemApplicationRegistration | null>(null);
   const sessions = useMemo(
     () => data.sessions.filter((session) => showEnded || session.active),
     [data.sessions, showEnded]
   );
 
+  async function registerEnvironment(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    try {
+      await onRegisterEnvironment(environmentUrl.trim());
+      setEnvironmentUrl("");
+    } catch {
+      // The application shell displays the actionable API error.
+    }
+  }
+
+  async function removeApplication() {
+    if (!removingApplication) return;
+    try {
+      await onRemoveApplication(removingApplication.application_id);
+      setRemovingApplication(null);
+    } catch {
+      // Keep the confirmation open while the application shell shows the error.
+    }
+  }
+
   return <section className="jobs-workspace system-admin-workspace">
     <header className="page-intro jobs-intro">
-      <div><span className="eyebrow">Platform security</span><h1>System Administration</h1><p>Review sign-ins, detect shared credentials, and revoke browser sessions. Oracle environment and service-account configuration are intentionally managed elsewhere.</p></div>
+      <div><span className="eyebrow">Platform security</span><h1>System Administration</h1><p>Review sign-ins, detect shared credentials, revoke browser sessions, and manage registered Oracle applications. Service-account secrets remain server-managed for this release.</p></div>
       <span className="retention-badge"><Icon name="check" /> Persistent security audit</span>
     </header>
 
@@ -30,6 +56,18 @@ export function SystemAdministrationWorkspace({ data, busySessionKey, onRevoke, 
       <Metric label="Active IP addresses" value={data.summary.unique_active_ips} tone="success" icon="activity" />
       <Metric label="Failed logins (24h)" value={data.summary.failed_logins_24h} tone="danger" icon="alert" />
     </div>
+
+    <section className="panel jobs-panel">
+      <div className="panel-heading"><div><span className="eyebrow">Oracle environments</span><h2>Registered applications</h2><p>Add another Oracle EPM URL using the server-configured service account. The URL is verified server-side and is not returned to the browser after registration.</p></div></div>
+      <form className="environment-registration-form" onSubmit={(event) => void registerEnvironment(event)}>
+        <label htmlFor="oracle-environment-url"><span>Oracle environment URL</span><input id="oracle-environment-url" type="url" autoComplete="off" placeholder="https://your-environment.oraclecloud.com" value={environmentUrl} onChange={(event) => setEnvironmentUrl(event.target.value)} required /></label>
+        <button type="submit" className="button button--primary" disabled={!environmentUrl.trim() || busyApplication !== null}>{busyApplication === "register" ? "Verifying Oracle…" : "Verify and register"}</button>
+      </form>
+      <div className="jobs-table-wrap"><table className="jobs-table"><thead><tr><th>Application</th><th>Product</th><th>Environment</th><th>Verification</th><th><span className="sr-only">Action</span></th></tr></thead><tbody>
+        {data.applications.map((application) => <tr key={application.application_id}><td><strong>{application.application_name}</strong>{application.current && <><br /><small>Current workspace</small></>}</td><td>{application.business_process}</td><td>{application.environment_label}{application.deployment_application ? <><br /><small>Server default</small></> : null}</td><td>{application.last_verified_at ? formatDate(application.last_verified_at) : "Registered"}</td><td>{application.removable ? <button type="button" className="button button--quiet" disabled={busyApplication !== null} onClick={() => setRemovingApplication(application)}>{busyApplication === application.application_id ? "Removing…" : "Remove"}</button> : <small>Protected</small>}</td></tr>)}
+        {!data.applications.length && <tr><td colSpan={5}>No active Oracle applications are registered.</td></tr>}
+      </tbody></table></div>
+    </section>
 
     <section className="panel jobs-panel">
       <div className="panel-heading"><div><span className="eyebrow">Separation of duties</span><h2>System Administrators</h2><p>This role controls login auditing and sessions only. It does not grant Oracle EPM operation permissions.</p></div></div>
@@ -58,6 +96,7 @@ export function SystemAdministrationWorkspace({ data, busySessionKey, onRevoke, 
         {data.events.map((event) => <tr key={event.event_id}><td>{formatDate(event.occurred_at)}</td><td>{event.username}</td><td>{friendlyEvent(event.event_type)}</td><td>{event.ip_address ?? "Unknown"}</td><td>{event.success ? "Success" : "Failed"}</td></tr>)}
       </tbody></table></div>
     </section>
+    {removingApplication && <ConfirmationDialog title={`Remove ${removingApplication.application_name}?`} description="The application will disappear from active workspaces and user assignments. Oracle itself will not be changed." warning="Historical platform executions and audit evidence are retained. Registering the same environment again can restore the application." confirmLabel="Remove application" tone="danger" busy={busyApplication === removingApplication.application_id} onConfirm={removeApplication} onClose={() => { if (busyApplication === null) setRemovingApplication(null); }} />}
   </section>;
 }
 

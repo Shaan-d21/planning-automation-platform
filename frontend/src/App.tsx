@@ -39,6 +39,7 @@ export function App() {
   const [systemSecurity, setSystemSecurity] = useState<SystemSecurityResponse | null>(null);
   const [busySessionKey, setBusySessionKey] = useState<string | null>(null);
   const [busySystemUserId, setBusySystemUserId] = useState<number | null>(null);
+  const [busySystemApplication, setBusySystemApplication] = useState<number | "register" | null>(null);
   const [jobsActivity, setJobsActivity] = useState<JobsActivityResponse | null>(null);
   const [operations, setOperations] = useState<OperationsResponse | null>(null);
   const [jobDetail, setJobDetail] = useState<JobActivityDetail | null>(null);
@@ -500,6 +501,42 @@ export function App() {
     }
   }
 
+  async function registerOracleEnvironment(baseUrl: string) {
+    if (!bootstrap) return;
+    setBusySystemApplication("register");
+    setError(null);
+    try {
+      const result = await api.registerOracleEnvironment(baseUrl, bootstrap.csrf_token);
+      await load();
+      setSystemSecurity(await api.systemSecurity());
+      setNotice(result.message);
+      window.setTimeout(() => setNotice(null), 4500);
+    } catch (reason) {
+      setError(message(reason));
+      throw reason;
+    } finally {
+      setBusySystemApplication(null);
+    }
+  }
+
+  async function removeOracleApplication(applicationId: number) {
+    if (!bootstrap) return;
+    setBusySystemApplication(applicationId);
+    setError(null);
+    try {
+      const result = await api.removeOracleApplication(applicationId, bootstrap.csrf_token);
+      await load();
+      setSystemSecurity(await api.systemSecurity());
+      setNotice(result.message);
+      window.setTimeout(() => setNotice(null), 4500);
+    } catch (reason) {
+      setError(message(reason));
+      throw reason;
+    } finally {
+      setBusySystemApplication(null);
+    }
+  }
+
   async function previewOracleIdentitySync() {
     if (!bootstrap) return;
     setIdentitySyncBusy(true);
@@ -637,6 +674,38 @@ export function App() {
     }
   }
 
+  async function switchWorkspace(applicationId: number) {
+    if (!bootstrap) return;
+    const current = bootstrap.workspaces?.find((item) => item.current);
+    if (current?.application_id === applicationId) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.selectWorkspace(applicationId, bootstrap.csrf_token);
+      setHome(null);
+      setWork(null);
+      setCycleAdministration(null);
+      setTaskManager(null);
+      setApprovals(null);
+      setNotifications(null);
+      setSystemSecurity(null);
+      setJobsActivity(null);
+      setJobDetail(null);
+      setOperations(null);
+      setAssistantPrefill("");
+      setScheduleRefreshKey((value) => value + 1);
+      window.history.replaceState({}, "", `${window.location.pathname}#home`);
+      setActiveView("home");
+      await load();
+      setNotice("Oracle application workspace changed.");
+      window.setTimeout(() => setNotice(null), 3500);
+    } catch (reason) {
+      setError(message(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function startAssistant(prompt = "") {
     setAssistantPrefill(prompt);
     window.location.hash = "#assistant";
@@ -651,7 +720,7 @@ export function App() {
   if (!home && !isFccs) return <UnavailableState error={error ?? "Your Planning workspace is unavailable."} onRetry={refresh} />;
 
   return (
-    <AppShell bootstrap={bootstrap} activeView={activeView} busy={busy} unreadNotifications={notifications?.unread_count ?? 0} onLogout={logout} onRefresh={refresh}>
+    <AppShell bootstrap={bootstrap} activeView={activeView} busy={busy} unreadNotifications={notifications?.unread_count ?? 0} onLogout={logout} onRefresh={refresh} onWorkspaceChange={switchWorkspace}>
       {notice && <ToastMessage tone="success" message={notice} onDismiss={() => setNotice(null)} />}
       {error && <ToastMessage tone="error" message={error} onDismiss={() => setError(null)} />}
       {activeView === "tasks" ? (
@@ -685,7 +754,7 @@ export function App() {
           : <WorkspaceLoading label="Access Control" message="Preparing users and role assignments…" />
       ) : activeView === "system-administration" ? (
         systemSecurity
-          ? <SystemAdministrationWorkspace data={systemSecurity} busySessionKey={busySessionKey} onRevoke={revokePlatformSession} busyUserId={busySystemUserId} onAdministratorChange={changeSystemAdministrator} />
+          ? <SystemAdministrationWorkspace data={systemSecurity} busySessionKey={busySessionKey} onRevoke={revokePlatformSession} busyUserId={busySystemUserId} onAdministratorChange={changeSystemAdministrator} busyApplication={busySystemApplication} onRegisterEnvironment={registerOracleEnvironment} onRemoveApplication={removeOracleApplication} />
           : <WorkspaceLoading label="System Administration" message="Preparing login activity and session controls…" />
       ) : activeView === "jobs" ? (
         jobsActivity

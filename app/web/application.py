@@ -123,6 +123,9 @@ from app.services.notification_service import create_notification_service
 from app.services.oracle_password_authentication_service import (
     OraclePasswordAuthenticationService,
 )
+from app.services.oracle_environment_registry_service import (
+    OracleEnvironmentRegistryService,
+)
 from app.services.session_security_service import SessionSecurityService
 from app.utils.exceptions import (
     AgentError,
@@ -177,6 +180,7 @@ from app.web.security import (
     client_ip as _client_ip,
     csrf_token as _csrf_token,
     current_application_context,
+    planning_work_for_request,
     current_user as _current_user,
     require_api_session,
     require_bearer_token,
@@ -351,10 +355,16 @@ def create_app(
         logger=LOGGER.getChild("environment_configuration"),
     )
     app.state.application_workspaces = application_workspaces
+    app.state.oracle_environment_registry = OracleEnvironmentRegistryService(
+        resolved_settings,
+        workspaces=app.state.application_workspaces,
+        logger=LOGGER.getChild("oracle_environment_registry"),
+    )
     app.state.application_contexts = RuntimeApplicationContextResolver(
         resolved_settings,
         workspaces=app.state.application_workspaces,
         environment_configuration=app.state.environment_configuration,
+        deployment_application_id=deployment_application_id,
     )
     app.state.fccs_read_factory = lambda context_settings: (
         FCCSReadApplicationService(
@@ -448,6 +458,9 @@ def create_app(
         resolved_settings,
         application_id=app.state.deployment_application_id,
     )
+    app.state.planning_workspaces = {
+        app.state.deployment_application_id: app.state.planning_work
+    }
     app.state.agent_service = AgentApplicationService(
         resolved_settings,
         gateway=AgentCapabilityGateway(
@@ -1963,7 +1976,9 @@ def create_app(
             if payload.planning_task_id is not None:
                 actor = _current_user(request)
                 assert actor is not None
-                evidence = request.app.state.planning_work.record_quality_validation(
+                evidence = planning_work_for_request(
+                    request
+                ).record_quality_validation(
                     payload.planning_task_id,
                     selection=payload.slice.model_dump(mode="json"),
                     criteria=payload.rules.model_dump(mode="json"),
@@ -2026,7 +2041,9 @@ def create_app(
             if payload.planning_task_id is not None:
                 actor = _current_user(request)
                 assert actor is not None
-                evidence = request.app.state.planning_work.record_comparison_validation(
+                evidence = planning_work_for_request(
+                    request
+                ).record_comparison_validation(
                     payload.planning_task_id,
                     selection=payload.source.model_dump(mode="json"),
                     target_cube=comparison.target_cube,
@@ -4981,14 +4998,15 @@ def _planning_task_link_callback(
             "Open this operation from an assigned Planning task, or ask a "
             "Power User or Service Administrator to run it."
         )
-    request.app.state.planning_work.authorize_task_execution(
+    planning_work = planning_work_for_request(request)
+    planning_work.authorize_task_execution(
         planning_task_id,
         action_type=action_type,
         actor=user,
     )
 
     def link(execution_id: str) -> None:
-        request.app.state.planning_work.link_task_execution(
+        planning_work.link_task_execution(
             planning_task_id,
             execution_id,
             action_type=action_type,
@@ -5014,7 +5032,7 @@ def _require_operation_execution_access(
         Permission.HISTORY_VIEW
     ):
         return
-    if request.app.state.planning_work.can_view_task_execution(
+    if planning_work_for_request(request).can_view_task_execution(
         execution_id,
         actor=user,
     ):
