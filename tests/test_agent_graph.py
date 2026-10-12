@@ -3913,6 +3913,42 @@ def test_variance_reporting_lists_saved_layouts_before_reading_data(
     assert "Choose one below" in result.text
 
 
+def test_budget_forecast_variance_lists_compatible_saved_layouts(
+    tmp_path: Path,
+) -> None:
+    graph = _orchestrator(
+        tmp_path,
+        _NeverCalledProvider(),
+        report_workspace=_ReportWorkspace(),
+    )
+    task = AgentTaskInterpreter.interpret(
+        (_message("Show September Budget vs Forecast variance above 500 for FY27."),)
+    )
+
+    result = graph.invoke(
+        conversation_id="conversation-budget-forecast-layouts",
+        user_id=7,
+        messages=(
+            _message("Show September Budget vs Forecast variance above 500 for FY27."),
+        ),
+        allowed_tool_names=("list_variance_views", "review_saved_variance"),
+        task_context=task.to_payload(),
+    )
+
+    assert result.tool_activity[0].name == "list_variance_views"
+    assert result.tool_activity[0].arguments == {
+        "comparison": "Budget vs Forecast",
+        "period": "Sep",
+        "year": "FY27",
+        "threshold": 500.0,
+    }
+    assert result.tool_activity[0].result["required_dimensions"] == [
+        "period",
+        "scenario",
+        "year",
+    ]
+
+
 def test_variance_reporting_uses_selected_layout_for_live_comparison(
     tmp_path: Path,
 ) -> None:

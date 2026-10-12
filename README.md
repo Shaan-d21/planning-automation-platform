@@ -140,6 +140,15 @@ workspace rather than direct agent execution. Natural-language Data Review is
 read-only and depends on the cube, dimension, and member metadata made
 available by the connected Oracle release.
 
+Scenario variance requests support Actual, Budget, and Forecast pairings from
+a compatible saved Data Explorer layout. The assistant keeps the requested
+period, year, threshold, and editable POV, retrieves current Oracle values,
+and returns an explicitly directed comparison (for example,
+`Forecast - Budget`), percentage variance against the first scenario, ranked
+returned differences, and an Excel evidence export. Favorable/unfavorable
+classification is intentionally not inferred until account-type or sign
+semantics are configured for the environment.
+
 ## Requirements
 
 - Python 3.11 or newer

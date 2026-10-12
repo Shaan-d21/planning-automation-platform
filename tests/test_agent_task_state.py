@@ -665,6 +665,19 @@ def test_variance_reporting_collects_comparison_then_period() -> None:
     assert ready.phase is AgentTaskPhase.READY_FOR_PLAN
 
 
+def test_budget_forecast_variance_is_a_first_class_comparison() -> None:
+    result = AgentTaskInterpreter.interpret(
+        _messages("Show September Budget vs Forecast variance above 500 for FY27.")
+    )
+
+    assert result.intent is AgentTaskIntent.VARIANCE_REPORTING
+    assert result.parameters["comparison"] == "Budget vs Forecast"
+    assert result.parameters["period"] == "Sep"
+    assert result.parameters["year"] == "FY27"
+    assert result.parameters["threshold"] == 500.0
+    assert result.phase is AgentTaskPhase.READY_FOR_PLAN
+
+
 def test_variance_reporting_retains_context_when_saved_layout_is_selected() -> None:
     result = AgentTaskInterpreter.interpret(
         _messages(

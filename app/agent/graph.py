@@ -3075,9 +3075,11 @@ class AgentGraphOrchestrator:
                         "then retrieve and compare current Oracle values."
                     )
                 return (
-                    "No saved Data Explorer layout is available for variance "
-                    "analysis. Create and validate a reusable layout in Data "
-                    "Explorer first; no Oracle data was changed."
+                    "No compatible saved Data Explorer layout is available. "
+                    "Create a reusable layout with Scenario and Period, plus "
+                    "Year when requested, and at least one row and column "
+                    "axis. Then retry the variance request; no Oracle data "
+                    "was changed."
                 )
             return "The saved variance layouts could not be loaded."
         if operation_code == "variance-review":
@@ -3100,12 +3102,21 @@ class AgentGraphOrchestrator:
                     compared = int(validation.get("compared_cells") or 0)
                     matched = int(validation.get("matched_cells") or 0)
                     different = max(0, compared - matched)
-                    return (
+                    analysis = result.get("variance_analysis")
+                    grounded_summary = (
+                        str(analysis.get("summary") or "").strip()
+                        if isinstance(analysis, dict)
+                        else ""
+                    )
+                    response = (
                         f"The live variance review compared **{compared:,}** "
                         f"cells and found **{different:,}** above the selected "
                         "threshold. Review the returned differences "
                         "below or export the comparison to Excel."
                     )
+                    if grounded_summary:
+                        response += f" {grounded_summary}"
+                    return response
                 return "The live variance comparison is ready below."
             error = ""
             if isinstance(activity, dict) and isinstance(
