@@ -1486,7 +1486,12 @@ describe("App", () => {
     fireEvent.change(screen.getByLabelText("Message the EPM Assistant"), { target: { value: "Publish approved revenue to reporting." } });
     fireEvent.click(screen.getByRole("button", { name: /^Send/ }));
     fireEvent.change(await screen.findByLabelText("Data Maps artifact"), { target: { value: "Revenue to Reporting" } });
-    fireEvent.click(screen.getByRole("button", { name: /^Continue/ }));
+    const mapContinueButton = screen.getByRole("button", { name: /^Continue/ });
+    await waitFor(
+      () => expect((mapContinueButton as HTMLButtonElement).disabled).toBe(false),
+      { timeout: 10000 }
+    );
+    fireEvent.click(mapContinueButton);
     fireEvent.change(await screen.findByLabelText(/Clear target before push/), { target: { value: "false" } });
     fireEvent.click(screen.getByRole("button", { name: /Continue to approval/ }));
     expect(await screen.findByRole("heading", { name: "Run Data Maps?" })).toBeTruthy();
@@ -1555,7 +1560,10 @@ describe("App", () => {
     expect(await screen.findByRole("heading", { name: "Matches found for your task" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /Monthly Revenue Forecast.*Strong match/ }));
     const continueButton = screen.getByRole("button", { name: /^Continue/ });
-    await waitFor(() => expect((continueButton as HTMLButtonElement).disabled).toBe(false));
+    await waitFor(
+      () => expect((continueButton as HTMLButtonElement).disabled).toBe(false),
+      { timeout: 10000 }
+    );
     fireEvent.click(continueButton);
     expect(await screen.findByText("Load forecast")).toBeTruthy();
     fireEvent.change(screen.getByLabelText("Pipeline variable Start Period"), { target: { value: "Jan-27" } });
@@ -1726,7 +1734,12 @@ describe("App", () => {
     expect(screen.getByText(/exact saved job name/)).toBeTruthy();
     fireEvent.change(screen.getByLabelText("Metadata Import Cube Refresh job"), { target: { value: "Refresh_Cube" } });
     fireEvent.change(screen.getByLabelText("Metadata Import error output filename"), { target: { value: "Metadata_Errors.csv" } });
-    fireEvent.click(screen.getByRole("button", { name: /Continue to approval/ }));
+    const metadataContinueButton = screen.getByRole("button", { name: /Continue to approval/ });
+    await waitFor(
+      () => expect((metadataContinueButton as HTMLButtonElement).disabled).toBe(false),
+      { timeout: 10000 }
+    );
+    fireEvent.click(metadataContinueButton);
     await waitFor(() => {
       expect(fetchMock.mock.calls.some(([url, init]) => String(url).startsWith("/api/v1/uploads?filename=") && init?.method === "POST")).toBe(true);
       expect(fetchMock.mock.calls.some(([url, init]) => String(url) === "/api/v1/agent/conversations/conv-metadata-import/inputs" && init?.method === "POST")).toBe(true);

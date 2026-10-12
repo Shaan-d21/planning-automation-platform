@@ -14,6 +14,9 @@ from app.services.application_workspace_service import ApplicationWorkspaceServi
 from app.services.environment_configuration_service import (
     EnvironmentConfigurationService,
 )
+from app.services.oracle_environment_registry_service import (
+    OracleEnvironmentRegistryService,
+)
 from app.services.session_security_service import ClientContext, SessionSecurityService
 from app.products.runtime_context import RuntimeApplicationContextResolver
 from app.utils.exceptions import AgentConversationError, ConfigurationError
@@ -51,6 +54,26 @@ class _DiscoveryClient:
             "items": [
                 {"name": "Plan", "type": "HP", "appType": "PBCS"},
                 {"name": "Close", "type": "HP", "appType": "FCCS"},
+            ]
+        }
+
+
+class _MultiEnvironmentDiscoveryClient(_DiscoveryClient):
+    def __init__(self, settings: Settings) -> None:
+        super().__init__(settings)
+        self.base_url = settings.epm_base_url
+
+    def get(self, endpoint: str):
+        assert endpoint.endswith("/applications")
+        if "close" in self.base_url:
+            return {
+                "items": [
+                    {"name": "Close", "type": "HP", "appType": "FCCS"}
+                ]
+            }
+        return {
+            "items": [
+                {"name": "Plan", "type": "HP", "appType": "PBCS"}
             ]
         }
 
@@ -158,7 +181,10 @@ def test_registered_applications_are_isolated_by_membership_and_session(
     assert runtime_context.application_id == close.application_id
     assert runtime_context.settings.application_name == "Close"
     assert runtime_context.business_process.value == "FCCS"
-    assert runtime_context.operations == ()
+    assert [item.code for item in runtime_context.operations] == [
+        "fccs-consolidation",
+        "fccs-journal-action",
+    ]
     assert "fccs-journals" in {
         item.code for item in runtime_context.navigation
     }
@@ -212,7 +238,7 @@ def test_registered_applications_are_isolated_by_membership_and_session(
         )
 
 
-def test_runtime_context_rebinds_a_session_when_the_environment_changes(
+def test_runtime_context_preserves_authorized_cross_environment_selection(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "environment-change.sqlite3"
@@ -269,6 +295,91 @@ def test_runtime_context_rebinds_a_session_when_the_environment_changes(
         user_id=administrator.user_id,
     )
 
-    assert runtime.application_name == "Vision"
-    assert runtime.business_process.value == "PLANNING"
-    assert runtime.workspace.application_id != fccs_workspace.application_id
+    assert runtime.application_name == "Close"
+    assert runtime.business_process.value == "FCCS"
+    assert runtime.settings.epm_base_url == fccs_settings.epm_base_url
+    assert runtime.workspace.application_id == fccs_workspace.application_id
+
+
+def test_secondary_environment_registration_switch_and_removal(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path / "multi-environment.sqlite3")
+    access = AccessControlService(settings.database_target)
+    administrator = access.bootstrap_administrator(
+        username="admin",
+        display_name="Administrator",
+        email=None,
+        password="Secure passphrase 123!",
+    )
+    workspaces = ApplicationWorkspaceService(settings.database_target)
+    registry = OracleEnvironmentRegistryService(
+        settings,
+        workspaces=workspaces,
+        client_factory=_MultiEnvironmentDiscoveryClient,
+    )
+    primary = registry.register(
+        settings.epm_base_url,
+        actor_user_id=administrator.user_id,
+    )
+    secondary = registry.register(
+        "https://close.example.oraclecloud.com/",
+        actor_user_id=administrator.user_id,
+    )
+
+    assert [item.application_name for item in primary] == ["Plan"]
+    assert [item.application_name for item in secondary] == ["Close"]
+    assert secondary[0].environment_base_url == (
+        "https://close.example.oraclecloud.com"
+    )
+
+    primary_configuration = EnvironmentConfigurationService(
+        settings,
+        client_factory=_MultiEnvironmentDiscoveryClient,
+    )
+    primary_configuration.select_application(
+        "Plan",
+        selected_by_user_id=administrator.user_id,
+    )
+    sessions = SessionSecurityService(settings.database_target)
+    sessions.start(
+        "admin-session",
+        user_id=administrator.user_id,
+        username=administrator.username,
+        authentication_method="local",
+        client=_client(),
+    )
+    workspaces.select_for_session(
+        "admin-session",
+        user_id=administrator.user_id,
+        application_id=secondary[0].application_id,
+    )
+    runtime = RuntimeApplicationContextResolver(
+        settings,
+        workspaces=workspaces,
+        environment_configuration=primary_configuration,
+    ).resolve("admin-session", user_id=administrator.user_id)
+
+    assert runtime.application_name == "Close"
+    assert runtime.settings.epm_base_url == (
+        "https://close.example.oraclecloud.com"
+    )
+    assert runtime.business_process.value == "FCCS"
+
+    workspaces.deactivate(secondary[0].application_id)
+    assert [
+        item.application_name
+        for item in workspaces.available_for_user(administrator.user_id)
+    ] == ["Plan"]
+    restored = RuntimeApplicationContextResolver(
+        settings,
+        workspaces=workspaces,
+        environment_configuration=primary_configuration,
+    ).resolve("admin-session", user_id=administrator.user_id)
+    assert restored.application_name == "Plan"
+
+    with pytest.raises(ConfigurationError, match="deployment application"):
+        workspaces.deactivate(
+            primary[0].application_id,
+            protected_application_id=primary[0].application_id,
+        )

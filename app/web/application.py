@@ -28,7 +28,7 @@ from app import __version__
 from app.agent.capabilities import AgentCapabilityGateway
 from app.agent.models import AgentToolActivity
 from app.agent.preflight import AgentActionPreflightService
-from app.agent.service import AgentApplicationService
+from app.agent.service import AgentApplicationService, SYSTEM_INSTRUCTION
 from app.api.v1 import router as v1_router
 from app.application.fccs_read import FCCSReadApplicationService
 from app.application.connection import VerifyConnection
@@ -123,6 +123,9 @@ from app.services.notification_service import create_notification_service
 from app.services.oracle_password_authentication_service import (
     OraclePasswordAuthenticationService,
 )
+from app.services.oracle_environment_registry_service import (
+    OracleEnvironmentRegistryService,
+)
 from app.services.session_security_service import SessionSecurityService
 from app.utils.exceptions import (
     AgentError,
@@ -174,9 +177,11 @@ from app.web.uploads import ProcessUploadStore
 from app.web.api_versioning import ApiVersioningMiddleware
 from app.web.request_correlation import RequestCorrelationMiddleware
 from app.web.security import (
+    agent_service_for_request,
     client_ip as _client_ip,
     csrf_token as _csrf_token,
     current_application_context,
+    planning_work_for_request,
     current_user as _current_user,
     require_api_session,
     require_bearer_token,
@@ -188,6 +193,28 @@ from app.web.security import (
 WEB_ROOT = Path(__file__).resolve().parent
 FRONTEND_DIST_ROOT = PROJECT_ROOT / "frontend" / "dist"
 LOGGER = logging.getLogger("oracle_planning_automation.web")
+
+
+def _agent_system_instruction(
+    business_process: BusinessProcessType,
+) -> str:
+    """Return product-specific agent policy for initial and switched workspaces."""
+
+    if business_process is not BusinessProcessType.FCCS:
+        return SYSTEM_INSTRUCTION
+    return (
+        SYSTEM_INSTRUCTION
+        + "\n\nActive product rules:\n"
+        "- The active application is Financial Consolidation and Close, not Planning.\n"
+        "- Use the FCCS tools for overview, dimensions, jobs, and journals.\n"
+        "- Treat requests to consolidate or run consolidation as the governed "
+        "FCCS Consolidation operation; collect the exact Scenario, Year, Period, "
+        "and Entity.\n"
+        "- Never claim a consolidation or journal action ran unless a governed "
+        "FCCS operation reports it.\n"
+        "- Do not suggest Planning-only Data Explorer, Data Map, Pipeline, "
+        "variable, or import tools in this workspace."
+    )
 
 
 def create_app(
@@ -216,6 +243,11 @@ def create_app(
     deployment_workspace = application_workspaces.find_registered(
         resolved_settings.epm_base_url,
         resolved_settings.application_name,
+    )
+    deployment_application_id = (
+        deployment_workspace.application_id
+        if deployment_workspace is not None
+        else None
     )
     business_process = environment_configuration.active_business_process(
         application_name=resolved_settings.application_name
@@ -249,6 +281,8 @@ def create_app(
     operation_catalog = OperationCatalogService(
         resolved_settings,
         business_process=business_process,
+        application_id=deployment_application_id,
+        seed_catalogs=deployment_application_id is not None,
         logger=LOGGER.getChild("operation_catalog"),
     )
     automation_schedule_service = AutomationScheduleApplicationService(
@@ -267,11 +301,7 @@ def create_app(
         ),
         environment_url=resolved_settings.epm_base_url,
         application_name=resolved_settings.application_name,
-        application_id=(
-            deployment_workspace.application_id
-            if deployment_workspace is not None
-            else None
-        ),
+        application_id=deployment_application_id,
         logger=LOGGER.getChild("automation_schedule_coordinator"),
     )
     automation_schedule_manager = AutomationScheduleManager(
@@ -285,10 +315,14 @@ def create_app(
     )
     process_service = PlanningProcessApplicationService(
         resolved_settings,
+        application_id=deployment_application_id,
+        seed_catalogs=deployment_application_id is not None,
         logger=LOGGER.getChild("process_service"),
     )
     process_designer = ProcessDesignerApplicationService(
         resolved_settings,
+        application_id=deployment_application_id,
+        seed_catalogs=deployment_application_id is not None,
         logger=LOGGER.getChild("process_designer"),
     )
     recovery_worker = DurableExecutionWorker(
@@ -316,7 +350,8 @@ def create_app(
                 automation_schedule_manager.shutdown()
             execution_manager.shutdown()
             operation_manager.shutdown()
-            application.state.agent_service.shutdown()
+            for service in set(application.state.agent_services.values()):
+                service.shutdown()
 
     app = FastAPI(
         title="EPM AI Assistant",
@@ -327,6 +362,7 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.settings = resolved_settings
+    app.state.deployment_application_id = deployment_application_id
     app.state.business_process = business_process
     app.state.product_provider = product_provider
     app.state.navigation_definitions = PRODUCT_PROVIDER_REGISTRY.navigation_for(
@@ -343,10 +379,16 @@ def create_app(
         logger=LOGGER.getChild("environment_configuration"),
     )
     app.state.application_workspaces = application_workspaces
+    app.state.oracle_environment_registry = OracleEnvironmentRegistryService(
+        resolved_settings,
+        workspaces=app.state.application_workspaces,
+        logger=LOGGER.getChild("oracle_environment_registry"),
+    )
     app.state.application_contexts = RuntimeApplicationContextResolver(
         resolved_settings,
         workspaces=app.state.application_workspaces,
         environment_configuration=app.state.environment_configuration,
+        deployment_application_id=deployment_application_id,
     )
     app.state.fccs_read_factory = lambda context_settings: (
         FCCSReadApplicationService(
@@ -375,7 +417,11 @@ def create_app(
     app.state.connection_use_case_factory = (
         connection_use_case_factory or VerifyConnection
     )
-    app.state.control_center = ControlCenterService(resolved_settings)
+    app.state.control_center = ControlCenterService(
+        resolved_settings,
+        application_id=deployment_application_id,
+        seed_catalogs=deployment_application_id is not None,
+    )
     app.state.process_service = process_service
     app.state.process_designer = process_designer
     app.state.automation_schedule_service = automation_schedule_service
@@ -410,18 +456,45 @@ def create_app(
     )
     app.state.report_workspace = ReportWorkspaceService(
         resolved_settings,
+        application_id=app.state.deployment_application_id,
+        seed_catalog_file=(
+            resolved_settings.report_catalog_file
+            if app.state.deployment_application_id is not None
+            else None
+        ),
         logger=LOGGER.getChild("report_workspace"),
     )
+    app.state.report_workspaces = {
+        app.state.deployment_application_id: app.state.report_workspace
+    }
     app.state.data_review = DataReviewWorkspaceService(
         resolved_settings,
+        report_catalog_file=app.state.report_workspace.catalog_file,
         logger=LOGGER.getChild("data_review"),
     )
+    app.state.data_review_workspaces = {
+        app.state.deployment_application_id: app.state.data_review
+    }
     app.state.identity_access = IdentityAccessApplicationService(
-        resolved_settings
+        resolved_settings,
+        business_process=business_process.value,
     )
+    app.state.identity_access_workspaces = {
+        app.state.deployment_application_id: app.state.identity_access
+    }
     app.state.planning_work = PlanningWorkApplicationService(
-        resolved_settings
+        resolved_settings,
+        application_id=app.state.deployment_application_id,
     )
+    app.state.planning_workspaces = {
+        app.state.deployment_application_id: app.state.planning_work
+    }
+    initial_fccs_read = (
+        app.state.fccs_read_factory(resolved_settings)
+        if business_process is BusinessProcessType.FCCS
+        else None
+    )
+    initial_agent_instruction = _agent_system_instruction(business_process)
     app.state.agent_service = AgentApplicationService(
         resolved_settings,
         gateway=AgentCapabilityGateway(
@@ -434,6 +507,7 @@ def create_app(
             business_rule_rtps=app.state.business_rule_rtp_registry,
             schedule_service=app.state.automation_schedule_service,
             schedule_coordinator=app.state.automation_schedule_coordinator,
+            fccs_read=initial_fccs_read,
         ),
         preflight=AgentActionPreflightService(
             control_center=app.state.control_center,
@@ -444,8 +518,72 @@ def create_app(
         schedule_service=app.state.automation_schedule_service,
         user_variable_identity=app.state.user_variable_identity,
         schedule_coordinator=app.state.automation_schedule_coordinator,
+        system_instruction=initial_agent_instruction,
         logger=LOGGER.getChild("agent"),
     )
+    app.state.agent_services = {
+        app.state.deployment_application_id: app.state.agent_service
+    }
+
+    def build_agent_service(context):
+        """Compose one product-scoped assistant without sharing Oracle state."""
+
+        catalog = OperationCatalogService(
+            context.settings,
+            business_process=context.business_process,
+            application_id=context.application_id,
+            seed_catalogs=False,
+            logger=LOGGER.getChild(
+                f"agent_catalog.{context.application_id}"
+            ),
+        )
+        report_workspace = ReportWorkspaceService(
+            context.settings,
+            application_id=context.application_id,
+            seed_catalog_file=None,
+            logger=LOGGER.getChild(
+                f"agent_reports.{context.application_id}"
+            ),
+        )
+        data_review = DataReviewWorkspaceService(
+            context.settings,
+            report_catalog_file=report_workspace.catalog_file,
+            logger=LOGGER.getChild(
+                f"agent_data_review.{context.application_id}"
+            ),
+        )
+        control_center = ControlCenterService(
+            context.settings,
+            application_id=context.application_id,
+            seed_catalogs=False,
+        )
+        fccs_read = (
+            app.state.fccs_read_factory(context.settings)
+            if context.business_process is BusinessProcessType.FCCS
+            else None
+        )
+        instruction = _agent_system_instruction(context.business_process)
+        return AgentApplicationService(
+            context.settings,
+            gateway=AgentCapabilityGateway(
+                context.settings,
+                control_center=control_center,
+                data_review=data_review,
+                report_workspace=report_workspace,
+                operation_catalog=catalog,
+                fccs_read=fccs_read,
+            ),
+            preflight=AgentActionPreflightService(
+                control_center=control_center,
+                operation_catalog=catalog,
+                report_workspace=report_workspace,
+            ),
+            operation_manager=app.state.operation_manager,
+            system_instruction=instruction,
+            logger=LOGGER.getChild(f"agent.{context.application_id}"),
+        )
+
+    app.state.agent_service_factory = build_agent_service
     app.state.upload_store = ProcessUploadStore(
         resolved_settings.runtime_storage_dir / "web_uploads"
     )
@@ -746,9 +884,14 @@ def create_app(
     @app.get("/api/control-panel/snapshot")
     async def control_panel_snapshot(request: Request):
         require_api_session(request)
+        application_id = _active_application_id(request)
         snapshot = await run_in_threadpool(
             request.app.state.control_center.snapshot,
             history_limit=8,
+            application_id=application_id,
+            report_output_dir=_report_workspace_for_request(
+                request
+            ).output_dir,
         )
         return {
             "status": "success",
@@ -1198,7 +1341,7 @@ def create_app(
     @app.get("/api/agent/status")
     async def agent_status(request: Request):
         require_api_session(request)
-        return request.app.state.agent_service.status()
+        return agent_service_for_request(request).status()
 
     @app.get("/api/agent/conversations")
     async def agent_conversations(request: Request):
@@ -1207,7 +1350,7 @@ def create_app(
         assert user is not None
         application_context = current_application_context(request, user)
         conversations = await run_in_threadpool(
-            request.app.state.agent_service.list_conversations,
+            agent_service_for_request(request).list_conversations,
             user,
             application_id=application_context.application_id,
         )
@@ -1223,7 +1366,7 @@ def create_app(
         assert user is not None
         application_context = current_application_context(request, user)
         conversation = await run_in_threadpool(
-            request.app.state.agent_service.create_conversation,
+            agent_service_for_request(request).create_conversation,
             user,
             application_id=application_context.application_id,
         )
@@ -1236,37 +1379,37 @@ def create_app(
         assert user is not None
         try:
             messages = await run_in_threadpool(
-                request.app.state.agent_service.get_messages,
+                agent_service_for_request(request).get_messages,
                 conversation_id,
                 user,
             )
             action_drafts = await run_in_threadpool(
-                request.app.state.agent_service.get_action_drafts,
+                agent_service_for_request(request).get_action_drafts,
                 conversation_id,
                 user,
             )
             approval_request = await run_in_threadpool(
-                request.app.state.agent_service.get_pending_approval,
+                agent_service_for_request(request).get_pending_approval,
                 conversation_id,
                 user,
             )
             clarification_request = await run_in_threadpool(
-                request.app.state.agent_service.get_pending_clarification,
+                agent_service_for_request(request).get_pending_clarification,
                 conversation_id,
                 user,
             )
             input_request = await run_in_threadpool(
-                request.app.state.agent_service.get_pending_input,
+                agent_service_for_request(request).get_pending_input,
                 conversation_id,
                 user,
             )
             data_review_context = await run_in_threadpool(
-                request.app.state.agent_service.get_data_review_context,
+                agent_service_for_request(request).get_data_review_context,
                 conversation_id,
                 user,
             )
             active_turn = await run_in_threadpool(
-                request.app.state.agent_service.get_active_turn,
+                agent_service_for_request(request).get_active_turn,
                 conversation_id,
                 user,
             )
@@ -1300,7 +1443,7 @@ def create_app(
         assert user is not None
         try:
             result = await run_in_threadpool(
-                request.app.state.agent_service.send_message,
+                agent_service_for_request(request).send_message,
                 conversation_id=conversation_id,
                 user=user,
                 content=payload.content,
@@ -1356,7 +1499,7 @@ def create_app(
         assert user is not None
         try:
             turn = await run_in_threadpool(
-                request.app.state.agent_service.cancel_turn,
+                agent_service_for_request(request).cancel_turn,
                 conversation_id,
                 turn_id,
                 user,
@@ -1379,7 +1522,7 @@ def create_app(
         assert user is not None
         upload_tokens: tuple[str, ...] = ()
         operation_uploads = {}
-        pending = request.app.state.agent_service.get_pending_approval(
+        pending = agent_service_for_request(request).get_pending_approval(
             conversation_id,
             user,
         )
@@ -1466,7 +1609,7 @@ def create_app(
                         )
         try:
             result = await run_in_threadpool(
-                request.app.state.agent_service.resolve_approval,
+                agent_service_for_request(request).resolve_approval,
                 conversation_id=conversation_id,
                 user=user,
                 request_id=payload.request_id,
@@ -1545,7 +1688,7 @@ def create_app(
         assert user is not None
         try:
             result = await run_in_threadpool(
-                request.app.state.agent_service.resolve_clarification,
+                agent_service_for_request(request).resolve_clarification,
                 conversation_id=conversation_id,
                 user=user,
                 request_id=payload.request_id,
@@ -1594,7 +1737,7 @@ def create_app(
         assert user is not None
         try:
             clarification = await run_in_threadpool(
-                request.app.state.agent_service.synchronize_clarification_catalog,
+                agent_service_for_request(request).synchronize_clarification_catalog,
                 conversation_id=conversation_id,
                 user=user,
                 request_id=payload.request_id,
@@ -1623,7 +1766,7 @@ def create_app(
         assert user is not None
         try:
             result = await run_in_threadpool(
-                request.app.state.agent_service.register_clarification_artifact,
+                agent_service_for_request(request).register_clarification_artifact,
                 conversation_id=conversation_id,
                 user=user,
                 request_id=payload.request_id,
@@ -1672,7 +1815,7 @@ def create_app(
         assert user is not None
         try:
             result = await run_in_threadpool(
-                request.app.state.agent_service.resolve_input,
+                agent_service_for_request(request).resolve_input,
                 conversation_id=conversation_id,
                 user=user,
                 request_id=payload.request_id,
@@ -1717,7 +1860,7 @@ def create_app(
         assert user is not None
         try:
             await run_in_threadpool(
-                request.app.state.agent_service.delete_conversation,
+                agent_service_for_request(request).delete_conversation,
                 conversation_id,
                 user,
             )
@@ -1735,7 +1878,7 @@ def create_app(
         assert user is not None
         try:
             draft = await run_in_threadpool(
-                request.app.state.agent_service.preflight_action_draft,
+                agent_service_for_request(request).preflight_action_draft,
                 draft_id,
                 user,
             )
@@ -1757,7 +1900,7 @@ def create_app(
         assert user is not None
         try:
             draft = await run_in_threadpool(
-                request.app.state.agent_service.resolve_operation_handoff,
+                agent_service_for_request(request).resolve_operation_handoff,
                 draft_id=draft_id,
                 user=user,
                 target_code=target_code,
@@ -1777,7 +1920,7 @@ def create_app(
         assert user is not None
         try:
             draft = await run_in_threadpool(
-                request.app.state.agent_service.update_action_draft_inputs,
+                agent_service_for_request(request).update_action_draft_inputs,
                 draft_id,
                 user,
                 payload.inputs,
@@ -1794,7 +1937,7 @@ def create_app(
         require_api_session(request)
         try:
             cubes = await run_in_threadpool(
-                request.app.state.data_review.list_cubes
+                _data_review_workspace_for_request(request).list_cubes
             )
         except EPMError as exc:
             return _data_review_error("Cubes could not be loaded.", exc)
@@ -1808,7 +1951,7 @@ def create_app(
         require_api_session(request)
         try:
             dimensions = await run_in_threadpool(
-                request.app.state.data_review.list_dimensions,
+                _data_review_workspace_for_request(request).list_dimensions,
                 cube,
             )
         except EPMError as exc:
@@ -1836,7 +1979,7 @@ def create_app(
         require_api_session(request)
         try:
             result = await run_in_threadpool(
-                request.app.state.data_review.search_members,
+                _data_review_workspace_for_request(request).search_members,
                 cube,
                 dimension,
                 query=q,
@@ -1858,7 +2001,7 @@ def create_app(
         require_api_session(request)
         try:
             grid = await run_in_threadpool(
-                request.app.state.data_review.load_slice,
+                _data_review_workspace_for_request(request).load_slice,
                 payload.to_domain(),
             )
         except EPMError as exc:
@@ -1873,12 +2016,15 @@ def create_app(
         require_api_session(request)
         try:
             grid = await run_in_threadpool(
-                request.app.state.data_review.load_slice,
+                _data_review_workspace_for_request(request).load_slice,
                 payload.to_domain(),
             )
             content = await run_in_threadpool(
                 ExcelFormReportRenderer().render_bytes,
-                application_name=resolved_settings.application_name,
+                application_name=current_application_context(
+                    request,
+                    _current_user(request),
+                ).application_name,
                 form_name=grid.form_name,
                 title=f"{grid.cube} Data Review",
                 grid=grid.grid,
@@ -1896,7 +2042,7 @@ def create_app(
         require_api_session(request)
         try:
             grid = await run_in_threadpool(
-                request.app.state.data_review.load_slice,
+                _data_review_workspace_for_request(request).load_slice,
                 payload.to_domain(),
             )
             content = await run_in_threadpool(_data_review_csv, grid.grid)
@@ -1921,7 +2067,7 @@ def create_app(
         require_api_session(request)
         try:
             validation = await run_in_threadpool(
-                request.app.state.data_review.validate_slice,
+                _data_review_workspace_for_request(request).validate_slice,
                 payload.slice.to_domain(),
                 payload.rules.to_domain(),
             )
@@ -1929,7 +2075,9 @@ def create_app(
             if payload.planning_task_id is not None:
                 actor = _current_user(request)
                 assert actor is not None
-                evidence = request.app.state.planning_work.record_quality_validation(
+                evidence = planning_work_for_request(
+                    request
+                ).record_quality_validation(
                     payload.planning_task_id,
                     selection=payload.slice.model_dump(mode="json"),
                     criteria=payload.rules.model_dump(mode="json"),
@@ -1955,13 +2103,16 @@ def create_app(
         selection = payload.slice.to_domain()
         try:
             validation = await run_in_threadpool(
-                request.app.state.data_review.validate_slice,
+                _data_review_workspace_for_request(request).validate_slice,
                 selection,
                 payload.rules.to_domain(),
             )
             content = await run_in_threadpool(
                 DataValidationExcelRenderer().render_quality,
-                application_name=resolved_settings.application_name,
+                application_name=current_application_context(
+                    request,
+                    _current_user(request),
+                ).application_name,
                 cube=validation.cube,
                 pov=selection.pov,
                 result=validation.result,
@@ -1978,7 +2129,7 @@ def create_app(
         require_api_session(request)
         try:
             comparison = await run_in_threadpool(
-                request.app.state.data_review.compare_slices,
+                _data_review_workspace_for_request(request).compare_slices,
                 payload.source.to_domain(),
                 payload.target.to_domain(),
                 tolerance=payload.tolerance,
@@ -1989,7 +2140,9 @@ def create_app(
             if payload.planning_task_id is not None:
                 actor = _current_user(request)
                 assert actor is not None
-                evidence = request.app.state.planning_work.record_comparison_validation(
+                evidence = planning_work_for_request(
+                    request
+                ).record_comparison_validation(
                     payload.planning_task_id,
                     selection=payload.source.model_dump(mode="json"),
                     target_cube=comparison.target_cube,
@@ -2020,7 +2173,7 @@ def create_app(
         target = payload.target.to_domain()
         try:
             comparison = await run_in_threadpool(
-                request.app.state.data_review.compare_slices,
+                _data_review_workspace_for_request(request).compare_slices,
                 source,
                 target,
                 tolerance=payload.tolerance,
@@ -2029,7 +2182,10 @@ def create_app(
             )
             content = await run_in_threadpool(
                 DataValidationExcelRenderer().render_comparison,
-                application_name=resolved_settings.application_name,
+                application_name=current_application_context(
+                    request,
+                    _current_user(request),
+                ).application_name,
                 source_cube=comparison.source_cube,
                 target_cube=comparison.target_cube,
                 source_pov=source.pov,
@@ -2049,13 +2205,17 @@ def create_app(
         redirect = require_session(request)
         if redirect is not None:
             return redirect
-        directory = resolved_settings.report_output_dir.resolve()
-        candidate = (directory / filename).resolve()
-        if (
-            candidate.parent != directory
-            or candidate.suffix.casefold() != ".xlsx"
-            or not candidate.is_file()
-        ):
+        candidate = None
+        for directory in _report_output_dirs_for_request(request):
+            resolved = (directory / filename).resolve()
+            if (
+                resolved.parent == directory
+                and resolved.suffix.casefold() == ".xlsx"
+                and resolved.is_file()
+            ):
+                candidate = resolved
+                break
+        if candidate is None:
             raise HTTPException(status_code=404, detail="Report not found.")
         return FileResponse(
             candidate,
@@ -2071,7 +2231,7 @@ def create_app(
         require_api_session(request)
         try:
             reports = await run_in_threadpool(
-                request.app.state.report_workspace.catalog
+                _report_workspace_for_request(request).catalog
             )
         except EPMError as exc:
             return JSONResponse(
@@ -2093,7 +2253,7 @@ def create_app(
         require_api_session(request)
         try:
             views = await run_in_threadpool(
-                request.app.state.report_workspace.catalog
+                _report_workspace_for_request(request).catalog
             )
         except EPMError as exc:
             return _data_review_error("Saved views could not be loaded.", exc)
@@ -2115,7 +2275,7 @@ def create_app(
         require_api_session(request)
         try:
             saved = await run_in_threadpool(
-                request.app.state.report_workspace.register,
+                _report_workspace_for_request(request).register,
                 payload.to_domain(),
             )
         except EPMError as exc:
@@ -2135,7 +2295,7 @@ def create_app(
         require_api_session(request)
         try:
             deleted = await run_in_threadpool(
-                request.app.state.report_workspace.delete,
+                _report_workspace_for_request(request).delete,
                 name,
             )
         except EPMError as exc:
@@ -2153,7 +2313,7 @@ def create_app(
         require_api_session(request)
         try:
             registered = await run_in_threadpool(
-                request.app.state.report_workspace.register,
+                _report_workspace_for_request(request).register,
                 payload.to_domain(),
             )
         except EPMError as exc:
@@ -2184,7 +2344,7 @@ def create_app(
         require_api_session(request)
         try:
             preflight = await run_in_threadpool(
-                request.app.state.report_workspace.preflight,
+                _report_workspace_for_request(request).preflight,
                 payload.form_name,
             )
         except EPMError as exc:
@@ -2211,6 +2371,7 @@ def create_app(
             execution = request.app.state.operation_manager.submit(
                 payload.to_domain(),
                 actor=_request_actor(request),
+                application_id=_active_application_id(request),
             )
         except EPMError as exc:
             return _operation_start_error(exc)
@@ -2344,10 +2505,16 @@ def create_app(
     @app.get("/api/runs/{execution_id}")
     async def get_process_run(request: Request, execution_id: str):
         require_api_session(request)
+        _require_execution_application(
+            request,
+            request.app.state.execution_manager,
+            execution_id,
+        )
         payload = _execution_payload(
             request.app.state.execution_manager,
             execution_id,
             resolved_settings,
+            report_output_dirs=_report_output_dirs_for_request(request),
         )
         if payload is None:
             raise HTTPException(status_code=404, detail="Execution not found.")
@@ -2981,6 +3148,10 @@ def create_app(
             request.app.state.operation_manager,
             execution_id,
             request.app.state.settings,
+            report_output_dirs=(
+                request.app.state.report_workspace.output_dir.resolve(),
+                request.app.state.settings.report_output_dir.resolve(),
+            ),
         )
         if payload is None:
             raise HTTPException(status_code=404, detail="Execution not found.")
@@ -3782,6 +3953,7 @@ def create_app(
             request.app.state.operation_manager,
             execution_id,
             request.app.state.settings,
+            report_output_dirs=_report_output_dirs_for_request(request),
         )
         if payload is None:
             raise HTTPException(status_code=404, detail="Execution not found.")
@@ -3947,6 +4119,11 @@ def create_app(
         redirect = require_session(request)
         if redirect is not None:
             return redirect
+        _require_execution_application(
+            request,
+            request.app.state.execution_manager,
+            execution_id,
+        )
         execution = request.app.state.execution_manager.get(execution_id)
         if execution is None or not execution.log_file.is_file():
             raise HTTPException(
@@ -4030,7 +4207,13 @@ def _validate_process_files(
                 )
 
 
-def _execution_payload(manager, execution_id: str, settings: Settings):
+def _execution_payload(
+    manager,
+    execution_id: str,
+    settings: Settings,
+    *,
+    report_output_dirs: tuple[Path, ...] | None = None,
+):
     """Combine temporary background state with durable workflow history."""
     managed = manager.get(execution_id)
     workflow = manager.get_workflow(execution_id)
@@ -4086,14 +4269,21 @@ def _execution_payload(manager, execution_id: str, settings: Settings):
         for item in steps
     )
     artifacts: list[dict[str, str]] = []
-    report_root = settings.report_output_dir.resolve()
+    report_roots = tuple(
+        dict.fromkeys(
+            path.resolve()
+            for path in (
+                report_output_dirs or (settings.report_output_dir,)
+            )
+        )
+    )
     for step in steps:
         raw_output = step["details"].get("output_path")
         if not raw_output:
             continue
         path = Path(str(raw_output)).resolve()
         if (
-            path.parent == report_root
+            path.parent in report_roots
             and path.suffix.casefold() == ".xlsx"
             and path.is_file()
         ):
@@ -4345,6 +4535,75 @@ def _active_application_id(request: Request) -> int:
     ).application_id
 
 
+def _report_workspace_for_request(request: Request) -> ReportWorkspaceService:
+    """Return the report workspace owned by the active Oracle application."""
+    context = current_application_context(request, _current_user(request))
+    if context.application_id == request.app.state.deployment_application_id:
+        primary = request.app.state.report_workspace
+        request.app.state.report_workspaces[context.application_id] = primary
+        return primary
+    cached = request.app.state.report_workspaces.get(context.application_id)
+    if cached is not None:
+        return cached
+    seed = (
+        request.app.state.settings.report_catalog_file
+        if context.application_id
+        == request.app.state.deployment_application_id
+        else None
+    )
+    workspace = ReportWorkspaceService(
+        context.settings,
+        application_id=context.application_id,
+        seed_catalog_file=seed,
+        logger=LOGGER.getChild(
+            f"report_workspace.application_{context.application_id}"
+        ),
+    )
+    request.app.state.report_workspaces[context.application_id] = workspace
+    return workspace
+
+
+def _data_review_workspace_for_request(
+    request: Request,
+) -> DataReviewWorkspaceService:
+    """Return a cached Data Review service bound to the active application."""
+    context = current_application_context(request, _current_user(request))
+    if context.application_id == request.app.state.deployment_application_id:
+        primary = request.app.state.data_review
+        request.app.state.data_review_workspaces[context.application_id] = primary
+        return primary
+    cached = request.app.state.data_review_workspaces.get(
+        context.application_id
+    )
+    if cached is not None:
+        return cached
+    workspace = DataReviewWorkspaceService(
+        context.settings,
+        report_catalog_file=_report_workspace_for_request(
+            request
+        ).catalog_file,
+        logger=LOGGER.getChild(
+            f"data_review.application_{context.application_id}"
+        ),
+    )
+    request.app.state.data_review_workspaces[context.application_id] = (
+        workspace
+    )
+    return workspace
+
+
+def _report_output_dirs_for_request(request: Request) -> tuple[Path, ...]:
+    """Return scoped report roots plus the deployment's legacy root."""
+    context = current_application_context(request, _current_user(request))
+    scoped = _report_workspace_for_request(request).output_dir.resolve()
+    roots = [scoped]
+    if context.application_id == request.app.state.deployment_application_id:
+        legacy = request.app.state.settings.report_output_dir.resolve()
+        if legacy != scoped:
+            roots.append(legacy)
+    return tuple(roots)
+
+
 def _schedule_payload(schedule: AutomationSchedule) -> dict[str, object]:
     """Return a JSON-safe schedule representation."""
     variables = schedule.configuration.get("variables", {})
@@ -4442,6 +4701,8 @@ def _operation_execution_payload(
     manager,
     execution_id: str,
     settings: Settings,
+    *,
+    report_output_dirs: tuple[Path, ...] | None = None,
 ):
     managed = manager.get(execution_id)
     workflow = manager.get_workflow(execution_id)
@@ -4498,17 +4759,32 @@ def _operation_execution_payload(
         for item in steps
     )
     artifacts: list[dict[str, str]] = []
-    report_root = settings.report_output_dir.resolve()
+    report_roots = tuple(
+        dict.fromkeys(
+            path.resolve()
+            for path in (
+                report_output_dirs or (settings.report_output_dir,)
+            )
+        )
+    )
     for step in steps:
         raw_output = step["details"].get("output_file")
         if not raw_output:
             continue
-        path = (report_root / Path(str(raw_output)).name).resolve()
-        if (
-            path.parent == report_root
-            and path.suffix.casefold() == ".xlsx"
-            and path.is_file()
-        ):
+        filename = Path(str(raw_output)).name
+        path = next(
+            (
+                candidate
+                for root in report_roots
+                if (
+                    (candidate := (root / filename).resolve()).parent == root
+                    and candidate.suffix.casefold() == ".xlsx"
+                    and candidate.is_file()
+                )
+            ),
+            None,
+        )
+        if path is not None:
             artifacts.append(
                 {
                     "name": path.name,
@@ -4821,14 +5097,15 @@ def _planning_task_link_callback(
             "Open this operation from an assigned Planning task, or ask a "
             "Power User or Service Administrator to run it."
         )
-    request.app.state.planning_work.authorize_task_execution(
+    planning_work = planning_work_for_request(request)
+    planning_work.authorize_task_execution(
         planning_task_id,
         action_type=action_type,
         actor=user,
     )
 
     def link(execution_id: str) -> None:
-        request.app.state.planning_work.link_task_execution(
+        planning_work.link_task_execution(
             planning_task_id,
             execution_id,
             action_type=action_type,
@@ -4843,13 +5120,18 @@ def _require_operation_execution_access(
     execution_id: str,
 ) -> None:
     """Restrict process-only users to executions linked to their own tasks."""
+    _require_execution_application(
+        request,
+        request.app.state.operation_manager,
+        execution_id,
+    )
     user = _current_user(request)
     assert user is not None
     if user.has_permission(Permission.OPERATION_EXECUTE) or user.has_permission(
         Permission.HISTORY_VIEW
     ):
         return
-    if request.app.state.planning_work.can_view_task_execution(
+    if planning_work_for_request(request).can_view_task_execution(
         execution_id,
         actor=user,
     ):
@@ -4858,6 +5140,27 @@ def _require_operation_execution_access(
         status_code=403,
         detail="This execution is not linked to one of your assigned tasks.",
     )
+
+
+def _require_execution_application(
+    request: Request,
+    manager,
+    execution_id: str,
+) -> None:
+    """Hide workflow and queued evidence owned by another application."""
+    application_id = _active_application_id(request)
+    workflow = manager.get_workflow(execution_id)
+    managed = manager.get(execution_id)
+    owners = {
+        owner
+        for owner in (
+            getattr(workflow, "application_id", None),
+            getattr(managed, "application_id", None),
+        )
+        if owner is not None
+    }
+    if owners != {application_id}:
+        raise HTTPException(status_code=404, detail="Execution not found.")
 
 
 def _access_error(message: str, *, status_code: int) -> JSONResponse:

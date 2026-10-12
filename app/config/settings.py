@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -636,6 +636,25 @@ class Settings:
             email_notifications=email_notifications,
         )
 
+    def for_oracle_application(
+        self,
+        *,
+        base_url: str,
+        application_name: str = "",
+    ) -> Settings:
+        """Return a validated request-scoped Oracle target.
+
+        Credentials and platform configuration remain deployment-owned while
+        the Oracle endpoint and application are selected from the authorized
+        application registry.
+        """
+
+        return replace(
+            self,
+            epm_base_url=self._normalize_and_validate_url(base_url.strip()),
+            application_name=application_name.strip(),
+        )
+
     @property
     def database_target(self) -> str | Path:
         """Return PostgreSQL runtime URL or an isolated test database path."""
@@ -747,6 +766,10 @@ class Settings:
         if parsed.username or parsed.password:
             raise ConfigurationError(
                 "EPM_BASE_URL must not contain embedded credentials."
+            )
+        if parsed.query or parsed.fragment:
+            raise ConfigurationError(
+                "EPM_BASE_URL must not contain a query string or fragment."
             )
         return normalized
 

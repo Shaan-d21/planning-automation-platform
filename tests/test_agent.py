@@ -54,6 +54,7 @@ from app.models.data_validation import (
     FormGridRow,
 )
 from app.models.environment import DimensionInfo, MemberInfo
+from app.models.job import JobDefinition
 from app.models.substitution_variable import SubstitutionVariable
 from app.models.workflow import (
     WorkflowRun,
@@ -62,6 +63,8 @@ from app.models.workflow import (
     WorkflowStepStatus,
 )
 from app.services.access_control_service import AccessControlService
+from app.products.contracts import BusinessProcessType
+from app.products.registry import PRODUCT_PROVIDER_REGISTRY
 from app.utils.exceptions import AgentCapabilityError, AgentConversationError
 
 
@@ -432,6 +435,25 @@ class _OperationCatalog:
     def discover_job_names(self, *, job_type):
         assert job_type == "RULES"
         return ("Revenue Forecast",)
+
+
+class _FCCSOperationCatalog:
+    def active_definitions(self):
+        return PRODUCT_PROVIDER_REGISTRY.operations_for(BusinessProcessType.FCCS)
+
+    def active_agent_tool_names(self):
+        return PRODUCT_PROVIDER_REGISTRY.agent_tool_names_for(
+            BusinessProcessType.FCCS
+        )
+
+
+class _FCCSRead:
+    def job_definitions(self, *, job_type=None):
+        assert job_type == "RULES"
+        return (
+            JobDefinition(job_name="Consolidate", job_type="RULES"),
+            JobDefinition(job_name="Translate", job_type="RULES"),
+        )
 
 
 class _NamedRuleCatalog:
@@ -2675,6 +2697,176 @@ def test_business_rule_request_runs_full_governed_flow_without_model_tool_choice
     assert operation_input.rule_name == "Revenue Forecast"
     assert operation_input.runtime_prompts == {"Year": "FY27"}
     assert actor.trigger_source is TriggerSource.AI_AGENT
+
+
+def test_fccs_consolidation_prompt_uses_product_operation_end_to_end(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    access = AccessControlService(settings.workflow_database_file)
+    account = access.bootstrap_administrator(
+        username="admin",
+        display_name="Administrator",
+        email=None,
+        password="Strong password 123!",
+    )
+    manager = _OperationManager()
+    service = AgentApplicationService(
+        settings,
+        gateway=AgentCapabilityGateway(
+            settings,
+            control_center=_ControlCenter(),
+            data_review=_DataReview(),
+            operation_catalog=_FCCSOperationCatalog(),
+            fccs_read=_FCCSRead(),
+        ),
+        repository=SQLiteAgentRepository(settings.workflow_database_file),
+        provider_factory=_NeverCalledProvider,
+        operation_manager=manager,
+    )
+    user = replace(_user(Permission.OPERATION_EXECUTE), user_id=account.user_id)
+    conversation = service.create_conversation(user)
+
+    prepared = service.send_message(
+        conversation_id=conversation.conversation_id,
+        user=user,
+        content="Run Consolidation rule.",
+    )
+
+    choice = prepared["clarification_request"]
+    assert choice is not None
+    assert choice.operation_code == "fccs-consolidation"
+    assert choice.options == ("Consolidate",)
+    selected = service.resolve_clarification(
+        conversation_id=conversation.conversation_id,
+        user=user,
+        request_id=choice.request_id,
+        value="Consolidate",
+    )
+    input_request = selected["input_request"]
+    assert input_request is not None
+    assert input_request.operation_code == "fccs-consolidation"
+
+    reviewed = service.resolve_input(
+        conversation_id=conversation.conversation_id,
+        user=user,
+        request_id=input_request.request_id,
+        values={
+            "scenario": "Actual",
+            "year": "FY27",
+            "period": "Jan",
+            "entity": "FCCS_Total Geography",
+        },
+    )
+
+    approval = reviewed["approval_request"]
+    assert approval is not None
+    assert approval.operation_code == "fccs-consolidation"
+    assert approval.artifact_name == "Consolidate"
+
+    completed = service.resolve_approval(
+        conversation_id=conversation.conversation_id,
+        user=user,
+        request_id=approval.request_id,
+        decision="approve",
+    )
+
+    assert completed["execution"]["operation_code"] == "fccs-consolidation"
+    assert completed["execution"]["target_name"] == "Consolidate"
+    operation_input, actor = manager.submissions[0]
+    assert type(operation_input).__name__ == "FCCSConsolidationInput"
+    assert operation_input.rule_name == "Consolidate"
+    assert operation_input.scenario == "Actual"
+    assert operation_input.year == "FY27"
+    assert operation_input.period == "Jan"
+    assert operation_input.entity == "FCCS_Total Geography"
+    assert actor.trigger_source is TriggerSource.AI_AGENT
+
+
+def test_fccs_consolidation_full_prompt_prefills_only_fccs_pov(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    access = AccessControlService(settings.workflow_database_file)
+    account = access.bootstrap_administrator(
+        username="admin",
+        display_name="Administrator",
+        email=None,
+        password="Strong password 123!",
+    )
+    service = AgentApplicationService(
+        settings,
+        gateway=AgentCapabilityGateway(
+            settings,
+            control_center=_ControlCenter(),
+            data_review=_DataReview(),
+            operation_catalog=_FCCSOperationCatalog(),
+            fccs_read=_FCCSRead(),
+        ),
+        repository=SQLiteAgentRepository(settings.workflow_database_file),
+        provider_factory=_NeverCalledProvider,
+    )
+    user = replace(_user(Permission.OPERATION_EXECUTE), user_id=account.user_id)
+    conversation = service.create_conversation(user)
+
+    prepared = service.send_message(
+        conversation_id=conversation.conversation_id,
+        user=user,
+        content=(
+            "Run Consolidate with Scenario Actual, Year FY27, Period Jan, "
+            "Entity FCCS_Total Geography."
+        ),
+    )
+
+    input_request = prepared["input_request"]
+    assert input_request is not None
+    assert input_request.operation_code == "fccs-consolidation"
+    assert input_request.artifact_name == "Consolidate"
+    assert input_request.context["prefill"] == {
+        "scenario": "Actual",
+        "year": "FY27",
+        "period": "Jan",
+        "entity": "FCCS_Total Geography",
+    }
+    assert "runtime_prompt_mode" not in input_request.context["prefill"]
+    assert "runtime_prompts" not in input_request.context["prefill"]
+
+
+def test_planning_consolidate_rule_remains_a_planning_business_rule(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    access = AccessControlService(settings.workflow_database_file)
+    account = access.bootstrap_administrator(
+        username="admin",
+        display_name="Administrator",
+        email=None,
+        password="Strong password 123!",
+    )
+    service = AgentApplicationService(
+        settings,
+        gateway=AgentCapabilityGateway(
+            settings,
+            control_center=_ControlCenter(),
+            data_review=_DataReview(),
+            operation_catalog=_NamedRuleCatalog("Consolidate"),
+        ),
+        repository=SQLiteAgentRepository(settings.workflow_database_file),
+        provider_factory=_NeverCalledProvider,
+    )
+    user = replace(_user(Permission.OPERATION_EXECUTE), user_id=account.user_id)
+    conversation = service.create_conversation(user)
+
+    prepared = service.send_message(
+        conversation_id=conversation.conversation_id,
+        user=user,
+        content="Run Consolidate rule.",
+    )
+
+    input_request = prepared["input_request"]
+    assert input_request is not None
+    assert input_request.operation_code == "business-rules"
+    assert input_request.artifact_name == "Consolidate"
 
 
 @pytest.mark.parametrize(

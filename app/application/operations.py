@@ -58,8 +58,19 @@ from app.products.contracts import (
     OperationKind,
 )
 from app.products.registry import PRODUCT_PROVIDER_REGISTRY
+from app.products.fccs.journal_actions import (
+    FCCSJournalActionInput,
+    FCCSJournalActionService,
+)
+from app.products.fccs.consolidation import (
+    FCCSConsolidationInput,
+    FCCSConsolidationService,
+)
 from app.services.business_rule_service import BusinessRuleService
 from app.services.application_service import ApplicationService
+from app.services.application_catalog_workspace import (
+    ApplicationCatalogWorkspace,
+)
 from app.services.cube_refresh_service import CubeRefreshService
 from app.services.data_integration_catalog_service import (
     DataIntegrationCatalogService,
@@ -243,7 +254,8 @@ class PipelineOperationPreview:
 
 
 OperationInput = (
-    BusinessRuleOperationInput
+    FCCSConsolidationInput
+    | BusinessRuleOperationInput
     | DataMapOperationInput
     | PipelineOperationInput
     | DataIntegrationOperationInput
@@ -253,6 +265,7 @@ OperationInput = (
     | UserVariableOperationInput
     | CubeRefreshOperationInput
     | ReportGenerationOperationInput
+    | FCCSJournalActionInput
 )
 
 
@@ -291,9 +304,23 @@ class OperationCatalogService:
         settings: Settings,
         *,
         business_process: BusinessProcessType = BusinessProcessType.PLANNING,
+        application_id: int | None = None,
+        seed_catalogs: bool = False,
         logger: logging.Logger | None = None,
     ) -> None:
-        self._settings = settings
+        catalogs = ApplicationCatalogWorkspace(
+            settings,
+            application_id=application_id,
+            seed_from_configuration=seed_catalogs,
+        )
+        self._settings = replace(
+            settings,
+            pipeline_catalog_file=catalogs.pipeline_catalog_file,
+            data_integration_catalog_file=(
+                catalogs.data_integration_catalog_file
+            ),
+        )
+        self._application_id = application_id
         self._business_process = business_process
         self._logger = logger or logging.getLogger(__name__)
 
@@ -1081,9 +1108,11 @@ class OperationCommandExecutor:
         self,
         settings: Settings,
         *,
+        application_id: int | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._settings = settings
+        self._application_id = application_id
         self._logger = logger or logging.getLogger(__name__)
 
     def execute(
@@ -1185,6 +1214,7 @@ class OperationCommandExecutor:
                 log_evidence = OracleJobEvidenceService(
                     FileService(client, allow_any_extension=True),
                     self._settings.runtime_data_dir,
+                    application_id=self._application_id,
                     logger=self._logger.getChild("oracle_job_evidence"),
                 ).capture_data_integration_log(
                     execution_id=execution_id,
@@ -1235,6 +1265,7 @@ class OperationCommandExecutor:
                 artifact_evidence = OracleJobEvidenceService(
                     FileService(client, allow_any_extension=True),
                     self._settings.runtime_data_dir,
+                    application_id=self._application_id,
                     logger=self._logger.getChild("oracle_job_evidence"),
                 ).capture_error_file(
                     execution_id=execution_id,
@@ -1256,6 +1287,38 @@ class OperationCommandExecutor:
                 return
 
         def validate() -> Mapping[str, Any]:
+            if isinstance(operation_input, FCCSConsolidationInput):
+                command = FCCSConsolidationService.normalize(operation_input)
+                state["fccs_consolidation"] = command
+                write(
+                    f"Validated FCCS consolidation '{command.rule_name}' for "
+                    f"{command.scenario}, {command.year}, {command.period}, "
+                    f"entity '{command.entity}'."
+                )
+                return {
+                    "operation": operation_kind.value,
+                    "target_name": command.rule_name,
+                    "scenario": command.scenario,
+                    "year": command.year,
+                    "period": command.period,
+                    "entity": command.entity,
+                }
+            if isinstance(operation_input, FCCSJournalActionInput):
+                command = FCCSJournalActionService.normalize(operation_input)
+                state["fccs_journal_action"] = command
+                write(
+                    f"Validated FCCS journal action {command.action.value} "
+                    f"for '{command.journal_label}'."
+                )
+                return {
+                    "operation": operation_kind.value,
+                    "target_name": command.journal_label,
+                    "action": command.action.value,
+                    "scenario": command.scenario,
+                    "year": command.year,
+                    "period": command.period,
+                    "expected_status": command.expected_status,
+                }
             if isinstance(operation_input, BusinessRuleOperationInput):
                 rule_name = BusinessRuleService.validate_rule_name(
                     operation_input.rule_name
@@ -1538,7 +1601,7 @@ class OperationCommandExecutor:
                     "operation": operation_kind.value,
                     "target_name": job_name,
                 }
-            if isinstance(operation_input, ReportGenerationOperationInput):
+            elif isinstance(operation_input, ReportGenerationOperationInput):
                 command = ReportWorkspaceService.normalize_input(
                     operation_input
                 )
@@ -1674,7 +1737,7 @@ class OperationCommandExecutor:
                     logger=self._logger.getChild("job_service"),
                 )
             write(
-                f"Authenticated to Planning application "
+                f"Authenticated to Oracle EPM application "
                 f"'{self._settings.application_name}'."
             )
             return {
@@ -1687,9 +1750,25 @@ class OperationCommandExecutor:
                 raise OperationError(
                     "Oracle EPM connection was not initialized."
                 )
-            if isinstance(operation_input, ReportGenerationOperationInput):
+            if isinstance(operation_input, FCCSJournalActionInput):
+                result = FCCSJournalActionService(client).execute(
+                    state["fccs_journal_action"]
+                )
+                write(
+                    f"Oracle accepted {result['action']} for FCCS journal "
+                    f"'{result['target_name']}'."
+                )
+                return result
+            if isinstance(operation_input, FCCSConsolidationInput):
+                submission = FCCSConsolidationService(client).start(
+                    state["fccs_consolidation"]
+                )
+                monitor_service = state["job_service"]
+                display_name = submission.rule_name
+            elif isinstance(operation_input, ReportGenerationOperationInput):
                 result = ReportWorkspaceService(
                     self._settings,
+                    application_id=self._application_id,
                     logger=self._logger.getChild("report_workspace"),
                 ).generate(
                     client,
@@ -1710,7 +1789,7 @@ class OperationCommandExecutor:
                     "status": "Completed",
                     "engine": "rest",
                 }
-            if isinstance(
+            elif isinstance(
                 operation_input,
                 SubstitutionVariableOperationInput,
             ):
@@ -1733,7 +1812,7 @@ class OperationCommandExecutor:
                     "status": "Completed",
                     "engine": "rest",
                 }
-            if isinstance(operation_input, UserVariableOperationInput):
+            elif isinstance(operation_input, UserVariableOperationInput):
                 result = UserVariableApplicationService(
                     client=client,
                     logger=self._logger.getChild("user_variables"),
@@ -1753,7 +1832,7 @@ class OperationCommandExecutor:
                     "status": "Completed",
                     "engine": "rest",
                 }
-            if isinstance(operation_input, CubeRefreshOperationInput):
+            elif isinstance(operation_input, CubeRefreshOperationInput):
                 service = CubeRefreshService(
                     client,
                     logger=self._logger.getChild(
@@ -2065,6 +2144,7 @@ class OperationCommandExecutor:
                         OracleJobEvidenceService(
                             FileService(client, allow_any_extension=True),
                             self._settings.runtime_data_dir,
+                            application_id=self._application_id,
                             logger=self._logger.getChild("oracle_job_evidence"),
                         ).capture_error_file(
                             execution_id=execution_id,
@@ -2173,6 +2253,14 @@ class OperationCommandExecutor:
     def _identity(
         operation_input: OperationInput,
     ) -> tuple[OperationKind, str]:
+        if isinstance(operation_input, FCCSConsolidationInput):
+            command = FCCSConsolidationService.normalize(operation_input)
+            return OperationKind.FCCS_CONSOLIDATION, command.rule_name
+        if isinstance(operation_input, FCCSJournalActionInput):
+            target = str(operation_input.journal_label).strip()
+            if not target:
+                raise OperationError("FCCS journal label cannot be empty.")
+            return OperationKind.FCCS_JOURNAL_ACTION, target
         if isinstance(operation_input, BusinessRuleOperationInput):
             return (
                 OperationKind.BUSINESS_RULE,
@@ -2259,6 +2347,8 @@ class OperationCommandExecutor:
             OperationKind.USER_VARIABLE: "User Variable",
             OperationKind.CUBE_REFRESH: "Planning Cube Refresh",
             OperationKind.REPORT_GENERATION: "Report Generation",
+            OperationKind.FCCS_CONSOLIDATION: "FCCS Consolidation",
+            OperationKind.FCCS_JOURNAL_ACTION: "FCCS Journal Action",
         }[kind]
 
     @staticmethod

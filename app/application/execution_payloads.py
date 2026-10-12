@@ -27,6 +27,11 @@ from app.application.substitution_variables import (
     SubstitutionVariableOperationInput,
 )
 from app.application.user_variables import UserVariableOperationInput
+from app.products.fccs.journal_actions import (
+    FCCSJournalAction,
+    FCCSJournalActionInput,
+)
+from app.products.fccs.consolidation import FCCSConsolidationInput
 from app.models.access_control import ExecutionActor, TriggerSource
 from app.models.substitution_variable import RequestedSubstitutionVariableUpdate
 from app.utils.exceptions import ExecutionQueueError
@@ -124,8 +129,26 @@ def operation_from_payload(payload: dict[str, Any]) -> tuple[OperationInput, Exe
     except (KeyError, ValueError) as exc:
         raise ExecutionQueueError("Durable operation payload is invalid.") from exc
 
-    if kind is OperationKind.BUSINESS_RULE:
-        result: OperationInput = BusinessRuleOperationInput(
+    if kind is OperationKind.FCCS_CONSOLIDATION:
+        result: OperationInput = FCCSConsolidationInput(
+            rule_name=_text(values, "rule_name"),
+            scenario=_text(values, "scenario"),
+            year=_text(values, "year"),
+            period=_text(values, "period"),
+            entity=_text(values, "entity"),
+        )
+    elif kind is OperationKind.FCCS_JOURNAL_ACTION:
+        result: OperationInput = FCCSJournalActionInput(
+            journal_label=_text(values, "journal_label"),
+            scenario=_text(values, "scenario"),
+            year=_text(values, "year"),
+            period=_text(values, "period"),
+            action=FCCSJournalAction(_text(values, "action")),
+            consolidation=_optional_text(values.get("consolidation")),
+            expected_status=_optional_text(values.get("expected_status")),
+        )
+    elif kind is OperationKind.BUSINESS_RULE:
+        result = BusinessRuleOperationInput(
             rule_name=_text(values, "rule_name"),
             runtime_prompts=_string_map(values.get("runtime_prompts")),
         )
@@ -332,6 +355,24 @@ def upload_paths(payload: dict[str, Any]) -> tuple[Path, ...]:
 
 
 def _operation_values(operation_input: OperationInput) -> tuple[OperationKind, dict[str, Any]]:
+    if isinstance(operation_input, FCCSConsolidationInput):
+        return OperationKind.FCCS_CONSOLIDATION, {
+            "rule_name": operation_input.rule_name,
+            "scenario": operation_input.scenario,
+            "year": operation_input.year,
+            "period": operation_input.period,
+            "entity": operation_input.entity,
+        }
+    if isinstance(operation_input, FCCSJournalActionInput):
+        return OperationKind.FCCS_JOURNAL_ACTION, {
+            "journal_label": operation_input.journal_label,
+            "scenario": operation_input.scenario,
+            "year": operation_input.year,
+            "period": operation_input.period,
+            "action": operation_input.action.value,
+            "consolidation": operation_input.consolidation,
+            "expected_status": operation_input.expected_status,
+        }
     if isinstance(operation_input, BusinessRuleOperationInput):
         return OperationKind.BUSINESS_RULE, {
             "rule_name": operation_input.rule_name,

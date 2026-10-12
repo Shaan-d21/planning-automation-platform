@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import and_, insert, select, update
+from sqlalchemy import and_, delete, insert, select, update
 
 from app.infrastructure.database.engine import DatabaseTarget, database_for
 from app.infrastructure.database.schema import (
@@ -200,6 +200,74 @@ class ApplicationWorkspaceService:
             ).mappings().all()
         return tuple(self._workspace(row) for row in rows)
 
+    def registered(self) -> tuple[ApplicationWorkspace, ...]:
+        """Return every active application without exposing credentials."""
+
+        with self._database.connect() as connection:
+            rows = connection.execute(
+                select(oracle_applications)
+                .where(oracle_applications.c.is_active.is_(True))
+                .order_by(
+                    oracle_applications.c.environment_base_url,
+                    oracle_applications.c.application_name,
+                )
+            ).mappings().all()
+        return tuple(self._workspace(row) for row in rows)
+
+    def deactivate(
+        self,
+        application_id: int,
+        *,
+        protected_application_id: int | None = None,
+    ) -> ApplicationWorkspace:
+        """Remove an application from active use while retaining history."""
+
+        if application_id == protected_application_id:
+            raise ConfigurationError(
+                "The deployment application cannot be removed while it is "
+                "configured through the server environment."
+            )
+        now = datetime.now(UTC)
+        with self._database.begin() as connection:
+            row = connection.execute(
+                select(oracle_applications).where(
+                    oracle_applications.c.application_id == application_id,
+                    oracle_applications.c.is_active.is_(True),
+                )
+            ).mappings().one_or_none()
+            if row is None:
+                raise ConfigurationError(
+                    "The selected Oracle application is not registered."
+                )
+            connection.execute(
+                update(platform_sessions)
+                .where(
+                    platform_sessions.c.active_application_id
+                    == application_id
+                )
+                .values(active_application_id=None)
+            )
+            connection.execute(
+                delete(platform_user_applications).where(
+                    platform_user_applications.c.application_id
+                    == application_id
+                )
+            )
+            connection.execute(
+                update(oracle_applications)
+                .where(
+                    oracle_applications.c.application_id == application_id
+                )
+                .values(is_active=False, updated_at=now)
+            )
+        return self._workspace(
+            {
+                **dict(row),
+                "is_active": False,
+                "updated_at": now,
+            }
+        )
+
     def get(self, application_id: int) -> ApplicationWorkspace | None:
         """Return one registered application by its durable identity."""
 
@@ -321,8 +389,8 @@ class ApplicationWorkspaceService:
     ) -> ApplicationWorkspace:
         """Persist an authorized session selection for request routing.
 
-        The public switch endpoint is intentionally deferred until Oracle
-        clients and product composition are request-scoped.
+        Callers must apply the product runtime switch policy before invoking
+        this membership-and-session persistence boundary.
         """
 
         with self._database.begin() as connection:

@@ -31,6 +31,19 @@ schema.
 - Pending browser uploads remain bounded temporary files outside PostgreSQL.
   Their opaque tokens are held only by the web runtime and require the creating
   session plus registered application ID for resolution or cleanup.
+- Saved report/Data Explorer catalogs and generated workbooks remain outside
+  PostgreSQL in the persistent report volume. Their directories are keyed by
+  registered application ID; download and Data Review resolution use only the
+  authenticated session's active application namespace. The original catalog
+  is retained only as the one-time seed for the deployment application.
+- Pipeline, Data Integration, Planning Process, and Planning Cycle JSON
+  allow-lists also live in persistent application-ID namespaces. Configured
+  JSON files are immutable deployment seeds; they are copied only for the
+  deployment application, while newly registered applications start empty.
+- Process Designer versions and run presets retain their existing relational
+  schema but use an internal application-qualified storage key. User-facing
+  process codes remain unchanged, the same code can exist in two applications,
+  and pre-workspace records are copied once into the deployment namespace.
 
 ## Tables
 
@@ -156,16 +169,6 @@ Version fields plus JSONB maps for Oracle variables, Inbox references, and
 required local-upload keys. An archived profile is retained for execution
 history; active profile names are unique within a process.
 
-#### `process_schedules`
-
-One recurrence definition per row, referencing a process and optionally a run
-profile. Stores IANA timezone, local first-run time, next UTC run, enabled and
-archive state, and the last scheduler outcome. `last_execution_id` is a
-correlation value rather than a foreign key because a scheduler handoff can
-receive an external execution identifier before local workflow persistence.
-A partial due-work index supports scheduler polling without scanning archived
-or disabled schedules.
-
 #### `automation_schedules`
 
 Allow-listed unattended Oracle Pipeline and RTP-registry recurrences. Each
@@ -182,8 +185,10 @@ APIs.
 One dated business cycle such as `August Forecast FY27`. This is deliberately
 different from `PlanningCycleDefinition`, which remains reusable technical
 configuration for an Oracle Pipeline-backed process. The operational cycle
-stores business context, dates, status, creator, and an optional reference to
-the reusable platform process.
+belongs to one registered Oracle application and stores business context,
+dates, status, creator, and an optional display code for the reusable platform
+process. Descendant stages, tasks, attempts, validations, and approvals inherit
+the cycle's application boundary.
 
 #### `planning_cycle_stages`
 
@@ -216,6 +221,14 @@ index prevents concurrent queued/running work for the same target.
 An expired `RUNNING` lease becomes `RECOVERY_REQUIRED`; it is never
 automatically requeued. This avoids silently executing a non-idempotent Oracle
 job twice when the first worker's final outcome is uncertain.
+
+Workflow history reads are filtered by `application_id` for browser and agent
+surfaces. An execution identifier alone never authorizes access to its detail,
+logs, or downloadable evidence. Retained Oracle error files and Data
+Integration logs remain outside PostgreSQL under
+`job-evidence/application-<id>/<execution-id>`; the deployment application's
+legacy evidence directory is read only when the workflow is attributed to that
+application.
 
 #### `workflow_runs`
 
@@ -369,32 +382,16 @@ optional.
 |  | `required_upload_keys` | `JSONB` | Default `[]` |
 |  | `created_at` | `TIMESTAMPTZ` | Creation time |
 |  | `archived_at` | `TIMESTAMPTZ` | Optional soft-delete time |
-| `process_schedules` | `schedule_id` | `BIGINT IDENTITY` | PK |
-|  | `name` | `VARCHAR(160)` | Globally UQ while not archived |
-|  | `process_code` | `VARCHAR(128)` | FK to process; cascade delete |
-|  | `frequency` | `VARCHAR(20)` | Recurrence type |
-|  | `timezone` | `VARCHAR(64)` | IANA timezone |
-|  | `first_run_local` | `TIMESTAMP` | Wall-clock schedule seed |
-|  | `context_mode` | `VARCHAR(30)` | How run context is resolved |
-|  | `run_profile_id` | `BIGINT` | Optional FK to profile; set null on delete |
-|  | `is_enabled` | `BOOLEAN` | Default `true` |
-|  | `next_run_at` | `TIMESTAMPTZ` | Optional; partial due-work index |
-|  | `created_at`, `updated_at` | `TIMESTAMPTZ` | Audit timestamps |
-|  | `last_triggered_at` | `TIMESTAMPTZ` | Optional |
-|  | `last_execution_id` | `VARCHAR(64)` | Optional external/local correlation ID |
-|  | `last_outcome` | `VARCHAR(20)` | Default `NEVER` |
-|  | `last_error` | `TEXT` | Optional bounded failure context |
-|  | `archived_at` | `TIMESTAMPTZ` | Optional soft-delete time |
-
 ### Operational Planning work columns
 
 | Table | Column | PostgreSQL type | Key/default/purpose |
 |---|---|---|---|
 | `planning_cycles` | `cycle_id` | `BIGINT IDENTITY` | PK |
-|  | `code` | `VARCHAR(128)` | UQ on lowercase value while active |
+|  | `application_id` | `BIGINT` | FK to registered Oracle application; restrict delete |
+|  | `code` | `VARCHAR(128)` | UQ per application on lowercase value while active |
 |  | `name` | `VARCHAR(200)` | User-facing cycle name |
 |  | `cycle_type` | `VARCHAR(40)` | Forecast, Budget, Close, or other business type |
-|  | `process_code` | `VARCHAR(128)` | Optional FK to reusable process; set null on delete |
+|  | `process_code` | `VARCHAR(128)` | Optional reusable-process display code |
 |  | `scenario` | `VARCHAR(120)` | Optional display/filter context |
 |  | `year` | `VARCHAR(40)` | Required Planning year |
 |  | `actual_through_period` | `VARCHAR(80)` | Optional business context |
@@ -505,18 +502,13 @@ platform_users --< api_tokens
 
 planning_processes --< planning_process_versions
 planning_processes --< process_run_profiles
-planning_processes --< process_schedules
-process_run_profiles --< process_schedules (optional)
-
-planning_processes --< planning_cycles (optional)
+oracle_applications --< planning_cycles
 planning_cycles --< planning_cycle_stages
 planning_cycle_stages --< planning_tasks
 planning_tasks --< planning_task_dependencies >-- planning_tasks
 platform_users/roles --< planning_tasks (one assignee)
 
 workflow_runs --< workflow_steps
-process_schedules -.-> workflow_runs (optional correlation ID)
-
 platform_users --< agent_conversations
 agent_conversations --< agent_messages
 agent_conversations --< agent_tool_activities
@@ -534,10 +526,9 @@ agent_messages --< agent_action_drafts
 - `workflow_runs.started_at DESC` and `(status, started_at DESC)`.
 - Partial unique active process version per process.
 - Partial unique active profile name per process.
-- Partial unique active schedule name.
-- Partial schedule due index on `(next_run_at)` where enabled and unarchived.
-- Partial unique active Planning-cycle code.
-- Planning cycles on `(status, due_date)`.
+- Application-scoped active automation-schedule names and due-work indexes.
+- Partial unique active Planning-cycle code per application.
+- Planning cycles on `(application_id, status, due_date)`.
 - Unique stage code and sequence within a Planning cycle.
 - Planning tasks on assignee, status, and due time.
 - Agent conversations on `(user_id, updated_at DESC)`.

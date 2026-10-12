@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import and_, func, insert, or_, select, update
+from sqlalchemy import and_, func, insert, or_, select, true, update
 
 from app.infrastructure.database.engine import DatabaseTarget, database_for, utc_datetime
 from app.infrastructure.database.schema import (
@@ -34,8 +34,14 @@ from app.utils.exceptions import PlanningWorkflowError
 class PlanningGovernanceRepository:
     """Persist approval decisions and per-recipient notification state."""
 
-    def __init__(self, database_target: DatabaseTarget) -> None:
+    def __init__(
+        self,
+        database_target: DatabaseTarget,
+        *,
+        application_id: int | None = None,
+    ) -> None:
         self._database = database_for(database_target)
+        self._application_id = application_id
 
     def submit_for_approval(
         self,
@@ -64,7 +70,10 @@ class PlanningGovernanceRepository:
                     planning_cycles,
                     planning_cycles.c.cycle_id == planning_cycle_stages.c.cycle_id,
                 )
-                .where(planning_tasks.c.task_id == task_id)
+                .where(
+                    planning_tasks.c.task_id == task_id,
+                    self._cycle_application_scope(),
+                )
                 .with_for_update()
             ).mappings().one_or_none()
             if task is None:
@@ -240,9 +249,17 @@ class PlanningGovernanceRepository:
         now = datetime.now(UTC)
         with self._database.begin() as connection:
             row = connection.execute(
-                select(planning_approvals).where(
-                    planning_approvals.c.approval_id == approval_id
-                ).with_for_update()
+                select(planning_approvals)
+                .join(
+                    planning_cycles,
+                    planning_cycles.c.cycle_id
+                    == planning_approvals.c.cycle_id,
+                )
+                .where(
+                    planning_approvals.c.approval_id == approval_id,
+                    self._cycle_application_scope(),
+                )
+                .with_for_update()
             ).mappings().one_or_none()
             if row is None:
                 raise PlanningWorkflowError(f"Planning approval {approval_id} was not found.")
@@ -313,6 +330,7 @@ class PlanningGovernanceRepository:
                 )
             connection.execute(
                 insert(user_notifications).values(
+                    application_id=self._application_id,
                     recipient_user_id=row["submitted_by_user_id"],
                     event_type=f"APPROVAL_{decision.value}",
                     severity=severity.value,
@@ -330,7 +348,10 @@ class PlanningGovernanceRepository:
         with self._database.connect() as connection:
             rows = connection.execute(
                 select(user_notifications)
-                .where(user_notifications.c.recipient_user_id == user_id)
+                .where(
+                    user_notifications.c.recipient_user_id == user_id,
+                    self._notification_application_scope(),
+                )
                 .order_by(user_notifications.c.created_at.desc())
                 .limit(limit)
             ).mappings().all()
@@ -344,6 +365,7 @@ class PlanningGovernanceRepository:
                 .where(
                     user_notifications.c.notification_id == notification_id,
                     user_notifications.c.recipient_user_id == user_id,
+                    self._notification_application_scope(),
                 )
                 .values(read_at=func.coalesce(user_notifications.c.read_at, now))
                 .returning(user_notifications)
@@ -359,12 +381,12 @@ class PlanningGovernanceRepository:
                 .where(
                     user_notifications.c.recipient_user_id == user_id,
                     user_notifications.c.read_at.is_(None),
+                    self._notification_application_scope(),
                 )
                 .values(read_at=datetime.now(UTC))
             )
 
-    @staticmethod
-    def _approval_select(approval_task):
+    def _approval_select(self, approval_task):
         submitted_task = planning_tasks.alias("submitted_task")
         submitter = platform_users.alias("submitter")
         return (
@@ -391,10 +413,11 @@ class PlanningGovernanceRepository:
                 planning_task_validations.c.validation_id
                 == planning_approvals.c.validation_id,
             )
+            .where(self._cycle_application_scope())
         )
 
-    @staticmethod
     def _notify_assignees(
+        self,
         connection,
         *,
         assigned_user_id,
@@ -425,6 +448,7 @@ class PlanningGovernanceRepository:
         if recipients:
             connection.execute(insert(user_notifications), [
                 {
+                    "application_id": self._application_id,
                     "recipient_user_id": user_id,
                     "event_type": event_type,
                     "severity": severity.value,
@@ -437,6 +461,16 @@ class PlanningGovernanceRepository:
                 }
                 for user_id in recipients
             ])
+
+    def _cycle_application_scope(self):
+        if self._application_id is None:
+            return true()
+        return planning_cycles.c.application_id == self._application_id
+
+    def _notification_application_scope(self):
+        if self._application_id is None:
+            return true()
+        return user_notifications.c.application_id == self._application_id
 
     @staticmethod
     def _approval(row) -> PlanningApproval:

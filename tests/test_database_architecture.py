@@ -34,7 +34,6 @@ from app.services import (
     planning_work_repository,
     planning_governance_repository,
     planning_validation_repository,
-    process_schedule_repository,
     workflow_repository,
 )
 from app.utils.exceptions import ConfigurationError, DatabaseConnectionError
@@ -65,7 +64,6 @@ EXPECTED_TABLES = {
     "planning_processes",
     "planning_process_versions",
     "process_run_profiles",
-    "process_schedules",
     "automation_schedules",
     "automation_schedule_runs",
     "planning_cycles",
@@ -138,7 +136,6 @@ def test_repositories_do_not_mutate_schema_at_runtime() -> None:
         identity_directory_service,
         workflow_repository,
         pipeline_process_repository,
-        process_schedule_repository,
         pipeline_registry,
         planning_work_repository,
         planning_governance_repository,
@@ -156,7 +153,7 @@ def test_alembic_has_one_production_head() -> None:
     scripts = ScriptDirectory.from_config(
         Config(str(project_root / "alembic.ini"))
     )
-    assert scripts.get_heads() == ["0029_schedule_app_scope"]
+    assert scripts.get_heads() == ["0030_planning_work_app_scope"]
     assert all(len(revision.revision) <= 32 for revision in scripts.walk_revisions())
 
 

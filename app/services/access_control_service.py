@@ -8,7 +8,7 @@ import re
 import secrets
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import delete, func, insert, select, update
+from sqlalchemy import delete, func, insert, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from app.infrastructure.database.engine import (
@@ -20,6 +20,7 @@ from app.infrastructure.database.engine import (
 from app.infrastructure.database.schema import (
     authentication_events,
     external_identities,
+    identity_providers,
     platform_role_permissions,
     platform_roles,
     platform_user_roles,
@@ -411,6 +412,44 @@ class AccessControlService:
             )
         return tuple(self.require_user(user_id) for user_id in ids)
 
+    def list_users_for_identity_provider(
+        self,
+        provider_code: str,
+    ) -> tuple[UserAccount, ...]:
+        """List local recovery accounts plus profiles linked to one provider."""
+
+        normalized = str(provider_code).strip()
+        with self._database.connect() as connection:
+            linked = (
+                select(external_identities.c.user_id)
+                .join(
+                    identity_providers,
+                    identity_providers.c.provider_id
+                    == external_identities.c.provider_id,
+                )
+                .where(
+                    identity_providers.c.code == normalized,
+                    external_identities.c.user_id.is_not(None),
+                )
+            )
+            ids = tuple(
+                int(value)
+                for value in connection.execute(
+                    select(platform_users.c.user_id)
+                    .where(
+                        or_(
+                            platform_users.c.password_hash.is_not(None),
+                            platform_users.c.user_id.in_(linked),
+                        )
+                    )
+                    .order_by(
+                        platform_users.c.is_active.desc(),
+                        func.lower(platform_users.c.display_name),
+                    )
+                ).scalars().all()
+            )
+        return tuple(self.require_user(user_id) for user_id in ids)
+
     def system_administrator_ids(self) -> frozenset[int]:
         """Return active and inactive users holding the security role."""
         with self._database.connect() as connection:
@@ -530,6 +569,43 @@ class AccessControlService:
                 else "LOCAL_RECOVERY"
             )
         return sources
+
+    def authentication_sources_for_provider(
+        self,
+        provider_code: str,
+    ) -> dict[int, str]:
+        """Classify accounts against one Oracle application provider only."""
+
+        normalized = str(provider_code).strip()
+        with self._database.connect() as connection:
+            users = connection.execute(
+                select(platform_users.c.user_id, platform_users.c.password_hash)
+            ).all()
+            linked_ids = {
+                int(value)
+                for value in connection.execute(
+                    select(external_identities.c.user_id)
+                    .join(
+                        identity_providers,
+                        identity_providers.c.provider_id
+                        == external_identities.c.provider_id,
+                    )
+                    .where(
+                        identity_providers.c.code == normalized,
+                        external_identities.c.user_id.is_not(None),
+                    )
+                ).scalars().all()
+            }
+        return {
+            int(user_id): (
+                "ORACLE_AND_LOCAL"
+                if int(user_id) in linked_ids and password_hash is not None
+                else "ORACLE_LINKED"
+                if int(user_id) in linked_ids
+                else "LOCAL_RECOVERY"
+            )
+            for user_id, password_hash in users
+        }
 
     def create_user(
         self,

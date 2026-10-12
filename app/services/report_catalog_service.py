@@ -16,6 +16,23 @@ from app.utils.exceptions import ConfigurationError
 class ReportCatalogService:
     """Read and validate reusable report definitions from JSON."""
 
+    def seed_if_missing(
+        self,
+        catalog_file: Path,
+        seed_file: Path,
+    ) -> None:
+        """Initialize one application catalog from a validated seed.
+
+        Existing scoped catalogs are never overwritten. This preserves the
+        deployment's legacy catalog while allowing every Oracle application
+        to own an independent durable copy.
+        """
+        if catalog_file.exists():
+            return
+        document = self._read_document(seed_file, allow_missing=True)
+        self._definitions(document)
+        self._write_document(catalog_file, document)
+
     def load(
         self,
         catalog_file: Path,

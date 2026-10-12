@@ -19,8 +19,16 @@ from app.utils.exceptions import ConfigurationError
 class PlanningCycleCatalogService:
     """Load built-in and published designer-managed cycle definitions."""
 
-    def __init__(self, database_target: DatabaseTarget | None = None) -> None:
+    def __init__(
+        self,
+        database_target: DatabaseTarget | None = None,
+        *,
+        application_id: int | None = None,
+        adopt_legacy: bool = False,
+    ) -> None:
         self._database_target = database_target
+        self._application_id = application_id
+        self._adopt_legacy = adopt_legacy
 
     def load(self, path: Path) -> tuple[PlanningCycleDefinition, ...]:
         """Load all configured cycle definitions."""
@@ -62,7 +70,9 @@ class PlanningCycleCatalogService:
         published = tuple(
             item.cycle
             for item in SQLPipelineProcessRepository(
-                self._database_target
+                self._database_target,
+                application_id=self._application_id,
+                adopt_legacy=self._adopt_legacy,
             ).list_active()
         )
         published_by_code = {

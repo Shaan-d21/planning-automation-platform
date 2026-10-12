@@ -77,6 +77,7 @@ def test_preview_then_apply_persists_external_identity_only(tmp_path: Path) -> N
     service = IdentityAccessApplicationService(
         settings,
         client_factory=factory,
+        business_process="PLANNING",
     )
 
     preview = service.preview()
@@ -89,6 +90,8 @@ def test_preview_then_apply_persists_external_identity_only(tmp_path: Path) -> N
     assert applied.snapshot_checksum == preview.snapshot_checksum
     assert result.identities_seen == 1
     assert service.status()["synced_identities"] == 1
+    assert service.status()["application_name"] == "Planning"
+    assert service.status()["business_process"] == "PLANNING"
     assert all(client.closed for client in clients)
 
 

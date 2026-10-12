@@ -51,6 +51,7 @@ class ManagedExecution:
     status: ManagedExecutionStatus
     submitted_at: datetime
     log_file: Path
+    application_id: int | None = None
     error_message: str | None = None
 
 
@@ -203,5 +204,6 @@ class PlanningProcessExecutionManager:
                 / "process_logs"
                 / f"{job.execution_id}.log"
             ),
+            application_id=job.application_id,
             error_message=job.error_message,
         )

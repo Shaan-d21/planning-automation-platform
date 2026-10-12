@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from math import prod
+from pathlib import Path
 from threading import RLock
 from time import monotonic
 
@@ -141,11 +142,15 @@ class DataReviewWorkspaceService:
         *,
         logger: logging.Logger | None = None,
         report_catalog_service: ReportCatalogService | None = None,
+        report_catalog_file: Path | None = None,
     ) -> None:
         self._settings = settings
         self._logger = logger or logging.getLogger(__name__)
         self._report_catalog = (
             report_catalog_service or ReportCatalogService()
+        )
+        self._report_catalog_file = (
+            report_catalog_file or settings.report_catalog_file
         )
         self._member_cache: OrderedDict[
             tuple[str, str], tuple[float, tuple[MemberInfo, ...]]
@@ -914,9 +919,9 @@ class DataReviewWorkspaceService:
     def _registered_definitions(
         self,
     ) -> tuple[DataSliceReportDefinition, ...]:
-        return self._report_catalog.load(
-            self._settings.report_catalog_file
-        )
+        if not self._report_catalog_file.exists():
+            return ()
+        return self._report_catalog.load(self._report_catalog_file)
 
     def _registered_definition(
         self,

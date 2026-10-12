@@ -115,16 +115,27 @@ class RecentPlanningActivity:
 class PlanningWorkApplicationService:
     """Coordinate validation, authorization, and Planning work persistence."""
 
-    def __init__(self, settings: Settings) -> None:
-        self._repository = PlanningWorkRepository(settings.database_target)
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        application_id: int | None = None,
+    ) -> None:
+        self._application_id = application_id
+        self._repository = PlanningWorkRepository(
+            settings.database_target,
+            application_id=application_id,
+        )
         self._governance = PlanningGovernanceRepository(
-            settings.database_target
+            settings.database_target,
+            application_id=application_id,
         )
         self._workflow_repository = SQLWorkflowRepository(
             settings.database_target
         )
         self._validations = PlanningValidationRepository(
-            settings.database_target
+            settings.database_target,
+            application_id=application_id,
         )
 
     def create_cycle(
@@ -183,7 +194,10 @@ class PlanningWorkApplicationService:
             for cycle in self.list_cycles(actor=actor)
         )
         tasks = self._repository.list_tasks_for_user(actor)
-        recent_runs = self._workflow_repository.list_recent(limit=12)
+        recent_runs = self._workflow_repository.list_recent(
+            limit=12,
+            application_id=self._application_id,
+        )
         if not actor.has_permission(Permission.HISTORY_VIEW):
             actor_names = {
                 actor.username.casefold(),

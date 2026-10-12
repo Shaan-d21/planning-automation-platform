@@ -102,10 +102,24 @@ class ApplicationWorkspaceSummary(BaseModel):
     product_type: str | None = None
     application_type: str | None = None
     current: bool = False
+    switchable: bool = False
+    unavailable_reason: str | None = None
+
+
+class ApplicationWorkspaceSelectionRequest(BaseModel):
+    """An authorized registered application selected for this session."""
+
+    application_id: int = Field(gt=0)
+
+
+class OracleEnvironmentRegistrationRequest(BaseModel):
+    """A non-secret Oracle environment URL submitted for live discovery."""
+
+    base_url: str = Field(min_length=8, max_length=500)
 
 
 class ApplicationWorkspaceListResponse(BaseModel):
-    """Safe session workspace state before request-scoped routing is enabled."""
+    """Safe session workspace state and switch eligibility."""
 
     status: str = "success"
     switching_enabled: bool = False
@@ -281,6 +295,10 @@ class FrontendBootstrapResponse(BaseModel):
     environment: EnvironmentSummary | None = None
     user: CurrentUserSummary | None = None
     navigation: list[NavigationItem] = Field(default_factory=list)
+    workspaces: list[ApplicationWorkspaceSummary] = Field(
+        default_factory=list
+    )
+    workspace_switching_enabled: bool = False
     features: FeatureAvailability = Field(default_factory=FeatureAvailability)
 
 

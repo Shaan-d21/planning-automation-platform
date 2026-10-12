@@ -86,6 +86,29 @@ def test_capture_data_integration_log_retains_file_and_explicit_counts(
     ).read_bytes().startswith(b"Data Integration")
 
 
+def test_job_evidence_is_stored_in_application_namespace(tmp_path) -> None:
+    files = Mock()
+    files.download_from_repository.return_value = b"Rejected member"
+
+    OracleJobEvidenceService(
+        files,
+        tmp_path,
+        application_id=42,
+    ).capture_error_file(
+        execution_id="run-42",
+        oracle_file_name="errors.txt",
+    )
+
+    assert (
+        tmp_path
+        / "job-evidence"
+        / "application-42"
+        / "run-42"
+        / "errors.txt"
+    ).read_bytes() == b"Rejected member"
+    assert not (tmp_path / "job-evidence" / "run-42").exists()
+
+
 def test_data_integration_log_does_not_guess_ambiguous_stage_counts(
     tmp_path,
 ) -> None:

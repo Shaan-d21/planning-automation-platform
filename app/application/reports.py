@@ -73,16 +73,52 @@ class ReportWorkspaceService:
         self,
         settings: Settings,
         *,
+        application_id: int | None = None,
+        seed_catalog_file: Path | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._settings = settings
+        self._application_id = self._normalize_application_id(application_id)
         self._logger = logger or logging.getLogger(__name__)
+        if self._application_id is None:
+            self._catalog_file = settings.report_catalog_file
+            self._output_dir = settings.report_output_dir
+        else:
+            scope = f"application-{self._application_id}"
+            self._catalog_file = (
+                settings.report_output_dir
+                / ".catalogs"
+                / f"{scope}.json"
+            )
+            self._output_dir = (
+                settings.report_output_dir / "applications" / scope
+            )
+            if seed_catalog_file is not None:
+                ReportCatalogService().seed_if_missing(
+                    self._catalog_file,
+                    seed_catalog_file,
+                )
+
+    @property
+    def application_id(self) -> int | None:
+        """Return the Oracle application owning this workspace."""
+        return self._application_id
+
+    @property
+    def catalog_file(self) -> Path:
+        """Return the application-isolated saved-view catalog path."""
+        return self._catalog_file
+
+    @property
+    def output_dir(self) -> Path:
+        """Return the application-isolated generated-report directory."""
+        return self._output_dir
 
     def catalog(self) -> tuple[ReportCatalogItem, ...]:
         """Return administrator-registered report definitions."""
-        definitions = ReportCatalogService().load(
-            self._settings.report_catalog_file
-        )
+        if not self._catalog_file.exists():
+            return ()
+        definitions = ReportCatalogService().load(self._catalog_file)
         return tuple(self._catalog_item(item) for item in definitions)
 
     def register(
@@ -91,7 +127,7 @@ class ReportWorkspaceService:
     ) -> ReportCatalogItem:
         """Validate and persist one approved data-slice report definition."""
         registered = ReportCatalogService().register(
-            self._settings.report_catalog_file,
+            self._catalog_file,
             definition,
         )
         self._logger.info(
@@ -104,7 +140,7 @@ class ReportWorkspaceService:
     def delete(self, name: str) -> ReportCatalogItem:
         """Delete one reusable data view from the shared catalog."""
         deleted = ReportCatalogService().delete(
-            self._settings.report_catalog_file,
+            self._catalog_file,
             name,
         )
         self._logger.info("Saved data view deleted: name='%s'.", deleted.name)
@@ -113,8 +149,10 @@ class ReportWorkspaceService:
     def preflight(self, form_name: str) -> ReportPreflight:
         """Retrieve the live or fallback report layout without generating."""
         normalized_name = self._normalize_name(form_name)
-        definitions = ReportCatalogService().load(
-            self._settings.report_catalog_file
+        definitions = (
+            ReportCatalogService().load(self._catalog_file)
+            if self._catalog_file.exists()
+            else ()
         )
         definition = next(
             (
@@ -244,7 +282,7 @@ class ReportWorkspaceService:
     def _report_service(self, client: EPMClient) -> FormReportService:
         return FormReportService(
             client,
-            catalog_file=self._settings.report_catalog_file,
+            catalog_file=self._catalog_file,
             logger=self._logger.getChild("report_service"),
         )
 
@@ -296,4 +334,15 @@ class ReportWorkspaceService:
             f"{safe_name}_{timestamp}"
             f"{f'_{execution_suffix}' if execution_suffix else ''}.xlsx"
         )
-        return self._settings.report_output_dir / filename
+        return self._output_dir / filename
+
+    @staticmethod
+    def _normalize_application_id(application_id: int | None) -> int | None:
+        if application_id is None:
+            return None
+        normalized = int(application_id)
+        if normalized <= 0:
+            raise ReportGenerationError(
+                "Report application identity must be a positive integer."
+            )
+        return normalized

@@ -865,53 +865,6 @@ workflow_steps = Table(
     CheckConstraint("sequence > 0", name="sequence_positive"),
 )
 
-process_schedules = Table(
-    "process_schedules",
-    metadata,
-    Column("schedule_id", IDENTITY_BIGINT, primary_key=True, autoincrement=True),
-    Column("name", String(160), nullable=False),
-    Column(
-        "process_code",
-        String(128),
-        ForeignKey("planning_processes.process_code", ondelete="CASCADE"),
-        nullable=False,
-    ),
-    Column("frequency", String(20), nullable=False),
-    Column("timezone", String(64), nullable=False),
-    Column("first_run_local", DateTime(timezone=False), nullable=False),
-    Column("context_mode", String(30), nullable=False),
-    Column(
-        "run_profile_id",
-        IDENTITY_BIGINT,
-        ForeignKey("process_run_profiles.profile_id", ondelete="SET NULL"),
-    ),
-    Column("is_enabled", Boolean, nullable=False, server_default=text("true")),
-    Column("next_run_at", UTC_TIMESTAMP),
-    Column("created_at", UTC_TIMESTAMP, nullable=False),
-    Column("updated_at", UTC_TIMESTAMP, nullable=False),
-    Column("last_triggered_at", UTC_TIMESTAMP),
-    Column(
-        "last_execution_id",
-        String(64),
-    ),
-    Column("last_outcome", String(20), nullable=False, server_default="NEVER"),
-    Column("last_error", Text),
-    Column("archived_at", UTC_TIMESTAMP),
-)
-Index(
-    "uq_process_schedules_active_name",
-    func.lower(process_schedules.c.name),
-    unique=True,
-    postgresql_where=process_schedules.c.archived_at.is_(None),
-    sqlite_where=process_schedules.c.archived_at.is_(None),
-)
-Index(
-    "ix_process_schedules_due",
-    process_schedules.c.next_run_at,
-    postgresql_where=and_(process_schedules.c.is_enabled.is_(True), process_schedules.c.archived_at.is_(None)),
-    sqlite_where=and_(process_schedules.c.is_enabled.is_(True), process_schedules.c.archived_at.is_(None)),
-)
-
 automation_schedules = Table(
     "automation_schedules",
     metadata,
@@ -1037,13 +990,17 @@ planning_cycles = Table(
     "planning_cycles",
     metadata,
     Column("cycle_id", IDENTITY_BIGINT, primary_key=True, autoincrement=True),
+    Column(
+        "application_id",
+        IDENTITY_BIGINT,
+        ForeignKey("oracle_applications.application_id", ondelete="RESTRICT"),
+    ),
     Column("code", String(128), nullable=False),
     Column("name", String(200), nullable=False),
     Column("cycle_type", String(40), nullable=False),
     Column(
         "process_code",
         String(128),
-        ForeignKey("planning_processes.process_code", ondelete="SET NULL"),
     ),
     Column("scenario", String(120)),
     Column("year", String(40), nullable=False),
@@ -1152,13 +1109,15 @@ Index(
 )
 Index(
     "uq_planning_cycles_active_code",
+    planning_cycles.c.application_id,
     func.lower(planning_cycles.c.code),
     unique=True,
     postgresql_where=planning_cycles.c.archived_at.is_(None),
     sqlite_where=planning_cycles.c.archived_at.is_(None),
 )
 Index(
-    "ix_planning_cycles_status_due",
+    "ix_planning_cycles_application_status_due",
+    planning_cycles.c.application_id,
     planning_cycles.c.status,
     planning_cycles.c.due_date,
 )
@@ -1427,6 +1386,11 @@ user_notifications = Table(
     metadata,
     Column("notification_id", IDENTITY_BIGINT, primary_key=True, autoincrement=True),
     Column(
+        "application_id",
+        IDENTITY_BIGINT,
+        ForeignKey("oracle_applications.application_id", ondelete="RESTRICT"),
+    ),
+    Column(
         "recipient_user_id",
         IDENTITY_BIGINT,
         ForeignKey("platform_users.user_id", ondelete="CASCADE"),
@@ -1443,12 +1407,14 @@ user_notifications = Table(
     Column("read_at", UTC_TIMESTAMP),
 )
 Index(
-    "ix_user_notifications_recipient_created",
+    "ix_user_notifications_application_recipient_created",
+    user_notifications.c.application_id,
     user_notifications.c.recipient_user_id,
     user_notifications.c.created_at.desc(),
 )
 Index(
-    "ix_user_notifications_recipient_unread",
+    "ix_user_notifications_application_recipient_unread",
+    user_notifications.c.application_id,
     user_notifications.c.recipient_user_id,
     user_notifications.c.read_at,
 )

@@ -286,6 +286,26 @@ _FILE_SOURCE = (
     "Existing Oracle Inbox file",
 )
 _OPERATION_FIELDS: dict[str, tuple[ActionInputField, ...]] = {
+    "fccs-consolidation": (
+        _text("scenario", "Scenario", True, "Exact FCCS Scenario member.", "Actual"),
+        _text("year", "Year", True, "Exact FCCS Year member.", "FY27"),
+        _text("period", "Period", True, "Exact FCCS Period member.", "Jan"),
+        _text(
+            "entity",
+            "Entity",
+            True,
+            "Exact FCCS Entity member. Separate multiple entities with commas only when Oracle supports them for this rule.",
+            "FCCS_Total Geography",
+        ),
+    ),
+    "fccs-journal-action": (
+        _choice("action", "Journal action", True, "Exact FCCS workflow transition to request.", ("SUBMIT", "APPROVE", "POST", "UNPOST", "REJECT")),
+        _text("scenario", "Scenario", True, "Exact journal scenario."),
+        _text("year", "Year", True, "Exact journal year."),
+        _text("period", "Period", True, "Exact journal period."),
+        _text("consolidation", "Consolidation", False, "Optional exact consolidation member."),
+        _text("expected_status", "Reviewed journal status", False, "Optional concurrency check captured from the live journal."),
+    ),
     "report-generation": (
         _pairs("point_of_view", "Point of view", "Optional dimension and member overrides."),
     ),

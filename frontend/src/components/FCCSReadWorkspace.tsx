@@ -36,7 +36,7 @@ function FCCSOverview() {
   if (!data && !error) return <WorkspaceLoading label="Close overview" message="Verifying the FCCS application and retrieving live read-only metadata…" />;
 
   return <section className="fccs-workspace">
-    <FCCSHeading title="Financial Consolidation & Close" description="A live, read-only view of the verified Oracle FCCS application. No consolidation, journal, or data changes can be started here." />
+    <FCCSHeading title="Financial Consolidation & Close" description="A live view of the verified Oracle FCCS application. Reads are automatic; supported journal workflow changes are prepared through EPM Assistant and require approval." />
     {error && <FeedbackBanner tone="error" title="FCCS overview unavailable" message={error} />}
     {data && <>
       <div className="fccs-metrics" aria-label="FCCS application summary">
@@ -165,7 +165,7 @@ function FCCSJournals() {
   if (!data && busy && !error) return <WorkspaceLoading label="FCCS journals" message="Retrieving consolidation journals from Oracle…" />;
 
   return <section className="fccs-workspace">
-    <FCCSHeading title="Consolidation Journals" description="Search and inspect journals through Oracle's supported read API. Creating, posting, unposting, and deleting journals remain disabled." />
+    <FCCSHeading title="Consolidation Journals" description="Search and inspect journals through Oracle's supported read API. Submit, approve, post, unpost, and reject actions can be prepared in EPM Assistant; journal creation and deletion remain disabled." />
     {error && <FeedbackBanner tone="error" title="Journal review unavailable" message={error} />}
     <section className="panel fccs-panel">
       <form className="fccs-journal-filters" onSubmit={submit}>{Object.entries(filters).map(([key, value]) => <label key={key}><span>{friendlyLabel(key)}</span><input value={value} onChange={(event) => setFilters((current) => ({ ...current, [key]: event.target.value }))} placeholder={key === "label" ? "Journal label" : friendlyLabel(key)} /></label>)}<button className="button button--primary" disabled={busy} type="submit">{busy ? <span className="spinner" /> : <Icon name="search" />} Search journals</button></form>
@@ -181,7 +181,7 @@ function JournalDialog({ detail, onClose }: { detail: FCCSJournalDetailResponse;
 }
 
 function FCCSHeading({ title, description }: { title: string; description: string }) {
-  return <header className="page-intro fccs-intro"><div><span className="eyebrow">FCCS · Read only</span><h1>{title}</h1><p>{description}</p></div><span className="fccs-read-badge"><Icon name="check" /> Supported Oracle REST</span></header>;
+  return <header className="page-intro fccs-intro"><div><span className="eyebrow">FCCS · Governed workspace</span><h1>{title}</h1><p>{description}</p></div><span className="fccs-read-badge"><Icon name="check" /> Supported Oracle REST</span></header>;
 }
 
 function Metric({ icon, label, value }: { icon: "check" | "data" | "automation" | "settings"; label: string; value: string }) {

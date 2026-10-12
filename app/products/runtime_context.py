@@ -54,10 +54,12 @@ class RuntimeApplicationContextResolver:
         *,
         workspaces: ApplicationWorkspaceService,
         environment_configuration: EnvironmentConfigurationService,
+        deployment_application_id: int | None = None,
     ) -> None:
         self._settings = settings
         self._workspaces = workspaces
         self._environment_configuration = environment_configuration
+        self._deployment_application_id = deployment_application_id
 
     def resolve(
         self,
@@ -70,7 +72,6 @@ class RuntimeApplicationContextResolver:
         workspace = self._workspaces.current_for_session(
             raw_session_id,
             user_id=user_id,
-            environment_base_url=self._settings.epm_base_url,
         )
         if workspace is None:
             workspace = self._workspaces.establish_default_for_session(
@@ -84,17 +85,23 @@ class RuntimeApplicationContextResolver:
             )
         business_process = workspace.business_process
         provider = PRODUCT_PROVIDER_REGISTRY.get(business_process)
-        settings = replace(
-            self._settings,
+        settings = self._settings.for_oracle_application(
+            base_url=workspace.environment_base_url,
             application_name=workspace.application_name,
         )
+        if (
+            self._deployment_application_id is not None
+            and workspace.application_id != self._deployment_application_id
+        ):
+            # A secondary environment owns its own cloud/on-premises mode;
+            # never inherit the deployment environment's fixed classification.
+            settings = replace(settings, deployment_mode="auto")
+        navigation = PRODUCT_PROVIDER_REGISTRY.navigation_for(business_process)
         return RuntimeApplicationContext(
             workspace=workspace,
             settings=settings,
             provider=provider,
-            navigation=PRODUCT_PROVIDER_REGISTRY.navigation_for(
-                business_process
-            ),
+            navigation=navigation,
             capabilities=PRODUCT_PROVIDER_REGISTRY.capabilities_for(
                 business_process
             ),

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from collections.abc import Mapping
 
@@ -29,7 +29,9 @@ from app.models.planning_process import (
     PlanningProcessStepType,
     ProcessContextMode,
 )
-from app.services.pipeline_catalog_service import PipelineCatalogService
+from app.services.application_catalog_workspace import (
+    ApplicationCatalogWorkspace,
+)
 from app.services.pipeline_process_repository import (
     SQLPipelineProcessRepository,
 )
@@ -91,25 +93,42 @@ class ProcessDesignerApplicationService:
         self,
         settings: Settings,
         *,
+        application_id: int | None = None,
+        seed_catalogs: bool = False,
         logger: logging.Logger | None = None,
     ) -> None:
-        self._settings = settings
+        catalogs = ApplicationCatalogWorkspace(
+            settings,
+            application_id=application_id,
+            seed_from_configuration=seed_catalogs,
+        )
+        self._settings = replace(
+            settings,
+            pipeline_catalog_file=catalogs.pipeline_catalog_file,
+            planning_process_catalog_file=(
+                catalogs.planning_process_catalog_file
+            ),
+            planning_cycle_catalog_file=(
+                catalogs.planning_cycle_catalog_file
+            ),
+        )
+        self._application_id = application_id
         self._logger = logger or logging.getLogger(__name__)
         self._repository = SQLPipelineProcessRepository(
-            settings.database_target
+            settings.database_target,
+            application_id=application_id,
+            adopt_legacy=seed_catalogs,
         )
         self._operations = OperationCatalogService(
-            settings,
+            self._settings,
+            application_id=application_id,
+            seed_catalogs=seed_catalogs,
             logger=self._logger.getChild("pipeline_discovery"),
         )
 
     def list_pipelines(self):
         """Return administrator-registered Oracle Pipelines."""
-        return PipelineCatalogService(
-            self._settings.database_target
-        ).load(
-            self._settings.pipeline_catalog_file
-        )
+        return self._operations.discover_registered().pipelines
 
     def list_processes(self) -> tuple[PipelineProcessSummary, ...]:
         """Return all designer-managed process summaries."""
@@ -124,12 +143,14 @@ class ProcessDesignerApplicationService:
             )
         }
         definitions = PlanningProcessCatalogService(
-            self._settings.database_target
+            self._settings.database_target,
+            application_id=self._application_id,
         ).load(self._settings.planning_process_catalog_file)
         cycles = {
             item.code.casefold(): item
             for item in PlanningCycleCatalogService(
-                self._settings.database_target
+                self._settings.database_target,
+                application_id=self._application_id,
             ).load(self._settings.planning_cycle_catalog_file)
         }
         managed = {
@@ -212,13 +233,15 @@ class ProcessDesignerApplicationService:
             cycle = latest.cycle
         else:
             definition = PlanningProcessCatalogService(
-                self._settings.database_target
+                self._settings.database_target,
+                application_id=self._application_id,
             ).get(
                 self._settings.planning_process_catalog_file,
                 normalized,
             )
             cycle = PlanningCycleCatalogService(
-                self._settings.database_target
+                self._settings.database_target,
+                application_id=self._application_id,
             ).get(
                 self._settings.planning_cycle_catalog_file,
                 definition.cycle_code,

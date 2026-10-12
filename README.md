@@ -1,4 +1,4 @@
-# Oracle EPM Planning Automation
+# EPM AI Assistant
 
 A production-oriented Python framework for Oracle EPM Planning automation.
 The current release implements HTTP Basic Authentication, native Planning
@@ -12,8 +12,12 @@ The application is evolving as a modular Oracle EPM platform. Shared security,
 agent, approval, queue, scheduling, audit, and deployment services remain in
 one application, while each business process contributes capabilities through
 an allow-listed product provider. Planning retains its full operation catalog;
-FCCS is enabled only for verified read-only connection, dimension, job, and
-consolidation-journal review and exposes no write operations. See
+FCCS provides verified connection, dimension, job, and consolidation-journal
+reads to both its workspace and EPM Assistant. Its governed write capabilities
+include consolidation for an exact Scenario, Year, Period, and Entity POV, and
+journal workflow actions: submit, approve, post, unpost, or reject an exact
+journal after live review and explicit approval. Other FCCS writes remain
+disabled. See
 [EPM Product Architecture](docs/PRODUCT_ARCHITECTURE.md).
 
 Both engines can upload files, execute saved Import Metadata or Import Data
@@ -80,10 +84,13 @@ interfaces.
 Platform security administration is separated from Oracle EPM operations. A
 dedicated System Administrator role can review retained login activity, see
 concurrent sessions and IP addresses, delegate the security role to another
-existing platform user, and revoke a browser session. Session identifiers are
-stored only as SHA-256 hashes in PostgreSQL. The first existing Service
-Administrator receives the initial System Administrator role during upgrade;
-the two roles can then be assigned to different people.
+existing platform user, revoke a browser session, register another Oracle EPM
+environment, and remove a secondary application from active platform use.
+Registered Oracle URLs remain server-side and are not returned by browser
+APIs. Application removal preserves historical executions and audit evidence.
+Session identifiers are stored only as SHA-256 hashes in PostgreSQL. The first
+existing Service Administrator receives the initial System Administrator role
+during upgrade; the two roles can then be assigned to different people.
 
 An optional provider-neutral notification layer sends success and failure
 emails. SMTP is implemented for development; a corporate Microsoft Graph
@@ -296,6 +303,25 @@ configuration. `EPM_DEPLOYMENT_MODE=auto` recognizes Oracle Cloud hostnames
 and enables Cloud-first capabilities. Set it explicitly to `cloud` when a
 reverse proxy or custom hostname hides the Oracle Cloud hostname, or to
 `on_premises` for an on-premises Planning server.
+
+`EPM_BASE_URL` is the deployment's default Oracle environment, not the only
+environment the platform can know. A System Administrator can register an
+additional Planning or FCCS environment from **System Administration**. The
+platform verifies the submitted URL with the configured integration account,
+discovers the applications visible there, and retains the normalized URL only
+in PostgreSQL. The application selector exposes names and product types, never
+the stored URL. For this release the same `EPM_INTEGRATION_USERNAME` and
+`EPM_INTEGRATION_PASSWORD` are used for every registered URL; environment-
+specific service credentials are a later secret-management phase.
+
+The deployment application keeps full Planning behavior. A registered FCCS
+application can be selected even when it belongs to another registered URL.
+Its read APIs and assistant are request-scoped; only governed consolidation and
+journal workflow actions can write. Additional Planning applications remain unavailable in
+the selector until the agent and all write-capable services are fully request-
+scoped. The deployment application cannot be removed while it remains the
+server default; secondary registrations can be deactivated by a System
+Administrator without deleting their audit history.
 
 At startup, the platform first uses the application selection previously saved
 for the configured base URL. When no selection exists, `APPLICATION_NAME` is
@@ -735,11 +761,15 @@ For a Pipeline:
 
 Oracle's public Pipeline details API requires an exact Pipeline code and does
 not provide a supported list-all operation. `config/pipelines.json` therefore
-acts as the seed allowlist. Pipelines verified from either the Pipelines page
-or Automation Designer are added to the shared PostgreSQL catalog and remain
-available after restart. Registration stores only the code, Oracle display
-name, and descriptive metadata; the stages and runtime requirements are
-always retrieved live from Oracle.
+acts as the deployment application's seed allowlist. At runtime, Pipeline,
+Data Integration, Planning Process, and Planning Cycle allow-lists are copied
+into persistent application-specific namespaces; another registered Oracle
+application starts with empty local allow-lists. Pipelines verified from
+either the Pipelines page or Automation Designer are added to that Oracle
+environment/application's PostgreSQL artifact catalog and remain available
+after restart. Registration stores only the code, Oracle display name, and
+descriptive metadata; the stages and runtime requirements are always
+retrieved live from Oracle.
 
 For a Data Integration:
 

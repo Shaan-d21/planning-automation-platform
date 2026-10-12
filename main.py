@@ -2775,7 +2775,15 @@ def _run_planning_process_command(
     logger: logging.Logger,
 ) -> int:
     """Select an approved process and execute its associated cycle."""
-    catalog = PlanningProcessCatalogService(settings.database_target)
+    catalog = PlanningProcessCatalogService(
+        settings.database_target,
+        application_id=getattr(arguments, "_application_id", None),
+        adopt_legacy=getattr(
+            arguments,
+            "_adopt_legacy_process_catalog",
+            False,
+        ),
+    )
     default_code = str(
         arguments.process_code or "MONTHLY_FORECAST_PROCESS"
     ).strip()
@@ -2867,7 +2875,15 @@ def _run_planning_cycle_command(
     logger: logging.Logger,
 ) -> int:
     """Configure, pre-flight, and run one REST-first Planning cycle."""
-    catalog = PlanningCycleCatalogService(settings.database_target)
+    catalog = PlanningCycleCatalogService(
+        settings.database_target,
+        application_id=getattr(arguments, "_application_id", None),
+        adopt_legacy=getattr(
+            arguments,
+            "_adopt_legacy_process_catalog",
+            False,
+        ),
+    )
     cycle_code = str(
         arguments.cycle_code or "MONTHLY_FORECAST"
     ).strip()

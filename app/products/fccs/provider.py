@@ -8,6 +8,7 @@ from app.products.contracts import (
     CapabilityScope,
     NavigationDefinition,
     OperationDefinition,
+    OperationKind,
 )
 
 
@@ -18,7 +19,32 @@ class FCCSProductProvider:
     enabled = True
 
     def operations(self) -> tuple[OperationDefinition, ...]:
-        return ()
+        return (
+            OperationDefinition(
+                kind=OperationKind.FCCS_CONSOLIDATION,
+                code="fccs-consolidation",
+                display_name="Run FCCS Consolidation",
+                description=(
+                    "Run one live-discovered FCCS consolidation rule for an "
+                    "exact Scenario, Year, Period, and Entity POV."
+                ),
+                category="Consolidation",
+                risk_level="Elevated",
+                route="/app/assistant",
+            ),
+            OperationDefinition(
+                kind=OperationKind.FCCS_JOURNAL_ACTION,
+                code="fccs-journal-action",
+                display_name="FCCS Journal Action",
+                description=(
+                    "Submit, approve, post, unpost, or reject one exact FCCS "
+                    "journal after live review and explicit approval."
+                ),
+                category="Consolidation journals",
+                risk_level="Elevated",
+                route="/app/assistant",
+            ),
+        )
 
     def navigation(self) -> tuple[NavigationDefinition, ...]:
         return (
@@ -65,11 +91,13 @@ class FCCSProductProvider:
                     "Verify the active Financial Consolidation and Close "
                     "application through supported Oracle APIs."
                 ),
+                agent_tools=("get_fccs_overview",),
             ),
             CapabilityDefinition(
                 code="fccs-dimension-discovery",
                 scope=CapabilityScope.PRODUCT,
                 description="Review FCCS cubes and dimension metadata.",
+                agent_tools=("list_fccs_dimensions",),
             ),
             CapabilityDefinition(
                 code="fccs-job-discovery",
@@ -77,6 +105,7 @@ class FCCSProductProvider:
                 description=(
                     "Review FCCS job definitions and exact Oracle job status."
                 ),
+                agent_tools=("list_fccs_jobs", "get_fccs_job"),
             ),
             CapabilityDefinition(
                 code="fccs-journal-review",
@@ -84,5 +113,22 @@ class FCCSProductProvider:
                 description=(
                     "Review consolidation journals and journal line items."
                 ),
+                agent_tools=("list_fccs_journals", "get_fccs_journal"),
+            ),
+            CapabilityDefinition(
+                code="fccs-governed-consolidation",
+                scope=CapabilityScope.PRODUCT,
+                description="Prepare and monitor a governed FCCS consolidation.",
+                agent_tools=(
+                    "list_fccs_jobs",
+                    "list_platform_operations",
+                    "prepare_operation_action",
+                ),
+            ),
+            CapabilityDefinition(
+                code="fccs-governed-journal-actions",
+                scope=CapabilityScope.PRODUCT,
+                description="Prepare governed FCCS journal workflow actions.",
+                agent_tools=("list_platform_operations", "prepare_operation_action"),
             ),
         )

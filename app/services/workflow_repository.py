@@ -27,9 +27,19 @@ class WorkflowRepository(Protocol):
 
     def save(self, run: WorkflowRun) -> None: ...
 
-    def get(self, execution_id: str) -> WorkflowRun | None: ...
+    def get(
+        self,
+        execution_id: str,
+        *,
+        application_id: int | None = None,
+    ) -> WorkflowRun | None: ...
 
-    def list_recent(self, *, limit: int = 20) -> tuple[WorkflowRun, ...]: ...
+    def list_recent(
+        self,
+        *,
+        limit: int = 20,
+        application_id: int | None = None,
+    ) -> tuple[WorkflowRun, ...]: ...
 
 
 class SQLWorkflowRepository:
@@ -88,12 +98,20 @@ class SQLWorkflowRepository:
                     ],
                 )
 
-    def get(self, execution_id: str) -> WorkflowRun | None:
+    def get(
+        self,
+        execution_id: str,
+        *,
+        application_id: int | None = None,
+    ) -> WorkflowRun | None:
+        conditions = [workflow_runs.c.execution_id == execution_id]
+        if application_id is not None:
+            conditions.append(
+                workflow_runs.c.application_id == application_id
+            )
         with self._database.connect() as connection:
             row = connection.execute(
-                select(workflow_runs).where(
-                    workflow_runs.c.execution_id == execution_id
-                )
+                select(workflow_runs).where(*conditions)
             ).mappings().one_or_none()
             if row is None:
                 return None
@@ -132,19 +150,35 @@ class SQLWorkflowRepository:
             ),
         )
 
-    def list_recent(self, *, limit: int = 20) -> tuple[WorkflowRun, ...]:
+    def list_recent(
+        self,
+        *,
+        limit: int = 20,
+        application_id: int | None = None,
+    ) -> tuple[WorkflowRun, ...]:
         if limit <= 0:
             raise ValueError("limit must be greater than zero.")
+        statement = select(workflow_runs.c.execution_id)
+        if application_id is not None:
+            statement = statement.where(
+                workflow_runs.c.application_id == application_id
+            )
         with self._database.connect() as connection:
             identifiers = connection.execute(
-                select(workflow_runs.c.execution_id)
-                .order_by(workflow_runs.c.started_at.desc())
-                .limit(limit)
+                statement.order_by(workflow_runs.c.started_at.desc()).limit(
+                    limit
+                )
             ).scalars().all()
         return tuple(
             run
             for execution_id in identifiers
-            if (run := self.get(str(execution_id))) is not None
+            if (
+                run := self.get(
+                    str(execution_id),
+                    application_id=application_id,
+                )
+            )
+            is not None
         )
 
 

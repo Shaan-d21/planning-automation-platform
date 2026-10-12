@@ -31,6 +31,7 @@ class CanonicalCapability(StrEnum):
     PIPELINE = "pipeline.run"
     DATA_INTEGRATION = "data.integration"
     BUSINESS_RULE = "business_rule.run"
+    FCCS_CONSOLIDATION = "fccs.consolidation.run"
     DATA_MAP = "data_map.run"
     SCHEDULE = "schedule.manage"
     MULTI_STEP_FLOW = "flow.multi_step"
@@ -201,6 +202,14 @@ _DEFINITIONS = (
         ("artifact_name",),
     ),
     CanonicalCapabilityDefinition(
+        CanonicalCapability.FCCS_CONSOLIDATION,
+        "fccs-consolidation",
+        "fccs_consolidation_rule",
+        True,
+        True,
+        ("artifact_name", "scenario", "year", "period", "entity"),
+    ),
+    CanonicalCapabilityDefinition(
         CanonicalCapability.DATA_MAP,
         "data-maps",
         "data_map",
@@ -256,6 +265,10 @@ def capability_for_operation_code(operation_code: str) -> CanonicalCapability:
 _EXPLICIT_CAPABILITY_TERMS: tuple[
     tuple[CanonicalCapability, tuple[str, ...]], ...
 ] = (
+    (
+        CanonicalCapability.FCCS_CONSOLIDATION,
+        ("consolidation", "consolidate"),
+    ),
     (CanonicalCapability.BUSINESS_RULE, ("business rule", "calculation rule", "calc rule")),
     (CanonicalCapability.DATA_MAP, ("data map", "smart push", "smartpush")),
     (CanonicalCapability.DATA_INTEGRATION, ("data integration",)),
@@ -303,7 +316,7 @@ def recognize_explicit_capability(
     } and re.search(r"\b(?:change|set|update|assign|create)\b", normalized):
         action = CanonicalActionMode.UPDATE
     elif re.search(
-        r"\b(?:run|execute|start|prepare|load|import|push|refresh)\b",
+        r"\b(?:run|execute|start|prepare|load|import|push|refresh|consolidate)\b",
         normalized,
     ):
         action = CanonicalActionMode.EXECUTE

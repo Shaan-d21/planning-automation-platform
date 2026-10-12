@@ -22,6 +22,8 @@ const data: AccessControlResponse = {
     available: true,
     provider_code: "oracle-cloud-epm",
     provider_name: "Oracle Cloud EPM",
+    application_name: "Vision",
+    business_process: "PLANNING",
     provider_registered: true,
     identity_provider_mode: "oracle_cloud",
     sso_enabled: true,
@@ -36,6 +38,8 @@ const data: AccessControlResponse = {
 const mappings: IdentityMappingCatalogResponse = {
   status: "success",
   provider_code: "oracle-cloud-epm",
+  application_name: "Vision",
+  business_process: "PLANNING",
   entitlements: [{
     entitlement_id: 10,
     entitlement_type: "APPLICATION_ROLE",

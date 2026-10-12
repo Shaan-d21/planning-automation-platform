@@ -33,11 +33,30 @@ class OracleJobEvidenceService:
         file_service: FileService,
         runtime_data_dir: Path,
         *,
+        application_id: int | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._files = file_service
-        self._root = Path(runtime_data_dir) / "job-evidence"
+        self._root = self.storage_root(
+            runtime_data_dir,
+            application_id=application_id,
+        )
         self._logger = logger or logging.getLogger(__name__)
+
+    @staticmethod
+    def storage_root(
+        runtime_data_dir: Path,
+        *,
+        application_id: int | None = None,
+    ) -> Path:
+        """Return the retained-evidence namespace for one application."""
+        root = Path(runtime_data_dir) / "job-evidence"
+        if application_id is None:
+            return root
+        normalized = int(application_id)
+        if normalized <= 0:
+            raise ValueError("Evidence application identity must be positive.")
+        return root / f"application-{normalized}"
 
     def capture_error_file(
         self,

@@ -41,8 +41,10 @@ class IdentityAccessApplicationService:
         settings: Settings,
         *,
         client_factory: Callable[[Settings], ClosableIdentityClient] | None = None,
+        business_process: str | None = None,
     ) -> None:
         self._settings = settings
+        self._business_process = str(business_process or "UNKNOWN").strip().upper()
         self._directory = IdentityDirectoryService(settings.database_target)
         self._provisioning = FederatedProvisioningService(
             settings.database_target
@@ -69,6 +71,8 @@ class IdentityAccessApplicationService:
             "available": self._settings.resolved_deployment_mode == "cloud",
             "provider_code": definition.code,
             "provider_name": definition.display_name,
+            "application_name": self._settings.application_name,
+            "business_process": self._business_process,
             "provider_registered": provider is not None,
             "identity_provider_mode": self._settings.identity_provider,
             "sso_enabled": self._settings.federated_identity_ready,
@@ -104,6 +108,8 @@ class IdentityAccessApplicationService:
         )
         return {
             "provider_code": definition.code,
+            "application_name": self._settings.application_name,
+            "business_process": self._business_process,
             "entitlements": [
                 {
                     "entitlement_id": item.entitlement_id,

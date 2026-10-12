@@ -13,6 +13,8 @@ from app.models.access_control import Permission, UserAccount
 from app.models.api_token import ApiTokenScope, AuthenticatedApiToken
 from app.products.contracts import BusinessProcessType
 from app.products.runtime_context import RuntimeApplicationContext
+from app.application.planning_work import PlanningWorkApplicationService
+from app.application.identity_access import IdentityAccessApplicationService
 from app.services.session_security_service import ClientContext
 from app.utils.exceptions import (
     AgentConversationError,
@@ -214,19 +216,73 @@ def _require_agent_application_scope(
     context = current_application_context(request, user)
     try:
         if target_kind == "conversation":
-            request.app.state.agent_service.require_conversation_application(
+            agent_service_for_request(request).require_conversation_application(
                 target_id,
                 user,
                 application_id=context.application_id,
             )
         else:
-            request.app.state.agent_service.require_action_draft_application(
+            agent_service_for_request(request).require_action_draft_application(
                 target_id,
                 user,
                 application_id=context.application_id,
             )
     except AgentConversationError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+def identity_access_for_request(
+    request: Request,
+) -> IdentityAccessApplicationService:
+    """Return identity synchronization scoped to the active application."""
+
+    context = current_application_context(request, current_user(request))
+    cached = request.app.state.identity_access_workspaces.get(
+        context.application_id
+    )
+    if cached is not None:
+        return cached
+    service = IdentityAccessApplicationService(
+        context.settings,
+        business_process=context.business_process.value,
+    )
+    request.app.state.identity_access_workspaces[context.application_id] = service
+    return service
+
+
+def agent_service_for_request(request: Request):
+    """Return the assistant composed for the active product workspace."""
+
+    context = current_application_context(request, current_user(request))
+    cached = request.app.state.agent_services.get(context.application_id)
+    if cached is not None:
+        return cached
+    service = request.app.state.agent_service_factory(context)
+    request.app.state.agent_services[context.application_id] = service
+    return service
+
+
+def planning_work_for_request(
+    request: Request,
+) -> PlanningWorkApplicationService:
+    """Return Planning work persistence scoped to the active application."""
+
+    context = current_application_context(request, current_user(request))
+    if context.application_id == request.app.state.deployment_application_id:
+        primary = request.app.state.planning_work
+        request.app.state.planning_workspaces[context.application_id] = primary
+        return primary
+    cached = request.app.state.planning_workspaces.get(
+        context.application_id
+    )
+    if cached is not None:
+        return cached
+    service = PlanningWorkApplicationService(
+        context.settings,
+        application_id=context.application_id,
+    )
+    request.app.state.planning_workspaces[context.application_id] = service
+    return service
 
 
 def require_bearer_token(

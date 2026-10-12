@@ -197,6 +197,9 @@ svg { width: 20px; height: 20px; }
 .nav-icon svg { width: 16px; height: 16px; }
 .sidebar-footer { display: flex; align-items: center; gap: 10px; padding: 18px 22px; border-top: 1px solid rgb(255 255 255 / 7%); }
 .sidebar-footer strong { color: #d9e2ef; font-size: .76rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.workspace-selector label { color: #71849f; font-size: .62rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.workspace-selector select { width: 100%; min-width: 0; border: 1px solid rgb(255 255 255 / 12%); border-radius: 8px; background: #0e2340; color: #d9e2ef; font: inherit; font-size: .72rem; padding: 6px 24px 6px 8px; }
+.workspace-selector select:disabled { cursor: not-allowed; opacity: .72; }
 .environment-dot { width: 9px; height: 9px; border: 2px solid #183f36; border-radius: 50%; background: #32c897; box-shadow: 0 0 0 4px rgb(50 200 151 / 10%); }
 .workspace { min-height: 100vh; margin-left: 270px; transition: margin-left .22s ease; }
 .workspace--home { margin-left: 0; }
@@ -267,6 +270,9 @@ svg { width: 20px; height: 20px; }
 .system-admin-workspace { display: grid; gap: 22px; }
 .system-admin-heading { display: flex; align-items: end; justify-content: space-between; gap: 20px; }
 .system-admin-heading label { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: .82rem; white-space: nowrap; }
+.environment-registration-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 12px; margin-bottom: 20px; }
+.environment-registration-form label { display: grid; gap: 7px; color: var(--ink); font-size: .78rem; font-weight: 700; }
+.environment-registration-form input { min-width: 0; border: 1px solid var(--line); border-radius: 10px; background: #fff; color: var(--ink); font: inherit; padding: 11px 12px; }
 .task-list { display: grid; gap: 10px; }
 .task-card { display: grid; grid-template-columns: 125px minmax(0, 1fr) auto; align-items: center; gap: 16px; padding: 17px 16px; border: 1px solid var(--line); border-left: 3px solid #8da0bd; border-radius: 12px; background: #fff; transition: transform .15s, box-shadow .15s; }
 .task-card:hover { transform: translateY(-1px); box-shadow: var(--shadow-md); }
@@ -2657,6 +2663,8 @@ svg { width: 20px; height: 20px; }
   .environment-setup-dialog > footer { position: sticky; bottom: 0; padding: 14px 17px; }
   .jobs-intro { align-items: flex-start; }
   .jobs-summary, .jobs-filters, .job-identity { grid-template-columns: 1fr; }
+  .environment-registration-form { grid-template-columns: 1fr; }
+  .environment-registration-form .button { width: 100%; }
   .job-overview-results { grid-template-columns: 1fr; }
   .job-overview-results > span { border-right: 0; border-bottom: 1px solid var(--line); }
   .job-overview-results > button { min-height: 42px; justify-content: center; }

@@ -10,6 +10,7 @@ from starlette.concurrency import run_in_threadpool
 
 from app.api.v1.schemas import (
     ApplicationWorkspaceListResponse,
+    ApplicationWorkspaceSelectionRequest,
     ApplicationWorkspaceSummary,
     FCCSDimensionsResponse,
     FCCSDimensionSummary,
@@ -43,6 +44,7 @@ from app.api.v1.schemas import (
     FrontendBootstrapResponse,
     NavigationItem,
     OperationSummary,
+    OracleEnvironmentRegistrationRequest,
     OracleSessionLoginRequest,
     OperationsResponse,
     ProductSummary,
@@ -76,11 +78,14 @@ from app.models.environment_configuration import EnvironmentConfiguration
 from app.products.context import classify_business_process
 from app.products.contracts import BusinessProcessType, NavigationDefinition
 from app.products.registry import PRODUCT_PROVIDER_REGISTRY
+from app.products.workspace_switching import workspace_switch_decision
 from app.web.security import (
     client_ip,
     csrf_token,
     current_user,
     current_application_context,
+    identity_access_for_request,
+    planning_work_for_request,
     require_api_session,
     start_user_session,
     validate_csrf,
@@ -90,6 +95,7 @@ from app.application.execution_evidence import (
     aggregate_record_statistics,
 )
 from app.services.task_manager_service import TaskManagerSyncService
+from app.services.oracle_job_evidence_service import OracleJobEvidenceService
 
 
 router = APIRouter(prefix="/api/v1", tags=["frontend-v1"])
@@ -104,12 +110,20 @@ async def frontend_bootstrap(request: Request) -> FrontendBootstrapResponse:
         str(request.session.get("session_id", "")).strip()
     )
     application_context = None
+    workspace_catalog = ApplicationWorkspaceListResponse(message="")
     if authenticated and user:
         try:
             application_context = current_application_context(request, user)
         except HTTPException as exc:
             if exc.status_code != 409:
                 raise
+        session_id = str(request.session.get("session_id", "")).strip()
+        if session_id:
+            workspace_catalog = await _application_workspace_payload(
+                request,
+                user,
+                session_id,
+            )
     navigation_definitions = (
         application_context.navigation
         if application_context is not None
@@ -161,6 +175,10 @@ async def frontend_bootstrap(request: Request) -> FrontendBootstrapResponse:
             _navigation_for(user, navigation_definitions)
             if authenticated and user
             else []
+        ),
+        workspaces=workspace_catalog.applications,
+        workspace_switching_enabled=(
+            workspace_catalog.switching_enabled
         ),
         features=FeatureAvailability(),
     )
@@ -252,13 +270,86 @@ async def application_workspaces(
     user = current_user(request)
     if user is None:
         raise HTTPException(status_code=401, detail="Sign in to continue.")
+    return await _application_workspace_payload(request, user, session_id)
+
+
+@router.put(
+    "/workspaces/current",
+    response_model=ApplicationWorkspaceListResponse,
+)
+async def select_application_workspace(
+    request: Request,
+    payload: ApplicationWorkspaceSelectionRequest,
+) -> ApplicationWorkspaceListResponse:
+    """Switch this session only to a request-safe assigned application."""
+
+    session_id = require_api_session(request)
+    user = current_user(request)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Sign in to continue.")
+    assigned = await run_in_threadpool(
+        request.app.state.application_workspaces.available_for_user,
+        user.user_id,
+        raw_session_id=session_id,
+    )
+    workspace = next(
+        (
+            item
+            for item in assigned
+            if item.application_id == payload.application_id
+        ),
+        None,
+    )
+    if workspace is None:
+        raise HTTPException(
+            status_code=404,
+            detail="The selected Oracle application is not available.",
+        )
+    decision = workspace_switch_decision(
+        workspace,
+        deployment_application_id=(
+            request.app.state.deployment_application_id
+        ),
+    )
+    if not decision.allowed:
+        raise HTTPException(status_code=409, detail=decision.reason)
+    try:
+        await run_in_threadpool(
+            request.app.state.application_workspaces.select_for_session,
+            session_id,
+            user_id=user.user_id,
+            application_id=payload.application_id,
+        )
+    except ConfigurationError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    return await _application_workspace_payload(request, user, session_id)
+
+
+async def _application_workspace_payload(
+    request: Request,
+    user: UserAccount,
+    session_id: str,
+) -> ApplicationWorkspaceListResponse:
+    """Return assigned applications with explicit runtime eligibility."""
+
     workspaces = await run_in_threadpool(
         request.app.state.application_workspaces.available_for_user,
         user.user_id,
         raw_session_id=session_id,
     )
-    return ApplicationWorkspaceListResponse(
-        applications=[
+    summaries: list[ApplicationWorkspaceSummary] = []
+    switchable_alternative = False
+    for item in workspaces:
+        decision = workspace_switch_decision(
+            item,
+            deployment_application_id=(
+                request.app.state.deployment_application_id
+            ),
+        )
+        switchable_alternative = switchable_alternative or (
+            decision.allowed and not item.current
+        )
+        summaries.append(
             ApplicationWorkspaceSummary(
                 application_id=item.application_id,
                 application_name=item.application_name,
@@ -266,13 +357,17 @@ async def application_workspaces(
                 product_type=item.product_type,
                 application_type=item.application_type,
                 current=item.current,
+                switchable=decision.allowed,
+                unavailable_reason=decision.reason,
             )
-            for item in workspaces
-        ],
+        )
+    return ApplicationWorkspaceListResponse(
+        switching_enabled=switchable_alternative,
+        applications=summaries,
         message=(
-            "Application registration and membership are active. Workspace "
-            "switching remains disabled until Oracle services are fully "
-            "request-scoped."
+            "Select an available Oracle application for this signed-in "
+            "session. Planning write services remain bound to the deployment "
+            "application; switched FCCS workspaces are read-only."
         ),
     )
 
@@ -402,10 +497,11 @@ async def planning_home(request: Request) -> dict[str, object]:
     require_api_session(request)
     user = current_user(request)
     assert user is not None
-    snapshot = request.app.state.planning_work.home_snapshot(actor=user)
+    planning_work = planning_work_for_request(request)
+    snapshot = planning_work.home_snapshot(actor=user)
     visible_tasks = snapshot.tasks[:50]
-    attempts = request.app.state.planning_work.execution_attempts(visible_tasks)
-    validations = request.app.state.planning_work.validation_evidence(visible_tasks)
+    attempts = planning_work.execution_attempts(visible_tasks)
+    validations = planning_work.validation_evidence(visible_tasks)
     return {
         "status": "success",
         "summary": {
@@ -724,7 +820,7 @@ async def list_planning_cycles(request: Request) -> dict[str, object]:
     require_api_session(request)
     user = current_user(request)
     assert user is not None
-    cycles = request.app.state.planning_work.list_cycles(actor=user)
+    cycles = planning_work_for_request(request).list_cycles(actor=user)
     return {
         "status": "success",
         "cycles": [_cycle_payload(item) for item in cycles],
@@ -740,7 +836,7 @@ async def planning_cycle_administration(
     user = current_user(request)
     assert user is not None
     try:
-        cycles = request.app.state.planning_work.administration_workspace(
+        cycles = planning_work_for_request(request).administration_workspace(
             actor=user,
         )
     except PlanningWorkflowError as exc:
@@ -782,12 +878,13 @@ async def assigned_planning_tasks(
     require_api_session(request)
     user = current_user(request)
     assert user is not None
-    cycles, tasks = request.app.state.planning_work.assigned_work(
+    planning_work = planning_work_for_request(request)
+    cycles, tasks = planning_work.assigned_work(
         actor=user,
         cycle_id=cycle_id,
     )
-    attempts = request.app.state.planning_work.execution_attempts(tasks)
-    validations = request.app.state.planning_work.validation_evidence(tasks)
+    attempts = planning_work.execution_attempts(tasks)
+    validations = planning_work.validation_evidence(tasks)
     return {
         "status": "success",
         "cycles": [_overview_payload(item) for item in cycles],
@@ -812,14 +909,15 @@ async def planning_cycle_detail(
     user = current_user(request)
     assert user is not None
     try:
-        cycle, stages, tasks = request.app.state.planning_work.cycle_detail(
+        planning_work = planning_work_for_request(request)
+        cycle, stages, tasks = planning_work.cycle_detail(
             cycle_id,
             actor=user,
         )
     except PlanningWorkflowError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    attempts = request.app.state.planning_work.execution_attempts(tasks)
-    validations = request.app.state.planning_work.validation_evidence(tasks)
+    attempts = planning_work.execution_attempts(tasks)
+    validations = planning_work.validation_evidence(tasks)
     return {
         "status": "success",
         "cycle": _cycle_payload(cycle),
@@ -865,7 +963,7 @@ async def create_planning_cycle(
             )
             for item in payload.tasks
         )
-        cycle = request.app.state.planning_work.create_cycle(
+        cycle = planning_work_for_request(request).create_cycle(
             PlanningCycleDraft(
                 code=payload.code,
                 name=payload.name,
@@ -917,7 +1015,7 @@ async def update_planning_task_status(
     assert user is not None
     try:
         status = PlanningTaskStatus(payload.status.strip().upper())
-        task = request.app.state.planning_work.update_task_status(
+        task = planning_work_for_request(request).update_task_status(
             task_id,
             status,
             actor=user,
@@ -951,7 +1049,9 @@ async def planning_task_data_review_context(
     user = current_user(request)
     assert user is not None
     try:
-        task, evidence = request.app.state.planning_work.data_review_context(
+        task, evidence = planning_work_for_request(
+            request
+        ).data_review_context(
             task_id,
             actor=user,
         )
@@ -985,7 +1085,9 @@ async def acknowledge_planning_validation(
     user = current_user(request)
     assert user is not None
     try:
-        evidence = request.app.state.planning_work.acknowledge_validation_warning(
+        evidence = planning_work_for_request(
+            request
+        ).acknowledge_validation_warning(
             validation_id,
             actor=user,
         )
@@ -1008,7 +1110,7 @@ async def submit_planning_task_for_approval(
     user = current_user(request)
     assert user is not None
     try:
-        approvals = request.app.state.planning_work.submit_for_approval(
+        approvals = planning_work_for_request(request).submit_for_approval(
             task_id,
             actor=user,
         )
@@ -1028,7 +1130,7 @@ async def list_planning_approvals(request: Request) -> dict[str, object]:
     require_api_session(request)
     user = current_user(request)
     assert user is not None
-    approvals = request.app.state.planning_work.approvals(actor=user)
+    approvals = planning_work_for_request(request).approvals(actor=user)
     return {
         "status": "success",
         "approvals": [_approval_payload(item) for item in approvals],
@@ -1047,7 +1149,7 @@ async def decide_planning_approval(
     assert user is not None
     try:
         decision = PlanningApprovalStatus(payload.decision.strip().upper())
-        approval = request.app.state.planning_work.decide_approval(
+        approval = planning_work_for_request(request).decide_approval(
             approval_id,
             decision,
             comment=payload.comment,
@@ -1071,7 +1173,9 @@ async def list_user_notifications(request: Request) -> dict[str, object]:
     require_api_session(request)
     user = current_user(request)
     assert user is not None
-    notifications = request.app.state.planning_work.notifications(actor=user)
+    notifications = planning_work_for_request(request).notifications(
+        actor=user
+    )
     return {
         "status": "success",
         "unread_count": sum(1 for item in notifications if item.read_at is None),
@@ -1088,7 +1192,7 @@ async def read_user_notification(
     user = current_user(request)
     assert user is not None
     try:
-        notification = request.app.state.planning_work.read_notification(
+        notification = planning_work_for_request(request).read_notification(
             notification_id,
             actor=user,
         )
@@ -1105,7 +1209,7 @@ async def read_all_user_notifications(request: Request) -> dict[str, str]:
     require_api_session(request)
     user = current_user(request)
     assert user is not None
-    request.app.state.planning_work.read_all_notifications(actor=user)
+    planning_work_for_request(request).read_all_notifications(actor=user)
     return {"status": "success"}
 
 
@@ -1116,9 +1220,13 @@ async def list_jobs_activity(
 ) -> dict[str, object]:
     """Return retained execution summaries for authorized operators."""
     require_api_session(request)
+    user = current_user(request)
+    assert user is not None
+    application = current_application_context(request, user)
     bounded_limit = min(max(limit, 1), 250)
     runs = request.app.state.control_center.list_workflow_runs(
         limit=bounded_limit,
+        application_id=application.application_id,
     )
     terminal = [
         run for run in runs if run.status.value in {"SUCCESS", "FAILED"}
@@ -1148,7 +1256,13 @@ async def job_activity_detail(
 ) -> dict[str, object]:
     """Return step-level evidence for one retained execution."""
     require_api_session(request)
-    run = request.app.state.control_center.get_workflow_run(execution_id)
+    user = current_user(request)
+    assert user is not None
+    application = current_application_context(request, user)
+    run = request.app.state.control_center.get_workflow_run(
+        execution_id,
+        application_id=application.application_id,
+    )
     if run is None:
         raise HTTPException(status_code=404, detail="The requested job was not found.")
     return {"status": "success", "job": _job_detail_payload(run)}
@@ -1162,7 +1276,13 @@ async def download_job_artifact(
 ):
     """Download a retained Oracle-generated artifact for an authorized user."""
     require_api_session(request)
-    run = request.app.state.control_center.get_workflow_run(execution_id)
+    user = current_user(request)
+    assert user is not None
+    application = current_application_context(request, user)
+    run = request.app.state.control_center.get_workflow_run(
+        execution_id,
+        application_id=application.application_id,
+    )
     if run is None:
         raise HTTPException(status_code=404, detail="The requested job was not found.")
     stored_name = None
@@ -1179,17 +1299,31 @@ async def download_job_artifact(
             break
     if not stored_name or stored_name != Path(stored_name).name:
         raise HTTPException(status_code=404, detail="The requested artifact was not found.")
-    evidence_root = (
-        request.app.state.settings.runtime_data_dir / "job-evidence"
-    ).resolve()
-    root = (evidence_root / execution_id).resolve()
-    if root.parent != evidence_root:
-        raise HTTPException(
-            status_code=404,
-            detail="The requested artifact was not found.",
-        )
-    path = (root / stored_name).resolve()
-    if path.parent != root or not path.is_file():
+    storage_roots = [
+        OracleJobEvidenceService.storage_root(
+            request.app.state.settings.runtime_data_dir,
+            application_id=application.application_id,
+        ).resolve()
+    ]
+    if (
+        application.application_id
+        == request.app.state.deployment_application_id
+    ):
+        legacy = OracleJobEvidenceService.storage_root(
+            request.app.state.settings.runtime_data_dir
+        ).resolve()
+        if legacy not in storage_roots:
+            storage_roots.append(legacy)
+    path = None
+    for evidence_root in storage_roots:
+        root = (evidence_root / execution_id).resolve()
+        if root.parent != evidence_root:
+            continue
+        candidate = (root / stored_name).resolve()
+        if candidate.parent == root and candidate.is_file():
+            path = candidate
+            break
+    if path is None:
         raise HTTPException(status_code=404, detail="The requested artifact was not found.")
     return FileResponse(path, filename=display_name or stored_name)
 
@@ -1198,7 +1332,12 @@ async def download_job_artifact(
 async def access_control_workspace(request: Request) -> dict[str, object]:
     """Return the administrator's password-free user and role catalog."""
     user = _require_user_management(request)
-    sources = request.app.state.access_control.authentication_sources()
+    identity_access = identity_access_for_request(request)
+    identity_status = identity_access.status()
+    provider_code = str(identity_status["provider_code"])
+    sources = request.app.state.access_control.authentication_sources_for_provider(
+        provider_code
+    )
     return {
         "status": "success",
         "current_user_id": user.user_id,
@@ -1210,13 +1349,15 @@ async def access_control_workspace(request: Request) -> dict[str, object]:
                     "LOCAL_RECOVERY",
                 ),
             )
-            for account in request.app.state.access_control.list_users()
+            for account in request.app.state.access_control.list_users_for_identity_provider(
+                provider_code
+            )
         ],
         "roles": [
             _platform_role_payload(role)
             for role in request.app.state.access_control.roles()
         ],
-        "identity_sync": request.app.state.identity_access.status(),
+        "identity_sync": identity_status,
     }
 
 
@@ -1244,7 +1385,143 @@ async def system_security_workspace(request: Request) -> dict[str, object]:
         }
         for account in request.app.state.access_control.list_users()
     ]
+    payload["applications"] = _system_application_payloads(request)
     return payload
+
+
+@router.post("/system-administration/oracle-environments")
+async def register_oracle_environment(
+    request: Request,
+    registration: OracleEnvironmentRegistrationRequest,
+) -> dict[str, object]:
+    """Discover applications at a new URL with the configured service user."""
+
+    require_api_session(request)
+    actor = current_user(request)
+    if actor is None or not actor.has_permission(Permission.SESSION_MANAGE):
+        raise HTTPException(
+            status_code=403,
+            detail="System Administrator access is required.",
+        )
+    try:
+        applications = await run_in_threadpool(
+            request.app.state.oracle_environment_registry.register,
+            registration.base_url,
+            actor_user_id=actor.user_id,
+        )
+    except ConfigurationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except EPMError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Oracle environment verification failed. Confirm the URL and "
+                "service-account access. Review the server log for the Oracle "
+                "error details."
+            ),
+        ) from exc
+    names = ", ".join(item.application_name for item in applications)
+    return {
+        "status": "success",
+        "message": (
+            f"Registered {len(applications)} Oracle application(s)"
+            f"{f': {names}.' if names else '.'}"
+        ),
+    }
+
+
+@router.delete("/system-administration/applications/{application_id}")
+async def remove_oracle_application(
+    request: Request,
+    application_id: int,
+) -> dict[str, object]:
+    """Deactivate one registration while retaining its audit history."""
+
+    require_api_session(request)
+    actor = current_user(request)
+    if actor is None or not actor.has_permission(Permission.SESSION_MANAGE):
+        raise HTTPException(
+            status_code=403,
+            detail="System Administrator access is required.",
+        )
+    try:
+        application = await run_in_threadpool(
+            request.app.state.application_workspaces.deactivate,
+            application_id,
+            protected_application_id=(
+                request.app.state.deployment_application_id
+            ),
+        )
+    except ConfigurationError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    for cache_name in (
+        "planning_workspaces",
+        "report_workspaces",
+        "data_review_workspaces",
+        "identity_access_workspaces",
+    ):
+        cache = getattr(request.app.state, cache_name, None)
+        if isinstance(cache, dict):
+            cache.pop(application_id, None)
+    agent_services = getattr(request.app.state, "agent_services", None)
+    if isinstance(agent_services, dict):
+        service = agent_services.pop(application_id, None)
+        if service is not None:
+            service.shutdown()
+    return {
+        "status": "success",
+        "message": (
+            f"Application '{application.application_name}' was removed from "
+            "active platform use. Historical audit records were retained."
+        ),
+    }
+
+
+def _system_application_payloads(request: Request) -> list[dict[str, object]]:
+    """Return administrative application state without returning Oracle URLs."""
+
+    applications = request.app.state.application_workspaces.registered()
+    environment_urls = sorted(
+        {item.environment_base_url for item in applications}
+    )
+    labels = {
+        base_url: (
+            "Deployment environment"
+            if base_url == request.app.state.settings.epm_base_url
+            else f"Oracle environment {index + 1}"
+        )
+        for index, base_url in enumerate(environment_urls)
+    }
+    raw_session_id = str(request.session.get("session_id", "")).strip()
+    actor = current_user(request)
+    current_id = None
+    if actor is not None and raw_session_id:
+        current = request.app.state.application_workspaces.current_for_session(
+            raw_session_id,
+            user_id=actor.user_id,
+        )
+        current_id = current.application_id if current is not None else None
+    return [
+        {
+            "application_id": item.application_id,
+            "application_name": item.application_name,
+            "business_process": item.business_process.value,
+            "product_type": item.product_type,
+            "application_type": item.application_type,
+            "environment_label": labels[item.environment_base_url],
+            "deployment_application": (
+                item.application_id
+                == request.app.state.deployment_application_id
+            ),
+            "current": item.application_id == current_id,
+            "removable": (
+                item.application_id
+                != request.app.state.deployment_application_id
+            ),
+            "last_verified_at": item.last_verified_at,
+        }
+        for item in applications
+    ]
 
 
 @router.post("/system-administration/sessions/{session_key}/revoke")
@@ -1305,7 +1582,7 @@ async def preview_identity_synchronization(
     _require_user_management(request)
     validate_csrf(request)
     try:
-        preview = await run_in_threadpool(request.app.state.identity_access.preview)
+        preview = await run_in_threadpool(identity_access_for_request(request).preview)
     except IdentitySynchronizationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except EPMError as exc:
@@ -1323,7 +1600,7 @@ async def apply_identity_synchronization(
     validate_csrf(request)
     try:
         result, preview = await run_in_threadpool(
-            request.app.state.identity_access.synchronize,
+            identity_access_for_request(request).synchronize,
             payload.snapshot_checksum,
             initiated_by_user_id=actor.user_id,
         )
@@ -1357,7 +1634,7 @@ async def identity_role_mapping_catalog(request: Request) -> dict[str, object]:
     """Return synchronized Oracle entitlements and current role mappings."""
     _require_user_management(request)
     try:
-        catalog = request.app.state.identity_access.entitlement_catalog()
+        catalog = identity_access_for_request(request).entitlement_catalog()
     except IdentitySynchronizationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"status": "success", **catalog}
@@ -1373,7 +1650,7 @@ async def set_identity_role_mapping(
     actor = _require_user_management(request)
     validate_csrf(request)
     try:
-        mapping = request.app.state.identity_access.set_mapping(
+        mapping = identity_access_for_request(request).set_mapping(
             entitlement_id,
             payload.role_code,
             actor_user_id=actor.user_id,
@@ -1392,7 +1669,7 @@ async def remove_identity_role_mapping(
     _require_user_management(request)
     validate_csrf(request)
     try:
-        request.app.state.identity_access.remove_mapping(entitlement_id)
+        identity_access_for_request(request).remove_mapping(entitlement_id)
     except IdentitySynchronizationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"status": "success", "message": "Role mapping removed."}
@@ -1406,7 +1683,7 @@ async def preview_identity_provisioning(
     _require_user_management(request)
     validate_csrf(request)
     try:
-        preview = request.app.state.identity_access.provisioning_preview()
+        preview = identity_access_for_request(request).provisioning_preview()
     except IdentitySynchronizationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {
@@ -1424,7 +1701,7 @@ async def apply_identity_provisioning(
     actor = _require_user_management(request)
     validate_csrf(request)
     try:
-        result, preview = request.app.state.identity_access.provision(
+        result, preview = identity_access_for_request(request).provision(
             payload.provisioning_checksum,
             actor_user_id=actor.user_id,
         )

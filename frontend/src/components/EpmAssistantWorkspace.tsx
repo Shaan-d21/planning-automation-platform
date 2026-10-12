@@ -1162,8 +1162,57 @@ function GuidedInputCard({ request, busy, csrfToken, onSubmit }: {
   else if (request.operation_code === "data-integrations") card = <DataIntegrationGuidedInputCard request={request} busy={busy} csrfToken={csrfToken} onSubmit={onSubmit} />;
   else if (request.operation_code === "data-import") card = <DataImportGuidedInputCard request={request} busy={busy} csrfToken={csrfToken} onSubmit={onSubmit} />;
   else if (request.operation_code === "metadata-import") card = <MetadataImportGuidedInputCard request={request} busy={busy} csrfToken={csrfToken} onSubmit={onSubmit} />;
-  else card = <BusinessRuleGuidedInputCard request={request} busy={busy} onSubmit={onSubmit} />;
+  else if (request.operation_code === "fccs-consolidation" || request.operation_code === "fccs-journal-action") card = <FCCSGuidedInputCard request={request} busy={busy} onSubmit={onSubmit} />;
+  else if (request.operation_code === "business-rules") card = <BusinessRuleGuidedInputCard request={request} busy={busy} onSubmit={onSubmit} />;
+  else card = <UnsupportedGuidedInputCard request={request} busy={busy} onSubmit={onSubmit} />;
   return <>{flowStep?.sequence && flowStep?.total && <div className="assistant-flow-progress"><span>Standalone flow</span><strong>Configure step {flowStep.sequence} of {flowStep.total}</strong><progress value={flowStep.sequence} max={flowStep.total} /></div>}{card}</>;
+}
+
+export function FCCSGuidedInputCard({ request, busy, onSubmit }: {
+  request: AgentInputRequest;
+  busy: boolean;
+  onSubmit: (values: Record<string, unknown> | null) => Promise<void>;
+}) {
+  const prefill = request.context?.prefill && typeof request.context.prefill === "object"
+    ? request.context.prefill as Record<string, unknown>
+    : {};
+  const [values, setValues] = useState<Record<string, unknown>>(prefill);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    setValues(prefill);
+    setError(null);
+  }, [request.request_id]);
+
+  function submit() {
+    const missing = request.fields.find((field) => field.required && !String(values[field.key] ?? "").trim());
+    if (missing) {
+      setError(`${missing.label} is required.`);
+      return;
+    }
+    const allowed = new Set(request.fields.map((field) => field.key));
+    const payload = Object.fromEntries(
+      Object.entries(values).filter(([key]) => allowed.has(key))
+    );
+    setError(null);
+    void onSubmit(payload);
+  }
+
+  const noun = request.operation_code === "fccs-consolidation" ? "Consolidation rule" : "Journal";
+  return <article className="assistant-guided-input" aria-label={request.title}>
+    <header><span className="assistant-guided-input__icon"><Icon name="settings" /></span><div><span className="eyebrow">Guided FCCS setup</span><h3>{request.title}</h3><p>{request.description}</p></div></header>
+    <div className="assistant-guided-input__artifact"><small>{noun}</small><strong>{request.artifact_name}</strong></div>
+    <div className="assistant-draft__inputs"><div>{request.fields.map((field) => <DraftField field={field} value={values[field.key]} onChange={(value) => setValues((current) => ({ ...current, [field.key]: value }))} key={field.key} />)}</div></div>
+    {error && <div className="assistant-draft__error"><Icon name="alert" />{error}</div>}
+    <footer><button type="button" className="button button--secondary" disabled={busy} onClick={() => void onSubmit(null)}>Cancel proposal</button><button type="button" className="button button--primary" disabled={busy} onClick={submit}>{busy ? <><span className="spinner" /> Validating…</> : <>Continue to approval <Icon name="arrow" /></>}</button></footer>
+  </article>;
+}
+
+function UnsupportedGuidedInputCard({ request, busy, onSubmit }: {
+  request: AgentInputRequest;
+  busy: boolean;
+  onSubmit: (values: Record<string, unknown> | null) => Promise<void>;
+}) {
+  return <article className="assistant-guided-input"><FeedbackBanner tone="error" title="Unsupported operation form" message={`No safe input form is registered for ${request.operation_code}. Nothing was submitted.`} /><footer><button type="button" className="button button--secondary" disabled={busy} onClick={() => void onSubmit(null)}>Cancel proposal</button></footer></article>;
 }
 
 function UserVariableGuidedInputCard({ request, busy, onSubmit }: {
@@ -1868,10 +1917,12 @@ function ApprovalCard({ approval, deciding, onDecision }: {
   const isSubstitutionVariable = approval.operation_code === "substitution-variables";
   const isUserVariable = approval.operation_code === "user-variables";
   const isStandaloneFlow = approval.operation_code === "standalone-flow";
+  const isFCCSConsolidation = approval.operation_code === "fccs-consolidation";
+  const isFCCSJournal = approval.operation_code === "fccs-journal-action";
   const isSchedule = approval.operation_code.startsWith("pipeline-schedule-");
   const scheduleVerb = approval.operation_code === "pipeline-schedule-create" ? "Create" : approval.operation_code === "pipeline-schedule-pause" ? "Pause" : "Resume";
   const flowSteps = recordList(approval.input_values?.steps);
-  const runsDirectly = ["business-rules", "data-maps", "pipelines", "data-integrations", "data-import", "metadata-import", "cube-refresh", "substitution-variables", "user-variables", "standalone-flow"].includes(approval.operation_code) || isSchedule;
+  const runsDirectly = ["business-rules", "data-maps", "pipelines", "data-integrations", "data-import", "metadata-import", "cube-refresh", "substitution-variables", "user-variables", "standalone-flow", "fccs-consolidation", "fccs-journal-action"].includes(approval.operation_code) || isSchedule;
   return <article className="assistant-approval" aria-label="Action preparation approval">
     <header>
       <span className="assistant-approval__icon"><Icon name="alert" /></span>
@@ -1885,6 +1936,10 @@ function ApprovalCard({ approval, deciding, onDecision }: {
     </dl>
     {isSchedule
       ? <section className="assistant-approval__inputs"><strong>Schedule change</strong><dl><div><dt>Action</dt><dd>{scheduleVerb}</dd></div><div><dt>{approval.operation_code === "pipeline-schedule-create" ? "Oracle Pipeline" : "Schedule"}</dt><dd>{String(approval.input_values?.schedule_name || approval.artifact_name || "")}</dd></div>{approval.operation_code === "pipeline-schedule-create" && <><div><dt>Recurrence</dt><dd>{friendlyName(String(approval.input_values?.frequency || ""))} · {String(approval.input_values?.first_run_local || "")}</dd></div><div><dt>Timezone</dt><dd>{String(approval.input_values?.timezone || "")}</dd></div><div><dt>Inputs</dt><dd>{approval.input_values?.input_policy === "FIXED" ? "Fixed unattended values" : "Oracle Pipeline defaults"}</dd></div><div><dt>Next run</dt><dd>{String(approval.input_values?.next_run_at || "")}</dd></div></>}</dl></section>
+      : isFCCSConsolidation
+      ? <section className="assistant-approval__inputs"><strong>FCCS consolidation point of view</strong><dl><div><dt>Rule</dt><dd>{approval.artifact_name}</dd></div><div><dt>Scenario</dt><dd>{String(approval.input_values?.scenario || "")}</dd></div><div><dt>Year</dt><dd>{String(approval.input_values?.year || "")}</dd></div><div><dt>Period</dt><dd>{String(approval.input_values?.period || "")}</dd></div><div><dt>Entity</dt><dd>{String(approval.input_values?.entity || "")}</dd></div></dl></section>
+      : isFCCSJournal
+      ? <section className="assistant-approval__inputs"><strong>FCCS journal action</strong><dl><div><dt>Journal</dt><dd>{approval.artifact_name}</dd></div><div><dt>Action</dt><dd>{String(approval.input_values?.action || "")}</dd></div><div><dt>Scenario</dt><dd>{String(approval.input_values?.scenario || "")}</dd></div><div><dt>Year</dt><dd>{String(approval.input_values?.year || "")}</dd></div><div><dt>Period</dt><dd>{String(approval.input_values?.period || "")}</dd></div></dl></section>
       : isStandaloneFlow
       ? <section className="assistant-approval__inputs assistant-approval__flow"><strong>Execution order</strong><p>Each operation must finish successfully before the next one starts.</p><ol>{flowSteps.map((step, index) => <li key={`${String(step.operation_code)}-${index}`}><span>{index + 1}</span><div><strong>{String(step.display_name || step.operation_code || "Operation")}</strong><small>{String(step.artifact_name || "")}</small></div><em>{String(step.risk_level || "Controlled")}</em></li>)}</ol></section>
       : isUserVariable
@@ -1904,7 +1959,7 @@ function ApprovalCard({ approval, deciding, onDecision }: {
       : isDataMap
       ? <section className="assistant-approval__inputs"><strong>Data Map controls</strong><dl><div><dt>Clear target</dt><dd>{approval.input_values?.clear_target === true ? "Yes" : "No"}</dd></div><div><dt>Member overrides</dt><dd>{Object.keys(memberOverrides).length ? Object.entries(memberOverrides).map(([name, value]) => `${name}=${value}`).join(", ") : "Use configured mapping"}</dd></div><div><dt>Exclusions</dt><dd>{Object.keys(exclusionOverrides).length ? Object.entries(exclusionOverrides).map(([name, value]) => `${name}=${value}`).join(", ") : "None"}</dd></div></dl></section>
       : <section className="assistant-approval__inputs"><strong>Runtime prompts</strong>{Object.keys(prompts).length ? <dl>{Object.entries(prompts).map(([name, value]) => <div key={name}><dt>{name}</dt><dd>{value}</dd></div>)}</dl> : <p>Use defaults configured in Calculation Manager.</p>}</section>}
-    <div className="assistant-approval__notice"><Icon name={runsDirectly ? "alert" : "check"} /><p>{isSchedule ? <><strong>This approval changes the governed scheduler.</strong> {approval.operation_code === "pipeline-schedule-create" ? "Nothing runs immediately; the Pipeline is submitted only when an enabled occurrence becomes due." : approval.operation_code === "pipeline-schedule-pause" ? "Future occurrences stop being claimed; an already running job is not cancelled." : "The Pipeline is revalidated now and again before every future occurrence."}</> : runsDirectly ? <><strong>{isStandaloneFlow ? "This approval starts the complete reviewed sequence." : isUserVariable ? "This approval changes one Oracle user-variable assignment." : isSubstitutionVariable ? "This approval changes one Oracle substitution variable." : isCubeRefresh ? "This approval starts an application-wide Cube Refresh." : "This approval starts the Oracle operation."}</strong> {isStandaloneFlow ? "The flow will be queued as one monitored execution and will stop after the first failed operation." : <>The selected {isUserVariable ? "user-variable change" : isSubstitutionVariable ? "variable change" : isCubeRefresh ? "Cube Refresh job" : isPipeline ? "Pipeline" : isDataIntegration ? "Data Integration" : isMetadataImport ? "Metadata Import" : isDataImport ? "Planning Data Import" : isDataMap ? "Data Map" : "Business Rule"} will be queued immediately and monitored in Jobs &amp; Activity.</>}</> : <><strong>Oracle will not run from this approval.</strong> Approval only creates a draft that you validate and continue on the operation's governed screen.</>}</p></div>
+    <div className="assistant-approval__notice"><Icon name={runsDirectly ? "alert" : "check"} /><p>{isSchedule ? <><strong>This approval changes the governed scheduler.</strong> {approval.operation_code === "pipeline-schedule-create" ? "Nothing runs immediately; the Pipeline is submitted only when an enabled occurrence becomes due." : approval.operation_code === "pipeline-schedule-pause" ? "Future occurrences stop being claimed; an already running job is not cancelled." : "The Pipeline is revalidated now and again before every future occurrence."}</> : runsDirectly ? <><strong>{isStandaloneFlow ? "This approval starts the complete reviewed sequence." : isUserVariable ? "This approval changes one Oracle user-variable assignment." : isSubstitutionVariable ? "This approval changes one Oracle substitution variable." : isCubeRefresh ? "This approval starts an application-wide Cube Refresh." : isFCCSConsolidation ? "This approval starts an FCCS consolidation." : isFCCSJournal ? "This approval submits the selected FCCS journal action." : "This approval starts the Oracle operation."}</strong> {isStandaloneFlow ? "The flow will be queued as one monitored execution and will stop after the first failed operation." : <>The selected {isUserVariable ? "user-variable change" : isSubstitutionVariable ? "variable change" : isCubeRefresh ? "Cube Refresh job" : isPipeline ? "Pipeline" : isDataIntegration ? "Data Integration" : isMetadataImport ? "Metadata Import" : isDataImport ? "Planning Data Import" : isDataMap ? "Data Map" : isFCCSConsolidation ? "FCCS Consolidation" : isFCCSJournal ? "FCCS Journal action" : "Business Rule"} will be queued immediately and monitored in Jobs &amp; Activity.</>}</> : <><strong>Oracle will not run from this approval.</strong> Approval only creates a draft that you validate and continue on the operation's governed screen.</>}</p></div>
     <footer>
       <button type="button" className="button button--secondary" disabled={Boolean(deciding)} onClick={() => void onDecision("reject")}>{deciding === "reject" ? <><span className="spinner" /> Rejecting…</> : "Reject proposal"}</button>
       <button type="button" className="button button--primary" disabled={Boolean(deciding)} onClick={() => void onDecision("approve")}>{deciding === "approve" ? <><span className="spinner" /> {isSchedule ? "Saving…" : runsDirectly ? "Starting…" : "Preparing…"}</> : <>{isSchedule ? `Approve and ${scheduleVerb.toLowerCase()}` : runsDirectly ? "Approve and run" : "Approve preparation"} <Icon name="arrow" /></>}</button>
@@ -1944,7 +1999,7 @@ export function AgentExecutionCard({ approved, csrfToken, onRecoveryStarted, onT
   const success = status === "SUCCESS";
   const cancelled = status === "CANCELLED";
   const failed = ["FAILED", "RECOVERY_REQUIRED"].includes(status);
-  const operationName = approved.operation_code === "standalone-flow" ? "Standalone Planning Flow" : approved.operation_code === "user-variables" ? "User Variable change" : approved.operation_code === "substitution-variables" ? "Substitution Variable change" : approved.operation_code === "cube-refresh" ? "Cube Refresh" : approved.operation_code === "pipelines" ? "Pipeline" : approved.operation_code === "data-integrations" ? "Data Integration" : approved.operation_code === "metadata-import" ? "Metadata Import" : approved.operation_code === "data-import" ? "Planning Data Import" : approved.operation_code === "data-maps" ? "Data Map" : "Business Rule";
+  const operationName = approved.operation_code === "standalone-flow" ? "Standalone Planning Flow" : approved.operation_code === "user-variables" ? "User Variable change" : approved.operation_code === "substitution-variables" ? "Substitution Variable change" : approved.operation_code === "cube-refresh" ? "Cube Refresh" : approved.operation_code === "pipelines" ? "Pipeline" : approved.operation_code === "data-integrations" ? "Data Integration" : approved.operation_code === "metadata-import" ? "Metadata Import" : approved.operation_code === "data-import" ? "Planning Data Import" : approved.operation_code === "data-maps" ? "Data Map" : approved.operation_code === "fccs-consolidation" ? "FCCS Consolidation" : approved.operation_code === "fccs-journal-action" ? "FCCS Journal action" : "Business Rule";
   const flow = execution?.flow_progress ?? null;
   const currentStep = flow?.current_step;
   const canRecover = approved.operation_code === "standalone-flow" && status === "FAILED";

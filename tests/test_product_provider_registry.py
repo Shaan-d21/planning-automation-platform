@@ -257,12 +257,15 @@ def test_planning_composes_common_and_product_capabilities() -> None:
         BusinessProcessType.PLANNING
     )
 
-def test_fccs_provider_exposes_only_verified_read_capabilities() -> None:
+def test_fccs_provider_exposes_verified_reads_and_governed_writes() -> None:
     provider = PRODUCT_PROVIDER_REGISTRY.get(BusinessProcessType.FCCS)
 
     assert provider is not None
     assert provider.enabled is True
-    assert provider.operations() == ()
+    assert [item.code for item in provider.operations()] == [
+        "fccs-consolidation",
+        "fccs-journal-action",
+    ]
     assert {item.code for item in provider.navigation()} == {
         "fccs-overview",
         "fccs-dimensions",
@@ -276,6 +279,8 @@ def test_fccs_provider_exposes_only_verified_read_capabilities() -> None:
         "fccs-dimension-discovery",
         "fccs-job-discovery",
         "fccs-journal-review",
+        "fccs-governed-consolidation",
+        "fccs-governed-journal-actions",
     }
     assert PRODUCT_PROVIDER_REGISTRY.agent_tool_names_for(
         BusinessProcessType.FCCS
@@ -283,6 +288,14 @@ def test_fccs_provider_exposes_only_verified_read_capabilities() -> None:
         "get_environment_summary",
         "get_recent_execution_history",
         "get_execution_evidence",
+        "get_fccs_overview",
+        "list_fccs_dimensions",
+        "list_fccs_jobs",
+        "get_fccs_job",
+        "list_fccs_journals",
+        "get_fccs_journal",
+        "list_platform_operations",
+        "prepare_operation_action",
     }
 
 

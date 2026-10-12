@@ -153,7 +153,7 @@ export function AccessControlWorkspace({
       <div>
         <span className="eyebrow">Administration</span>
         <h1>Access Control</h1>
-        <p>Manage who can sign in and what each person can do in the automation platform.</p>
+        <p>Manage platform accounts and the isolated Oracle directory for <strong>{data.identity_sync.application_name}</strong> ({data.identity_sync.business_process}).</p>
       </div>
       <button className="button button--primary" onClick={() => setEditor({ ...EMPTY_EDITOR })}>
         <Icon name="users" /> Add local recovery user
@@ -169,7 +169,7 @@ export function AccessControlWorkspace({
 
     <aside className="security-boundary">
       <span><Icon name="data" /></span>
-      <div><strong>Platform role controls features—not Oracle data access.</strong><p>Forms, members, entities, and data remain protected by security configured in Oracle EPM Planning.</p></div>
+      <div><strong>Platform role controls features—not Oracle data access.</strong><p>Oracle data remains protected by the active {data.identity_sync.business_process} application. Switching applications loads a separate synchronized directory and entitlement mapping set.</p></div>
     </aside>
 
     <section className="panel identity-access-explainer" aria-labelledby="identity-access-title">
@@ -188,8 +188,8 @@ export function AccessControlWorkspace({
       <div className="panel-heading">
         <div>
           <span className="eyebrow">Oracle identity directory</span>
-          <h2>Synchronize people and access context</h2>
-          <p>Inspect live Cloud EPM users, application roles, granular roles, and group memberships before retaining them here.</p>
+          <h2>{data.identity_sync.application_name} people and access</h2>
+          <p>Inspect live {data.identity_sync.business_process} users, application roles, granular roles, and group memberships. Results are retained only for this application.</p>
         </div>
         <span className={`status-pill ${data.identity_sync.available ? "status-ready" : "status-warning"}`}>
           {data.identity_sync.available ? "Cloud ready" : "Unavailable"}

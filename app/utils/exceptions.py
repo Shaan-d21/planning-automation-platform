@@ -157,10 +157,6 @@ class PlanningProcessError(EPMError):
     """Raised when an end-to-end Planning process is invalid or fails."""
 
 
-class ScheduleError(EPMError):
-    """Raised when a Planning Process schedule is invalid or cannot run."""
-
-
 class AutomationScheduleError(EPMError):
     """Raised when a platform automation schedule is invalid."""
 

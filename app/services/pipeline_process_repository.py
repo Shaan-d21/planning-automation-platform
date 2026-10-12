@@ -40,8 +40,22 @@ from app.utils.exceptions import ConfigurationError
 class SQLPipelineProcessRepository:
     """Persist immutable drafts and atomically publish active versions."""
 
-    def __init__(self, database_target: DatabaseTarget) -> None:
+    def __init__(
+        self,
+        database_target: DatabaseTarget,
+        *,
+        application_id: int | None = None,
+        adopt_legacy: bool = False,
+    ) -> None:
         self._database = database_for(database_target)
+        self._application_id = application_id
+        self._prefix = (
+            f"__application_{application_id}__::"
+            if application_id is not None
+            else ""
+        )
+        if application_id is not None and adopt_legacy:
+            self._adopt_legacy_processes()
 
     def save_draft(
         self,
@@ -49,6 +63,7 @@ class SQLPipelineProcessRepository:
         cycle: PlanningCycleDefinition,
     ) -> PipelineProcessVersion:
         now = datetime.now(UTC)
+        storage_code = self._storage_code(process.code)
         with self._database.begin() as connection:
             self._ensure_process(connection, process.code, now)
             version = int(
@@ -59,13 +74,13 @@ class SQLPipelineProcessRepository:
                         )
                     ).where(
                         func.lower(planning_process_versions.c.process_code)
-                        == process.code.casefold()
+                        == storage_code.casefold()
                     )
                 ).scalar_one()
             ) + 1
             connection.execute(
                 insert(planning_process_versions).values(
-                    process_code=process.code,
+                    process_code=storage_code,
                     version=version,
                     status=ProcessDesignStatus.DRAFT.value,
                     process_definition=self._serialize_process(process),
@@ -90,12 +105,13 @@ class SQLPipelineProcessRepository:
         if latest is None or latest.status is not ProcessDesignStatus.DRAFT:
             return self.save_draft(process, cycle)
         now = datetime.now(UTC)
+        storage_code = self._storage_code(process.code)
         with self._database.begin() as connection:
             connection.execute(
                 update(planning_process_versions)
                 .where(
                     func.lower(planning_process_versions.c.process_code)
-                    == process.code.casefold(),
+                    == storage_code.casefold(),
                     planning_process_versions.c.version == latest.version,
                     planning_process_versions.c.status
                     == ProcessDesignStatus.DRAFT.value,
@@ -115,12 +131,13 @@ class SQLPipelineProcessRepository:
 
     def activate(self, code: str, version: int) -> PipelineProcessVersion:
         normalized = str(code).strip()
+        storage_code = self._storage_code(normalized)
         now = datetime.now(UTC)
         with self._database.begin() as connection:
             exists = connection.execute(
                 select(planning_process_versions.c.version).where(
                     func.lower(planning_process_versions.c.process_code)
-                    == normalized.casefold(),
+                    == storage_code.casefold(),
                     planning_process_versions.c.version == version,
                 )
             ).scalar_one_or_none()
@@ -132,7 +149,7 @@ class SQLPipelineProcessRepository:
                 update(planning_process_versions)
                 .where(
                     func.lower(planning_process_versions.c.process_code)
-                    == normalized.casefold(),
+                    == storage_code.casefold(),
                     planning_process_versions.c.status
                     == ProcessDesignStatus.ACTIVE.value,
                 )
@@ -142,7 +159,7 @@ class SQLPipelineProcessRepository:
                 update(planning_process_versions)
                 .where(
                     func.lower(planning_process_versions.c.process_code)
-                    == normalized.casefold(),
+                    == storage_code.casefold(),
                     planning_process_versions.c.version == version,
                 )
                 .values(
@@ -158,11 +175,12 @@ class SQLPipelineProcessRepository:
         return activated
 
     def get(self, code: str, version: int) -> PipelineProcessVersion | None:
+        storage_code = self._storage_code(code)
         with self._database.connect() as connection:
             row = connection.execute(
                 select(planning_process_versions).where(
                     func.lower(planning_process_versions.c.process_code)
-                    == str(code).strip().casefold(),
+                    == storage_code.casefold(),
                     planning_process_versions.c.version == version,
                 )
             ).mappings().one_or_none()
@@ -174,9 +192,17 @@ class SQLPipelineProcessRepository:
     ) -> tuple[PipelineProcessVersion, ...]:
         statement = select(planning_process_versions)
         if code:
+            storage_code = self._storage_code(code)
             statement = statement.where(
                 func.lower(planning_process_versions.c.process_code)
-                == str(code).strip().casefold()
+                == storage_code.casefold()
+            )
+        elif self._prefix:
+            statement = statement.where(
+                planning_process_versions.c.process_code.startswith(
+                    self._prefix,
+                    autoescape=True,
+                )
             )
         statement = statement.order_by(
             planning_process_versions.c.created_at.desc(),
@@ -187,13 +213,21 @@ class SQLPipelineProcessRepository:
         return tuple(self._version(row) for row in rows)
 
     def list_active(self) -> tuple[PipelineProcessVersion, ...]:
+        filters = [
+            planning_process_versions.c.status
+            == ProcessDesignStatus.ACTIVE.value
+        ]
+        if self._prefix:
+            filters.append(
+                planning_process_versions.c.process_code.startswith(
+                    self._prefix,
+                    autoescape=True,
+                )
+            )
         with self._database.connect() as connection:
             rows = connection.execute(
                 select(planning_process_versions)
-                .where(
-                    planning_process_versions.c.status
-                    == ProcessDesignStatus.ACTIVE.value
-                )
+                .where(*filters)
                 .order_by(func.lower(planning_process_versions.c.process_code))
             ).mappings().all()
         return tuple(self._version(row) for row in rows)
@@ -230,11 +264,12 @@ class SQLPipelineProcessRepository:
         )
 
     def get_active(self, code: str) -> PipelineProcessVersion | None:
+        storage_code = self._storage_code(code)
         with self._database.connect() as connection:
             row = connection.execute(
                 select(planning_process_versions).where(
                     func.lower(planning_process_versions.c.process_code)
-                    == str(code).strip().casefold(),
+                    == storage_code.casefold(),
                     planning_process_versions.c.status
                     == ProcessDesignStatus.ACTIVE.value,
                 )
@@ -251,12 +286,13 @@ class SQLPipelineProcessRepository:
             raise ConfigurationError(
                 f"Process '{code}' does not have an active version."
             )
+        storage_code = self._storage_code(code)
         with self._database.begin() as connection:
             connection.execute(
                 update(planning_process_versions)
                 .where(
                     func.lower(planning_process_versions.c.process_code)
-                    == str(code).strip().casefold(),
+                    == storage_code.casefold(),
                     planning_process_versions.c.version == active.version,
                     planning_process_versions.c.status
                     == ProcessDesignStatus.ACTIVE.value,
@@ -280,13 +316,14 @@ class SQLPipelineProcessRepository:
         required_upload_keys: tuple[str, ...] = (),
     ) -> PipelineRunProfile:
         now = datetime.now(UTC)
+        storage_code = self._storage_code(process_code)
         try:
             with self._database.begin() as connection:
                 self._ensure_process(connection, process_code, now)
                 profile_id = connection.execute(
                     insert(process_run_profiles)
                     .values(
-                        process_code=process_code,
+                        process_code=storage_code,
                         name=name,
                         year=year,
                         start_period=start_period,
@@ -316,10 +353,11 @@ class SQLPipelineProcessRepository:
         profile_id: int,
     ) -> PipelineRunProfile | None:
         with self._database.connect() as connection:
+            storage_code = self._storage_code(process_code)
             row = connection.execute(
                 select(process_run_profiles).where(
                     func.lower(process_run_profiles.c.process_code)
-                    == str(process_code).strip().casefold(),
+                    == storage_code.casefold(),
                     process_run_profiles.c.profile_id == profile_id,
                     process_run_profiles.c.archived_at.is_(None),
                 )
@@ -331,11 +369,12 @@ class SQLPipelineProcessRepository:
         process_code: str,
     ) -> tuple[PipelineRunProfile, ...]:
         with self._database.connect() as connection:
+            storage_code = self._storage_code(process_code)
             rows = connection.execute(
                 select(process_run_profiles)
                 .where(
                     func.lower(process_run_profiles.c.process_code)
-                    == str(process_code).strip().casefold(),
+                    == storage_code.casefold(),
                     process_run_profiles.c.archived_at.is_(None),
                 )
                 .order_by(process_run_profiles.c.created_at.desc())
@@ -353,11 +392,12 @@ class SQLPipelineProcessRepository:
                 f"Run preset {profile_id} was not found for '{process_code}'."
             )
         with self._database.begin() as connection:
+            storage_code = self._storage_code(process_code)
             connection.execute(
                 update(process_run_profiles)
                 .where(
                     func.lower(process_run_profiles.c.process_code)
-                    == str(process_code).strip().casefold(),
+                    == storage_code.casefold(),
                     process_run_profiles.c.profile_id == profile_id,
                     process_run_profiles.c.archived_at.is_(None),
                 )
@@ -365,18 +405,23 @@ class SQLPipelineProcessRepository:
             )
         return profile
 
-    @staticmethod
-    def _ensure_process(connection, process_code: str, now: datetime) -> None:
+    def _ensure_process(
+        self,
+        connection,
+        process_code: str,
+        now: datetime,
+    ) -> None:
+        storage_code = self._storage_code(process_code)
         row = connection.execute(
             select(planning_processes.c.process_code).where(
                 func.lower(planning_processes.c.process_code)
-                == process_code.casefold()
+                == storage_code.casefold()
             )
         ).scalar_one_or_none()
         if row is None:
             connection.execute(
                 insert(planning_processes).values(
-                    process_code=process_code,
+                    process_code=storage_code,
                     created_at=now,
                     updated_at=now,
                 )
@@ -399,14 +444,13 @@ class SQLPipelineProcessRepository:
             activated_at=utc_datetime(row["activated_at"]),
         )
 
-    @staticmethod
-    def _profile(row) -> PipelineRunProfile:
+    def _profile(self, row) -> PipelineRunProfile:
         variables = dict(row["pipeline_variables"] or {})
         inbox_files = dict(row["inbox_files"] or {})
         upload_keys = list(row["required_upload_keys"] or [])
         return PipelineRunProfile(
             profile_id=int(row["profile_id"]),
-            process_code=str(row["process_code"]),
+            process_code=self._visible_code(str(row["process_code"])),
             name=str(row["name"]),
             year=str(row["year"]),
             start_period=str(row["start_period"]),
@@ -422,6 +466,89 @@ class SQLPipelineProcessRepository:
             required_upload_keys=tuple(str(key) for key in upload_keys),
             created_at=utc_datetime(row["created_at"]),
         )
+
+    def _storage_code(self, process_code: str) -> str:
+        normalized = str(process_code).strip()
+        if not self._prefix or normalized.startswith(self._prefix):
+            return normalized
+        return f"{self._prefix}{normalized}"
+
+    def _visible_code(self, storage_code: str) -> str:
+        if self._prefix and storage_code.startswith(self._prefix):
+            return storage_code[len(self._prefix) :]
+        return storage_code
+
+    def _adopt_legacy_processes(self) -> None:
+        """Copy pre-workspace designer records into the deployment namespace."""
+
+        with self._database.begin() as connection:
+            legacy_processes = connection.execute(
+                select(planning_processes).where(
+                    ~planning_processes.c.process_code.startswith(
+                        "__application_",
+                        autoescape=True,
+                    )
+                )
+            ).mappings().all()
+            for process_row in legacy_processes:
+                legacy_code = str(process_row["process_code"])
+                storage_code = self._storage_code(legacy_code)
+                exists = connection.execute(
+                    select(planning_processes.c.process_code).where(
+                        planning_processes.c.process_code == storage_code
+                    )
+                ).scalar_one_or_none()
+                if exists is not None:
+                    continue
+                connection.execute(
+                    insert(planning_processes).values(
+                        process_code=storage_code,
+                        created_at=process_row["created_at"],
+                        updated_at=process_row["updated_at"],
+                    )
+                )
+                versions = connection.execute(
+                    select(planning_process_versions).where(
+                        planning_process_versions.c.process_code
+                        == legacy_code
+                    )
+                ).mappings().all()
+                for version in versions:
+                    connection.execute(
+                        insert(planning_process_versions).values(
+                            process_code=storage_code,
+                            version=version["version"],
+                            status=version["status"],
+                            process_definition=version["process_definition"],
+                            cycle_definition=version["cycle_definition"],
+                            created_at=version["created_at"],
+                            activated_at=version["activated_at"],
+                        )
+                    )
+                profiles = connection.execute(
+                    select(process_run_profiles).where(
+                        process_run_profiles.c.process_code == legacy_code
+                    )
+                ).mappings().all()
+                for profile in profiles:
+                    connection.execute(
+                        insert(process_run_profiles).values(
+                            process_code=storage_code,
+                            name=profile["name"],
+                            year=profile["year"],
+                            start_period=profile["start_period"],
+                            end_period=profile["end_period"],
+                            scenario=profile["scenario"],
+                            version=profile["version"],
+                            pipeline_variables=profile["pipeline_variables"],
+                            inbox_files=profile["inbox_files"],
+                            required_upload_keys=profile[
+                                "required_upload_keys"
+                            ],
+                            created_at=profile["created_at"],
+                            archived_at=profile["archived_at"],
+                        )
+                    )
 
     @staticmethod
     def _serialize_process(

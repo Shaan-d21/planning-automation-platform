@@ -11,6 +11,7 @@ interface AppShellProps {
   unreadNotifications: number;
   onLogout: () => Promise<void>;
   onRefresh: () => Promise<void>;
+  onWorkspaceChange: (applicationId: number) => Promise<void>;
 }
 
 export function AppShell({
@@ -20,13 +21,16 @@ export function AppShell({
   busy,
   unreadNotifications,
   onLogout,
-  onRefresh
+  onRefresh,
+  onWorkspaceChange
 }: AppShellProps) {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const user = bootstrap.user!;
   const isHome = activeView === "home";
   const platformHref = platformEntryHref(bootstrap);
+  const workspaces = bootstrap.workspaces ?? [];
+  const activeWorkspace = workspaces.find((item) => item.current);
   const groups = bootstrap.navigation.reduce<Record<string, typeof bootstrap.navigation>>(
     (result, item) => {
       (result[item.group] ??= []).push(item);
@@ -84,7 +88,30 @@ export function AppShell({
           </nav>
           <div className="sidebar-footer">
             <span className="environment-dot" />
-            <div><strong>{bootstrap.environment?.application_name}</strong><small>{bootstrap.environment?.deployment_mode} environment</small></div>
+            <div className="workspace-selector">
+              <label htmlFor="oracle-application-workspace">Oracle application</label>
+              {workspaces.length > 1 ? (
+                <select
+                  id="oracle-application-workspace"
+                  value={activeWorkspace?.application_id ?? ""}
+                  disabled={busy || !bootstrap.workspace_switching_enabled}
+                  onChange={(event) => void onWorkspaceChange(Number(event.target.value))}
+                >
+                  {workspaces.map((item) => (
+                    <option
+                      key={item.application_id}
+                      value={item.application_id}
+                      disabled={!item.switchable}
+                    >
+                      {item.application_name} · {item.business_process}{item.switchable ? "" : " · unavailable"}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <strong>{bootstrap.environment?.application_name}</strong>
+              )}
+              <small>{bootstrap.environment?.business_process === "FCCS" ? "Read-only Close workspace" : `${bootstrap.environment?.deployment_mode} environment`}</small>
+            </div>
           </div>
         </aside>
       </>}

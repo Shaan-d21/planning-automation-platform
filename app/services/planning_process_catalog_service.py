@@ -20,8 +20,16 @@ from app.utils.exceptions import ConfigurationError
 class PlanningProcessCatalogService:
     """Read built-in and published designer-managed process definitions."""
 
-    def __init__(self, database_target: DatabaseTarget | None = None) -> None:
+    def __init__(
+        self,
+        database_target: DatabaseTarget | None = None,
+        *,
+        application_id: int | None = None,
+        adopt_legacy: bool = False,
+    ) -> None:
         self._database_target = database_target
+        self._application_id = application_id
+        self._adopt_legacy = adopt_legacy
 
     def load(
         self,
@@ -78,7 +86,9 @@ class PlanningProcessCatalogService:
         published = tuple(
             item.process
             for item in SQLPipelineProcessRepository(
-                self._database_target
+                self._database_target,
+                application_id=self._application_id,
+                adopt_legacy=self._adopt_legacy,
             ).list_active()
         )
         published_by_code = {
