@@ -1,4 +1,4 @@
-# Oracle EPM Planning Automation
+# EPM AI Assistant
 
 A production-oriented Python framework for Oracle EPM Planning automation.
 The current release implements HTTP Basic Authentication, native Planning
@@ -12,8 +12,12 @@ The application is evolving as a modular Oracle EPM platform. Shared security,
 agent, approval, queue, scheduling, audit, and deployment services remain in
 one application, while each business process contributes capabilities through
 an allow-listed product provider. Planning retains its full operation catalog;
-FCCS is enabled only for verified read-only connection, dimension, job, and
-consolidation-journal review and exposes no write operations. See
+FCCS provides verified connection, dimension, job, and consolidation-journal
+reads to both its workspace and EPM Assistant. Its governed write capabilities
+include consolidation for an exact Scenario, Year, Period, and Entity POV, and
+journal workflow actions: submit, approve, post, unpost, or reject an exact
+journal after live review and explicit approval. Other FCCS writes remain
+disabled. See
 [EPM Product Architecture](docs/PRODUCT_ARCHITECTURE.md).
 
 Both engines can upload files, execute saved Import Metadata or Import Data
@@ -310,9 +314,10 @@ the stored URL. For this release the same `EPM_INTEGRATION_USERNAME` and
 `EPM_INTEGRATION_PASSWORD` are used for every registered URL; environment-
 specific service credentials are a later secret-management phase.
 
-The deployment application keeps full Planning behavior. An assigned FCCS
-application can be selected even when it belongs to another registered URL,
-but remains read-only. Additional Planning applications remain unavailable in
+The deployment application keeps full Planning behavior. A registered FCCS
+application can be selected even when it belongs to another registered URL.
+Its read APIs and assistant are request-scoped; only governed consolidation and
+journal workflow actions can write. Additional Planning applications remain unavailable in
 the selector until the agent and all write-capable services are fully request-
 scoped. The deployment application cannot be removed while it remains the
 server default; secondary registrations can be deactivated by a System

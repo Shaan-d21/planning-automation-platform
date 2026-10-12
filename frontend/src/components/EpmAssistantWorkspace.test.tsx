@@ -1,7 +1,86 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { AgentExecutionCard } from "./EpmAssistantWorkspace";
+import { AgentExecutionCard, FCCSGuidedInputCard } from "./EpmAssistantWorkspace";
+
+describe("FCCS guided operation inputs", () => {
+  it("submits only the FCCS consolidation POV and never Planning runtime-prompt fields", async () => {
+    const submitted = vi.fn(async () => undefined);
+    const field = (key: string, label: string) => ({
+      key,
+      label,
+      kind: "text" as const,
+      required: true,
+      description: "",
+      placeholder: "",
+      options: []
+    });
+
+    render(<FCCSGuidedInputCard
+      request={{
+        request_id: "fccs-input-1",
+        operation_code: "fccs-consolidation",
+        display_name: "FCCS Consolidation",
+        artifact_name: "Consolidate",
+        title: "Set the consolidation point of view",
+        description: "Review the exact FCCS point of view before approval.",
+        fields: [
+          field("scenario", "Scenario"),
+          field("year", "Year"),
+          field("period", "Period"),
+          field("entity", "Entity")
+        ],
+        context: {
+          prefill: {
+            scenario: "Actual",
+            year: "FY27",
+            period: "Jan",
+            entity: "FCCS_Total Geography",
+            runtime_prompt_mode: "MANUAL",
+            runtime_prompts: { Years: "FY27" }
+          }
+        }
+      }}
+      busy={false}
+      onSubmit={submitted}
+    />);
+
+    expect(screen.getByText("Guided FCCS setup")).toBeTruthy();
+    expect(screen.queryByText("Runtime prompt source")).toBeNull();
+    expect((screen.getByLabelText(/Scenario/) as HTMLInputElement).value).toBe("Actual");
+    expect((screen.getByLabelText(/Entity/) as HTMLInputElement).value).toBe("FCCS_Total Geography");
+
+    fireEvent.click(screen.getByRole("button", { name: /Continue to approval/ }));
+
+    await waitFor(() => expect(submitted).toHaveBeenCalledWith({
+      scenario: "Actual",
+      year: "FY27",
+      period: "Jan",
+      entity: "FCCS_Total Geography"
+    }));
+  });
+
+  it("cancels without submitting operation inputs", async () => {
+    const submitted = vi.fn(async () => undefined);
+    render(<FCCSGuidedInputCard
+      request={{
+        request_id: "fccs-input-2",
+        operation_code: "fccs-consolidation",
+        display_name: "FCCS Consolidation",
+        artifact_name: "Consolidate",
+        title: "Set the consolidation point of view",
+        description: "Review the exact FCCS point of view before approval.",
+        fields: [],
+        context: {}
+      }}
+      busy={false}
+      onSubmit={submitted}
+    />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel proposal" }));
+    await waitFor(() => expect(submitted).toHaveBeenCalledWith(null));
+  });
+});
 
 function response(value: unknown, status = 200) {
   return Promise.resolve(new Response(JSON.stringify(value), {

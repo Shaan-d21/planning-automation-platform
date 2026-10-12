@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from app.agent.capabilities import AgentCapabilityGateway
+from app.agent.canonical import CanonicalCapability
 from app.agent.checkpoints import AgentCheckpointStore
 from app.agent.graph import AgentGraphOrchestrator, GRAPH_TOOL_NAMES
 from app.agent.task_state import AgentTaskInterpreter
@@ -30,6 +31,7 @@ from app.application.user_variables import UserVariableCatalog
 from app.config.settings import Settings
 from app.models.substitution_variable import SubstitutionVariable
 from app.models.environment import DimensionInfo
+from app.models.job import JobDefinition
 from app.models.data_validation import (
     DataMismatch,
     DataValidationResult,
@@ -43,6 +45,8 @@ from app.models.workflow import (
     WorkflowStepStatus,
 )
 from app.models.user_variable import UserVariableDefinition, UserVariableValue
+from app.products.contracts import BusinessProcessType
+from app.products.registry import PRODUCT_PROVIDER_REGISTRY
 from app.utils.exceptions import (
     AgentCapabilityError,
     AgentProviderError,
@@ -54,6 +58,102 @@ from app.utils.exceptions import (
 class _ControlCenter:
     def snapshot(self, *, history_limit):
         return type("Snapshot", (), {"processes": (), "recent_runs": ()})()
+
+
+def test_fccs_consolidation_canonical_task_uses_product_operation() -> None:
+    call = AgentGraphOrchestrator._deterministic_task_operation_call(
+        {
+            "allowed_tool_names": ["prepare_operation_action"],
+            "task_context": {
+                "intent": "RUN_BUSINESS_RULE",
+                "phase": "READY_FOR_PLAN",
+                "canonical_capability": CanonicalCapability.FCCS_CONSOLIDATION.value,
+                "objective": "Run Consolidation rule",
+                "parameters": {},
+                "parameter_conflicts": [],
+            },
+        }
+    )
+
+    assert call is not None
+    assert call.arguments["operation_code"] == "fccs-consolidation"
+
+
+def test_fccs_consolidation_prefill_uses_only_labelled_pov_values() -> None:
+    values = AgentGraphOrchestrator._fccs_consolidation_prefill(
+        "Run Consolidate with Scenario Actual, Year FY27, Period Jan, "
+        "Entity FCCS_Total Geography."
+    )
+
+    assert values == {
+        "scenario": "Actual",
+        "year": "FY27",
+        "period": "Jan",
+        "entity": "FCCS_Total Geography",
+    }
+    assert (
+        AgentGraphOrchestrator._fccs_consolidation_prefill(
+            "Run Consolidate for Actual FY27 Jan"
+        )
+        == {}
+    )
+
+
+def test_fccs_consolidation_runs_selection_pov_and_approval_flow(
+    tmp_path: Path,
+) -> None:
+    provider = _StepProvider(
+        requested_tool="prepare_operation_action",
+        arguments={
+            "operation_code": "fccs-consolidation",
+            "objective": "Run the FCCS consolidation rule.",
+        },
+    )
+    graph = _orchestrator(
+        tmp_path,
+        provider,
+        operation_catalog=_FCCSOperationCatalog(),
+        fccs_read=_FCCSRead(),
+    )
+
+    selection = graph.invoke(
+        conversation_id="fccs-consolidation-flow",
+        user_id=7,
+        messages=(_message("Run Consolidation rule."),),
+    )
+
+    assert selection.clarification_request is not None
+    assert selection.clarification_request.options == ("Consolidate",)
+    inputs = graph.resume_clarification(
+        conversation_id="fccs-consolidation-flow",
+        user_id=7,
+        request_id=selection.clarification_request.request_id,
+        value="Consolidate",
+    )
+    assert inputs.input_request is not None
+    assert inputs.input_request.operation_code == "fccs-consolidation"
+
+    approval = graph.resume_input(
+        conversation_id="fccs-consolidation-flow",
+        user_id=7,
+        request_id=inputs.input_request.request_id,
+        values={
+            "scenario": "Actual",
+            "year": "FY27",
+            "period": "Jan",
+            "entity": "FCCS_Total Geography",
+        },
+    )
+
+    assert approval.approval_request is not None
+    assert approval.approval_request.operation_code == "fccs-consolidation"
+    assert approval.approval_request.artifact_name == "Consolidate"
+    assert approval.approval_request.input_values == {
+        "scenario": "Actual",
+        "year": "FY27",
+        "period": "Jan",
+        "entity": "FCCS_Total Geography",
+    }
 
 
 class _ExecutionEvidenceControlCenter(_ControlCenter):
@@ -96,6 +196,25 @@ class _ExecutionEvidenceControlCenter(_ControlCenter):
 class _DataReview:
     def list_cubes(self):
         return ()
+
+
+class _FCCSRead:
+    def job_definitions(self, *, job_type=None):
+        assert job_type == "RULES"
+        return (
+            JobDefinition(job_name="Consolidate", job_type="RULES"),
+            JobDefinition(job_name="Translate", job_type="RULES"),
+        )
+
+
+class _FCCSOperationCatalog:
+    def active_definitions(self):
+        return PRODUCT_PROVIDER_REGISTRY.operations_for(BusinessProcessType.FCCS)
+
+    def active_agent_tool_names(self):
+        return PRODUCT_PROVIDER_REGISTRY.agent_tool_names_for(
+            BusinessProcessType.FCCS
+        )
 
 
 class _DiscoverableDataReview(_DataReview):
@@ -813,6 +932,7 @@ def _orchestrator(
     control_center=None,
     data_review=None,
     report_workspace=None,
+    fccs_read=None,
 ):
     settings = _settings(tmp_path)
     gateway = AgentCapabilityGateway(
@@ -823,6 +943,7 @@ def _orchestrator(
         operation_catalog=operation_catalog,
         substitution_variables=substitution_variables,
         user_variables=user_variables,
+        fccs_read=fccs_read,
     )
     store = AgentCheckpointStore(settings.database_target)
     return AgentGraphOrchestrator(

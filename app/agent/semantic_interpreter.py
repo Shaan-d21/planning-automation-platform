@@ -129,6 +129,7 @@ _LEGACY_INTENTS = {
     CanonicalCapability.PIPELINE: AgentTaskIntent.RUN_PIPELINE,
     CanonicalCapability.DATA_INTEGRATION: AgentTaskIntent.RUN_DATA_INTEGRATION,
     CanonicalCapability.BUSINESS_RULE: AgentTaskIntent.RUN_BUSINESS_RULE,
+    CanonicalCapability.FCCS_CONSOLIDATION: AgentTaskIntent.RUN_BUSINESS_RULE,
     CanonicalCapability.MULTI_STEP_FLOW: AgentTaskIntent.MONTH_CLOSE,
 }
 

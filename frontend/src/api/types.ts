@@ -526,6 +526,8 @@ export interface IdentitySyncStatus {
   available: boolean;
   provider_code: string;
   provider_name: string;
+  application_name: string;
+  business_process: string;
   provider_registered: boolean;
   identity_provider_mode: string;
   sso_enabled: boolean;
@@ -600,6 +602,8 @@ export interface IdentityEntitlement {
 export interface IdentityMappingCatalogResponse {
   status: string;
   provider_code: string;
+  application_name: string;
+  business_process: string;
   entitlements: IdentityEntitlement[];
 }
 

@@ -23,7 +23,11 @@ from app.agent.capabilities import (
 )
 from app.agent.checkpoints import AgentCheckpointStore
 from app.agent.clarification import ClarificationChoiceResolver
-from app.agent.canonical import capability_definition
+from app.agent.canonical import (
+    CanonicalCapability,
+    capability_definition,
+    recognize_explicit_capability,
+)
 from app.agent.entity_resolution import CatalogEntityResolver
 from app.agent.errors import classify_agent_error
 from app.agent.execution_plan import AgentExecutionPlanBuilder
@@ -89,6 +93,7 @@ RESOLVED_ARTIFACT_REQUIRED_CODES = frozenset(
         "cube-refresh",
         "substitution-variables",
         "user-variables",
+        "fccs-consolidation",
         PIPELINE_SCHEDULE_CREATE,
         PIPELINE_SCHEDULE_PAUSE,
         PIPELINE_SCHEDULE_RESUME,
@@ -210,6 +215,8 @@ class AgentGraphOrchestrator:
             )
         except AgentProviderError:
             raise
+        except AgentCapabilityError as exc:
+            raise AgentProviderError(str(exc)) from exc
         except Exception as exc:
             self._logger.exception("LangGraph assistant turn failed.")
             raise AgentProviderError(
@@ -343,6 +350,8 @@ class AgentGraphOrchestrator:
             )
         except AgentProviderError:
             raise
+        except AgentCapabilityError as exc:
+            raise AgentProviderError(str(exc)) from exc
         except Exception as exc:
             self._logger.exception("LangGraph clarification resume failed.")
             raise AgentProviderError(
@@ -926,7 +935,11 @@ class AgentGraphOrchestrator:
         }
         if "prepare_operation_action" not in allowed:
             return None
-        operation_code = {
+        operation_code = (
+            "fccs-consolidation"
+            if str(context.get("canonical_capability") or "")
+            == CanonicalCapability.FCCS_CONSOLIDATION.value
+            else {
             "METADATA_LOAD": "metadata-import",
             "DATA_LOAD": {
                 "DATA_INTEGRATION": "data-integrations",
@@ -934,7 +947,8 @@ class AgentGraphOrchestrator:
             }.get(str(task_parameters.get("load_method") or "").upper(), "data-import"),
             "RUN_BUSINESS_RULE": "business-rules",
             "RUN_CUBE_REFRESH": "cube-refresh",
-        }.get(intent)
+            }.get(intent)
+        )
         if operation_code is None:
             return None
         return AgentToolCall(
@@ -1330,6 +1344,7 @@ class AgentGraphOrchestrator:
                 "business-rules",
                 "data-integrations",
             },
+            "RUN_BUSINESS_RULE": {"fccs-consolidation"},
         }.get(task_intent, set())
         if operation_code not in expected_operations:
             return {}
@@ -1354,6 +1369,12 @@ class AgentGraphOrchestrator:
                 "cutoff_period",
                 "year",
                 "execution_method",
+            ),
+            "RUN_BUSINESS_RULE": (
+                "scenario",
+                "year",
+                "period",
+                "entity",
             ),
         }[task_intent]
         summary = {
@@ -1380,6 +1401,14 @@ class AgentGraphOrchestrator:
             result["prefill"] = {
                 key: value for key, value in prefill.items() if value
             }
+        elif operation_code == "fccs-consolidation":
+            prefill = {
+                key: str(parameters.get(key) or "").strip()
+                for key in ("scenario", "year", "period", "entity")
+                if str(parameters.get(key) or "").strip()
+            }
+            if prefill:
+                result["prefill"] = prefill
         return result
 
     @staticmethod
@@ -3752,6 +3781,7 @@ class AgentGraphOrchestrator:
                 PIPELINE_SCHEDULE_CREATE: "Oracle Pipelines",
                 PIPELINE_SCHEDULE_PAUSE: "active schedules",
                 PIPELINE_SCHEDULE_RESUME: "paused schedules",
+                "fccs-consolidation": "FCCS consolidation rules",
             }.get(operation_code, str(proposal.get("display_name") or "Operation"))
             selection_prompt = {
                 PIPELINE_SCHEDULE_CREATE: "Choose the Oracle Pipeline to schedule.",
@@ -3765,6 +3795,10 @@ class AgentGraphOrchestrator:
                     "Choose the registered Oracle Pipeline that implements "
                     "this process. Its stages and inputs will be reviewed "
                     "before any execution."
+                ),
+                "fccs-consolidation": (
+                    "Choose the live FCCS consolidation rule. Its exact POV "
+                    "will be reviewed before execution."
                 ),
             }.get(
                 operation_code,
@@ -3985,6 +4019,12 @@ class AgentGraphOrchestrator:
                         ),
                     }
             guided = {**guided, "context": context}
+        elif guided is not None and operation_code == "fccs-consolidation":
+            prefill = self._fccs_consolidation_prefill(input_source_text)
+            if prefill:
+                context = dict(guided.get("context") or {})
+                context["prefill"] = prefill
+                guided = {**guided, "context": context}
         elif guided is not None and operation_code == PIPELINE_SCHEDULE_CREATE:
             context = dict(guided.get("context") or {})
             context["prefill"] = {
@@ -4458,6 +4498,31 @@ class AgentGraphOrchestrator:
         year = re.search(r"\bFY\s*[-_]?\s*(\d{2,4})\b", text, re.IGNORECASE)
         if year:
             result["year"] = f"FY{year.group(1)}"
+        return result
+
+    @staticmethod
+    def _fccs_consolidation_prefill(instruction: str) -> dict[str, str]:
+        """Extract explicitly labelled FCCS POV slots without guessing members."""
+
+        text = " ".join(str(instruction or "").strip().split())
+        if not text:
+            return {}
+        result: dict[str, str] = {}
+        labels = ("scenario", "year", "period", "entity")
+        next_label = "|".join(labels)
+        for label in labels:
+            match = re.search(
+                rf"\b{label}\s*(?:is|=|:)?\s*[\"']?(.+?)"
+                rf"(?=(?:\s*,\s*|\s+)(?:{next_label})\b"
+                rf"\s*(?:is|=|:)?|$)",
+                text,
+                re.IGNORECASE,
+            )
+            if match is None:
+                continue
+            value = match.group(1).strip().strip("\"'").rstrip(".!?;").strip()
+            if value and len(value) <= 1_000:
+                result[label] = value
         return result
 
     @staticmethod
@@ -4976,21 +5041,38 @@ class AgentGraphOrchestrator:
         """Return a zero-based ordinal only for an unambiguous short reply."""
         return ClarificationChoiceResolver.ordinal_selection(user_text)
 
-    @staticmethod
     def _resolve_explicit_operation_intent(
+        self,
         user_text: str,
         proposed_operation: str,
     ) -> str:
-        """Correct the common Data Push versus file-import ambiguity.
+        """Keep explicit canonical product intent ahead of provider guesses.
 
         Data Push is Oracle Planning data movement through a Data Map. Data
         Import loads an external file into a cube. Only strong, explicit push
-        language can override a model-proposed loading operation.
+        language can override a model-proposed loading operation. The same
+        boundary prevents an explicit FCCS consolidation request from falling
+        back to Planning's generic Business Rule operation.
         """
         normalized = " ".join(
             re.sub(r"[\W_]+", " ", user_text.casefold()).split()
         )
         proposed = proposed_operation.strip().casefold()
+        explicit = recognize_explicit_capability(user_text)
+        if (
+            explicit is not None
+            and explicit.execution_requested
+            and not explicit.negated
+        ):
+            operation_code = capability_definition(
+                explicit.capability
+            ).operation_code
+            active_operations = {
+                definition.code
+                for definition in self._gateway.operation_definitions
+            }
+            if operation_code and operation_code in active_operations:
+                return operation_code
         data_push = any(
             re.search(pattern, normalized)
             for pattern in (
@@ -5013,6 +5095,11 @@ class AgentGraphOrchestrator:
             return (
                 "Start the selected Business Rule in Oracle and monitor its "
                 "execution."
+            )
+        if normalized == "fccs-consolidation":
+            return (
+                "Start the selected FCCS consolidation rule for the reviewed "
+                "Scenario, Year, Period, and Entity, then monitor the Oracle job."
             )
         if normalized == "data-maps":
             return (

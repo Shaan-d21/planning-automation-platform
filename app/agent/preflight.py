@@ -26,6 +26,7 @@ class AgentActionPreflightService:
         "metadata-import": "IMPORT_METADATA",
         "data-import": "IMPORT_DATA",
         "cube-refresh": "CUBE_REFRESH",
+        "fccs-consolidation": "RULES",
     }
 
     def __init__(

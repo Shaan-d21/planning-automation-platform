@@ -6,8 +6,27 @@ import json
 
 import pytest
 
+from app.agent.capabilities import AgentCapabilityGateway
+from app.agent.models import AgentToolCall
+from app.application.execution_payloads import (
+    operation_from_payload,
+    operation_payload,
+)
+from app.config.settings import Settings
+from app.models.job import JobDefinition
+from app.products.contracts import BusinessProcessType
+from app.products.registry import PRODUCT_PROVIDER_REGISTRY
 from app.products.fccs.read_service import FCCSReadService
-from app.utils.exceptions import ConfigurationError
+from app.products.fccs.journal_actions import (
+    FCCSJournalAction,
+    FCCSJournalActionInput,
+    FCCSJournalActionService,
+)
+from app.products.fccs.consolidation import (
+    FCCSConsolidationInput,
+    FCCSConsolidationService,
+)
+from app.utils.exceptions import ConfigurationError, OperationError
 
 
 class _FCCSClient:
@@ -102,6 +121,36 @@ class _FCCSClient:
                 ],
             }
         raise AssertionError(f"Unexpected endpoint: {endpoint}")
+
+    def post(self, endpoint: str, *, payload=None, params=None):
+        self.calls.append((endpoint, payload))
+        if endpoint.endswith("/Consolidation/jobs"):
+            assert payload == {
+                "jobType": "RULES",
+                "jobName": "Consolidate",
+                "parameters": {
+                    "Scenario": "Actual",
+                    "Year": "FY27",
+                    "Period": "Jan",
+                    "Entity": "FCCS_Total Geography",
+                },
+            }
+            return {
+                "jobId": 55,
+                "status": -1,
+                "jobName": "Consolidate",
+                "jobType": "RULES",
+            }
+        assert endpoint.endswith(
+            "/Consolidation/journals/Close%20Adjustment/actions"
+        )
+        assert payload == {
+            "scenario": "Actual",
+            "year": "FY27",
+            "period": "Jan",
+            "action": "SUBMIT",
+        }
+        return {"actionStatus": "Submitted"}
 
 
 def test_fccs_connection_and_application_discovery_are_verified() -> None:
@@ -203,3 +252,132 @@ def test_fccs_journal_reads_reject_unsafe_queries(
             offset=offset,
             limit=limit,
         )
+
+
+def test_fccs_journal_action_rechecks_status_and_uses_documented_endpoint() -> None:
+    client = _FCCSClient()
+    result = FCCSJournalActionService(client).execute(
+        FCCSJournalActionInput(
+            journal_label="Close Adjustment",
+            scenario="Actual",
+            year="FY27",
+            period="Jan",
+            action=FCCSJournalAction.SUBMIT,
+            expected_status="Working",
+        )
+    )
+
+    assert result["action"] == "SUBMIT"
+    assert result["previous_status"] == "Working"
+    assert result["status"] == "Submitted"
+
+
+def test_fccs_consolidation_requires_live_rule_and_submits_exact_pov() -> None:
+    client = _FCCSClient()
+
+    result = FCCSConsolidationService(client).start(
+        FCCSConsolidationInput(
+            rule_name="Consolidate",
+            scenario="Actual",
+            year="FY27",
+            period="Jan",
+            entity="FCCS_Total Geography",
+        )
+    )
+
+    assert result.job_id == 55
+    assert result.rule_name == "Consolidate"
+
+
+def test_fccs_consolidation_is_safe_for_durable_queue_round_trip() -> None:
+    operation = FCCSConsolidationInput(
+        rule_name="Consolidate",
+        scenario="Actual",
+        year="FY27",
+        period="Jan",
+        entity="FCCS_Total Geography",
+    )
+
+    restored, actor = operation_from_payload(operation_payload(operation, None))
+
+    assert restored == operation
+    assert actor is None
+
+
+def test_fccs_consolidation_rejects_non_consolidation_rules() -> None:
+    with pytest.raises(OperationError, match="not identified as a consolidation"):
+        FCCSConsolidationService.normalize(
+            FCCSConsolidationInput(
+                rule_name="Translate",
+                scenario="Actual",
+                year="FY27",
+                period="Jan",
+                entity="FCCS_Total Geography",
+            )
+        )
+
+
+def test_fccs_journal_action_is_safe_for_durable_queue_round_trip() -> None:
+    operation = FCCSJournalActionInput(
+        journal_label="Close Adjustment",
+        scenario="Actual",
+        year="FY27",
+        period="Jan",
+        action=FCCSJournalAction.APPROVE,
+        consolidation="FCCS_Entity Input",
+        expected_status="Submitted",
+    )
+
+    restored, actor = operation_from_payload(operation_payload(operation, None))
+
+    assert restored == operation
+    assert actor is None
+
+
+def test_fccs_agent_exposes_product_reads_without_planning_tools(tmp_path) -> None:
+    class _Catalog:
+        @staticmethod
+        def active_definitions():
+            return PRODUCT_PROVIDER_REGISTRY.operations_for(
+                BusinessProcessType.FCCS
+            )
+
+        @staticmethod
+        def active_agent_tool_names():
+            return PRODUCT_PROVIDER_REGISTRY.agent_tool_names_for(
+                BusinessProcessType.FCCS
+            )
+
+    class _Read:
+        @staticmethod
+        def job_definitions(*, job_type=None):
+            assert job_type == "RULES"
+            return (JobDefinition("Consolidate", "RULES"),)
+
+    gateway = AgentCapabilityGateway(
+        Settings(
+            epm_base_url="https://example.oraclecloud.com",
+            epm_username="service-user",
+            epm_password="secret",
+            application_name="Close",
+            workflow_database_file=tmp_path / "fccs-agent.sqlite3",
+        ),
+        control_center=object(),
+        data_review=object(),
+        operation_catalog=_Catalog(),
+        fccs_read=_Read(),
+    )
+
+    names = {item.name for item in gateway.tool_definitions()}
+    consolidation_rules = gateway.artifact_choices("fccs-consolidation")
+    result = gateway.execute(
+        AgentToolCall("list_fccs_jobs", {"job_type": "RULES"})
+    )
+
+    assert "list_fccs_jobs" in names
+    assert "list_planning_cubes" not in names
+    assert consolidation_rules == ("Consolidate",)
+    assert result == {
+        "count": 1,
+        "jobs": [{"job_name": "Consolidate", "job_type": "RULES"}],
+    }

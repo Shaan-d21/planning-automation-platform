@@ -24,7 +24,10 @@ from app.agent.gemini_provider import GeminiAgentProvider
 from app.agent.groq_provider import GroqAgentProvider
 from app.agent.checkpoints import AgentCheckpointStore
 from app.agent.context import AgentContextResolver
-from app.agent.canonical import recognize_explicit_capability
+from app.agent.canonical import (
+    capability_definition,
+    recognize_explicit_capability,
+)
 from app.agent.graph import AgentGraphOrchestrator
 from app.agent.followups import AgentFollowUpResolver
 from app.agent.clarification import (
@@ -85,6 +88,12 @@ from app.application.substitution_variables import (
     SubstitutionVariableOperationInput,
 )
 from app.application.user_variables import UserVariableOperationInput
+from app.products.fccs.journal_actions import (
+    FCCSJournalAction,
+    FCCSJournalActionInput,
+)
+from app.products.fccs.consolidation import FCCSConsolidationInput
+from app.services.application_workspace_service import ApplicationWorkspaceService
 from app.models.data_integration import (
     DataIntegrationFileReference,
     DataIntegrationPeriodRange,
@@ -254,6 +263,8 @@ class AgentApplicationService:
             "substitution-variables",
             "user-variables",
             "standalone-flow",
+            "fccs-consolidation",
+            "fccs-journal-action",
             PIPELINE_SCHEDULE_CREATE,
             PIPELINE_SCHEDULE_PAUSE,
             PIPELINE_SCHEDULE_RESUME,
@@ -273,9 +284,11 @@ class AgentApplicationService:
         schedule_service: AutomationScheduleApplicationService | None = None,
         schedule_coordinator: AutomationScheduleCoordinator | None = None,
         user_variable_identity: OracleUserVariableIdentityResolver | None = None,
+        system_instruction: str | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._settings = settings
+        self._system_instruction = system_instruction or SYSTEM_INSTRUCTION
         self._gateway = gateway
         self._preflight = preflight
         self._repository = repository or SQLAgentRepository(
@@ -300,6 +313,12 @@ class AgentApplicationService:
             settings.epm_base_url,
             settings.application_name,
         ).key
+        workspace = ApplicationWorkspaceService(
+            settings.database_target
+        ).find_registered(settings.epm_base_url, settings.application_name)
+        self._application_id = (
+            workspace.application_id if workspace is not None else None
+        )
         if self._graph is None and settings.agent_orchestrator == "langgraph":
             self._graph = AgentGraphOrchestrator(
                 provider_factory=self._provider_factory,
@@ -308,7 +327,7 @@ class AgentApplicationService:
                     settings.database_target,
                     logger=self._logger.getChild("checkpoints"),
                 ),
-                system_instruction=SYSTEM_INSTRUCTION,
+                system_instruction=self._system_instruction,
                 max_tool_rounds=settings.agent_max_tool_rounds,
                 environment_key=(
                     f"{settings.epm_base_url}|{settings.application_name}"
@@ -999,8 +1018,22 @@ class AgentApplicationService:
         )
         if parameter_delta is not None:
             task_understanding = parameter_delta.task
-        semantic_interpretation = None
-        explicit_canonical_interpretation = None
+        explicit_canonical_interpretation = (
+            recognize_explicit_capability(prompt)
+            if follow_up is None
+            else None
+        )
+        if explicit_canonical_interpretation is not None:
+            explicit_operation = capability_definition(
+                explicit_canonical_interpretation.capability
+            ).operation_code
+            active_operations = {
+                definition.code
+                for definition in self._gateway.operation_definitions
+            }
+            if explicit_operation not in active_operations:
+                explicit_canonical_interpretation = None
+        semantic_interpretation = explicit_canonical_interpretation
         active_prior_context = (
             isinstance(prior_task_context, dict)
             and str(prior_task_context.get("intent") or "").upper()
@@ -1011,6 +1044,7 @@ class AgentApplicationService:
             follow_up is None
             and task_understanding.intent is AgentTaskIntent.UNKNOWN
             and active_prior_context
+            and explicit_canonical_interpretation is None
         )
         if (
             follow_up is None
@@ -1018,10 +1052,6 @@ class AgentApplicationService:
             task_understanding.intent is AgentTaskIntent.UNKNOWN
             and not retain_active_context
         ):
-            explicit_canonical_interpretation = recognize_explicit_capability(
-                prompt
-            )
-            semantic_interpretation = explicit_canonical_interpretation
             if semantic_interpretation is None:
                 semantic_interpretation = AgentSemanticInterpreter.interpret(
                     provider=self._provider_factory(),
@@ -1556,20 +1586,20 @@ class AgentApplicationService:
             "selection": selection,
         }
 
-    @staticmethod
     def _instruction_with_data_review_context(
+        self,
         context: dict[str, object] | None,
     ) -> str:
         """Provide the same safe refinement context to every model provider."""
         if not context:
-            return SYSTEM_INSTRUCTION
+            return self._system_instruction
         serialized = json.dumps(
             context,
             ensure_ascii=True,
             separators=(",", ":"),
         )[:6_000]
         return (
-            f"{SYSTEM_INSTRUCTION}\n\n"
+            f"{self._system_instruction}\n\n"
             "Current tool-validated Data Explorer context:\n"
             f"{serialized}\n"
             "Preserve all prior selections except fields explicitly changed "
@@ -2782,19 +2812,55 @@ class AgentApplicationService:
                 "Select a live Oracle artifact before approving execution."
             )
         try:
-            canonical = self._gateway.resolve_artifact_choice(
-                operation_code,
-                requested,
+            canonical = (
+                requested
+                if operation_code == "fccs-journal-action"
+                else self._gateway.resolve_artifact_choice(
+                    operation_code,
+                    requested,
+                )
             )
             if canonical is None:
                 raise AgentConversationError(
                     f"'{requested}' is no longer available for "
                     f"{operation_code.replace('-', ' ')} in "
-                    "the connected Planning application."
+                    "the connected Oracle EPM application."
                 )
             values = payload.get("input_values")
             input_values = values if isinstance(values, dict) else {}
-            if operation_code == "business-rules":
+            if operation_code == "fccs-consolidation":
+                operation_input = FCCSConsolidationInput(
+                    rule_name=canonical,
+                    scenario=str(input_values.get("scenario") or ""),
+                    year=str(input_values.get("year") or ""),
+                    period=str(input_values.get("period") or ""),
+                    entity=str(input_values.get("entity") or ""),
+                )
+            elif operation_code == "fccs-journal-action":
+                try:
+                    action = FCCSJournalAction(
+                        str(input_values.get("action") or "").upper()
+                    )
+                except ValueError as exc:
+                    raise AgentConversationError(
+                        "Choose a valid FCCS journal action."
+                    ) from exc
+                operation_input = FCCSJournalActionInput(
+                    journal_label=canonical,
+                    scenario=str(input_values.get("scenario") or ""),
+                    year=str(input_values.get("year") or ""),
+                    period=str(input_values.get("period") or ""),
+                    action=action,
+                    consolidation=(
+                        str(input_values.get("consolidation") or "").strip()
+                        or None
+                    ),
+                    expected_status=(
+                        str(input_values.get("expected_status") or "").strip()
+                        or None
+                    ),
+                )
+            elif operation_code == "business-rules":
                 runtime_prompts = input_values.get("runtime_prompts", {})
                 if not isinstance(runtime_prompts, dict):
                     raise AgentConversationError(
@@ -2908,6 +2974,8 @@ class AgentApplicationService:
                     trigger_source=TriggerSource.AI_AGENT,
                 )
             }
+            if self._application_id is not None:
+                submit_options["application_id"] = self._application_id
             if operation_code in {
                 "pipelines",
                 "data-integrations",

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from app.config.settings import Settings
 from app.models.application_workspace import ApplicationWorkspace
@@ -89,18 +89,14 @@ class RuntimeApplicationContextResolver:
             base_url=workspace.environment_base_url,
             application_name=workspace.application_name,
         )
-        navigation = PRODUCT_PROVIDER_REGISTRY.navigation_for(
-            business_process
-        )
         if (
             self._deployment_application_id is not None
             and workspace.application_id != self._deployment_application_id
         ):
-            # The shared agent still owns deployment-bound Planning services.
-            # Do not advertise it in a switched read-only FCCS workspace.
-            navigation = tuple(
-                item for item in navigation if item.code != "assistant"
-            )
+            # A secondary environment owns its own cloud/on-premises mode;
+            # never inherit the deployment environment's fixed classification.
+            settings = replace(settings, deployment_mode="auto")
+        navigation = PRODUCT_PROVIDER_REGISTRY.navigation_for(business_process)
         return RuntimeApplicationContext(
             workspace=workspace,
             settings=settings,

@@ -28,6 +28,8 @@ from app.application.substitution_variables import (
     SubstitutionVariableOperationInput,
 )
 from app.application.user_variables import UserVariableOperationInput
+from app.products.fccs.journal_actions import FCCSJournalActionInput
+from app.products.fccs.consolidation import FCCSConsolidationInput
 from app.application.reports import (
     ReportGenerationOperationInput,
     ReportWorkspaceService,
@@ -397,6 +399,16 @@ class OperationExecutionManager:
     def _identity(
         operation_input: OperationInput,
     ) -> tuple[OperationKind, str]:
+        if isinstance(operation_input, FCCSConsolidationInput):
+            target = operation_input.rule_name.strip()
+            if not target:
+                raise OperationError("FCCS consolidation rule name cannot be empty.")
+            return OperationKind.FCCS_CONSOLIDATION, target
+        if isinstance(operation_input, FCCSJournalActionInput):
+            target = operation_input.journal_label.strip()
+            if not target:
+                raise OperationError("FCCS journal label cannot be empty.")
+            return OperationKind.FCCS_JOURNAL_ACTION, target
         if isinstance(operation_input, BusinessRuleOperationInput):
             target = operation_input.rule_name.strip()
             if not target:
@@ -478,4 +490,6 @@ class OperationExecutionManager:
             OperationKind.CUBE_REFRESH: "Planning Cube Refresh",
             OperationKind.REPORT_GENERATION: "Report Generation",
             OperationKind.STANDALONE_FLOW: "Standalone Flow",
+            OperationKind.FCCS_CONSOLIDATION: "FCCS Consolidation",
+            OperationKind.FCCS_JOURNAL_ACTION: "FCCS Journal Action",
         }[kind]

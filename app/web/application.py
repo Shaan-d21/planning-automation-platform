@@ -28,7 +28,7 @@ from app import __version__
 from app.agent.capabilities import AgentCapabilityGateway
 from app.agent.models import AgentToolActivity
 from app.agent.preflight import AgentActionPreflightService
-from app.agent.service import AgentApplicationService
+from app.agent.service import AgentApplicationService, SYSTEM_INSTRUCTION
 from app.api.v1 import router as v1_router
 from app.application.fccs_read import FCCSReadApplicationService
 from app.application.connection import VerifyConnection
@@ -177,6 +177,7 @@ from app.web.uploads import ProcessUploadStore
 from app.web.api_versioning import ApiVersioningMiddleware
 from app.web.request_correlation import RequestCorrelationMiddleware
 from app.web.security import (
+    agent_service_for_request,
     client_ip as _client_ip,
     csrf_token as _csrf_token,
     current_application_context,
@@ -192,6 +193,28 @@ from app.web.security import (
 WEB_ROOT = Path(__file__).resolve().parent
 FRONTEND_DIST_ROOT = PROJECT_ROOT / "frontend" / "dist"
 LOGGER = logging.getLogger("oracle_planning_automation.web")
+
+
+def _agent_system_instruction(
+    business_process: BusinessProcessType,
+) -> str:
+    """Return product-specific agent policy for initial and switched workspaces."""
+
+    if business_process is not BusinessProcessType.FCCS:
+        return SYSTEM_INSTRUCTION
+    return (
+        SYSTEM_INSTRUCTION
+        + "\n\nActive product rules:\n"
+        "- The active application is Financial Consolidation and Close, not Planning.\n"
+        "- Use the FCCS tools for overview, dimensions, jobs, and journals.\n"
+        "- Treat requests to consolidate or run consolidation as the governed "
+        "FCCS Consolidation operation; collect the exact Scenario, Year, Period, "
+        "and Entity.\n"
+        "- Never claim a consolidation or journal action ran unless a governed "
+        "FCCS operation reports it.\n"
+        "- Do not suggest Planning-only Data Explorer, Data Map, Pipeline, "
+        "variable, or import tools in this workspace."
+    )
 
 
 def create_app(
@@ -327,7 +350,8 @@ def create_app(
                 automation_schedule_manager.shutdown()
             execution_manager.shutdown()
             operation_manager.shutdown()
-            application.state.agent_service.shutdown()
+            for service in set(application.state.agent_services.values()):
+                service.shutdown()
 
     app = FastAPI(
         title="EPM AI Assistant",
@@ -452,8 +476,12 @@ def create_app(
         app.state.deployment_application_id: app.state.data_review
     }
     app.state.identity_access = IdentityAccessApplicationService(
-        resolved_settings
+        resolved_settings,
+        business_process=business_process.value,
     )
+    app.state.identity_access_workspaces = {
+        app.state.deployment_application_id: app.state.identity_access
+    }
     app.state.planning_work = PlanningWorkApplicationService(
         resolved_settings,
         application_id=app.state.deployment_application_id,
@@ -461,6 +489,12 @@ def create_app(
     app.state.planning_workspaces = {
         app.state.deployment_application_id: app.state.planning_work
     }
+    initial_fccs_read = (
+        app.state.fccs_read_factory(resolved_settings)
+        if business_process is BusinessProcessType.FCCS
+        else None
+    )
+    initial_agent_instruction = _agent_system_instruction(business_process)
     app.state.agent_service = AgentApplicationService(
         resolved_settings,
         gateway=AgentCapabilityGateway(
@@ -473,6 +507,7 @@ def create_app(
             business_rule_rtps=app.state.business_rule_rtp_registry,
             schedule_service=app.state.automation_schedule_service,
             schedule_coordinator=app.state.automation_schedule_coordinator,
+            fccs_read=initial_fccs_read,
         ),
         preflight=AgentActionPreflightService(
             control_center=app.state.control_center,
@@ -483,8 +518,72 @@ def create_app(
         schedule_service=app.state.automation_schedule_service,
         user_variable_identity=app.state.user_variable_identity,
         schedule_coordinator=app.state.automation_schedule_coordinator,
+        system_instruction=initial_agent_instruction,
         logger=LOGGER.getChild("agent"),
     )
+    app.state.agent_services = {
+        app.state.deployment_application_id: app.state.agent_service
+    }
+
+    def build_agent_service(context):
+        """Compose one product-scoped assistant without sharing Oracle state."""
+
+        catalog = OperationCatalogService(
+            context.settings,
+            business_process=context.business_process,
+            application_id=context.application_id,
+            seed_catalogs=False,
+            logger=LOGGER.getChild(
+                f"agent_catalog.{context.application_id}"
+            ),
+        )
+        report_workspace = ReportWorkspaceService(
+            context.settings,
+            application_id=context.application_id,
+            seed_catalog_file=None,
+            logger=LOGGER.getChild(
+                f"agent_reports.{context.application_id}"
+            ),
+        )
+        data_review = DataReviewWorkspaceService(
+            context.settings,
+            report_catalog_file=report_workspace.catalog_file,
+            logger=LOGGER.getChild(
+                f"agent_data_review.{context.application_id}"
+            ),
+        )
+        control_center = ControlCenterService(
+            context.settings,
+            application_id=context.application_id,
+            seed_catalogs=False,
+        )
+        fccs_read = (
+            app.state.fccs_read_factory(context.settings)
+            if context.business_process is BusinessProcessType.FCCS
+            else None
+        )
+        instruction = _agent_system_instruction(context.business_process)
+        return AgentApplicationService(
+            context.settings,
+            gateway=AgentCapabilityGateway(
+                context.settings,
+                control_center=control_center,
+                data_review=data_review,
+                report_workspace=report_workspace,
+                operation_catalog=catalog,
+                fccs_read=fccs_read,
+            ),
+            preflight=AgentActionPreflightService(
+                control_center=control_center,
+                operation_catalog=catalog,
+                report_workspace=report_workspace,
+            ),
+            operation_manager=app.state.operation_manager,
+            system_instruction=instruction,
+            logger=LOGGER.getChild(f"agent.{context.application_id}"),
+        )
+
+    app.state.agent_service_factory = build_agent_service
     app.state.upload_store = ProcessUploadStore(
         resolved_settings.runtime_storage_dir / "web_uploads"
     )
@@ -1242,7 +1341,7 @@ def create_app(
     @app.get("/api/agent/status")
     async def agent_status(request: Request):
         require_api_session(request)
-        return request.app.state.agent_service.status()
+        return agent_service_for_request(request).status()
 
     @app.get("/api/agent/conversations")
     async def agent_conversations(request: Request):
@@ -1251,7 +1350,7 @@ def create_app(
         assert user is not None
         application_context = current_application_context(request, user)
         conversations = await run_in_threadpool(
-            request.app.state.agent_service.list_conversations,
+            agent_service_for_request(request).list_conversations,
             user,
             application_id=application_context.application_id,
         )
@@ -1267,7 +1366,7 @@ def create_app(
         assert user is not None
         application_context = current_application_context(request, user)
         conversation = await run_in_threadpool(
-            request.app.state.agent_service.create_conversation,
+            agent_service_for_request(request).create_conversation,
             user,
             application_id=application_context.application_id,
         )
@@ -1280,37 +1379,37 @@ def create_app(
         assert user is not None
         try:
             messages = await run_in_threadpool(
-                request.app.state.agent_service.get_messages,
+                agent_service_for_request(request).get_messages,
                 conversation_id,
                 user,
             )
             action_drafts = await run_in_threadpool(
-                request.app.state.agent_service.get_action_drafts,
+                agent_service_for_request(request).get_action_drafts,
                 conversation_id,
                 user,
             )
             approval_request = await run_in_threadpool(
-                request.app.state.agent_service.get_pending_approval,
+                agent_service_for_request(request).get_pending_approval,
                 conversation_id,
                 user,
             )
             clarification_request = await run_in_threadpool(
-                request.app.state.agent_service.get_pending_clarification,
+                agent_service_for_request(request).get_pending_clarification,
                 conversation_id,
                 user,
             )
             input_request = await run_in_threadpool(
-                request.app.state.agent_service.get_pending_input,
+                agent_service_for_request(request).get_pending_input,
                 conversation_id,
                 user,
             )
             data_review_context = await run_in_threadpool(
-                request.app.state.agent_service.get_data_review_context,
+                agent_service_for_request(request).get_data_review_context,
                 conversation_id,
                 user,
             )
             active_turn = await run_in_threadpool(
-                request.app.state.agent_service.get_active_turn,
+                agent_service_for_request(request).get_active_turn,
                 conversation_id,
                 user,
             )
@@ -1344,7 +1443,7 @@ def create_app(
         assert user is not None
         try:
             result = await run_in_threadpool(
-                request.app.state.agent_service.send_message,
+                agent_service_for_request(request).send_message,
                 conversation_id=conversation_id,
                 user=user,
                 content=payload.content,
@@ -1400,7 +1499,7 @@ def create_app(
         assert user is not None
         try:
             turn = await run_in_threadpool(
-                request.app.state.agent_service.cancel_turn,
+                agent_service_for_request(request).cancel_turn,
                 conversation_id,
                 turn_id,
                 user,
@@ -1423,7 +1522,7 @@ def create_app(
         assert user is not None
         upload_tokens: tuple[str, ...] = ()
         operation_uploads = {}
-        pending = request.app.state.agent_service.get_pending_approval(
+        pending = agent_service_for_request(request).get_pending_approval(
             conversation_id,
             user,
         )
@@ -1510,7 +1609,7 @@ def create_app(
                         )
         try:
             result = await run_in_threadpool(
-                request.app.state.agent_service.resolve_approval,
+                agent_service_for_request(request).resolve_approval,
                 conversation_id=conversation_id,
                 user=user,
                 request_id=payload.request_id,
@@ -1589,7 +1688,7 @@ def create_app(
         assert user is not None
         try:
             result = await run_in_threadpool(
-                request.app.state.agent_service.resolve_clarification,
+                agent_service_for_request(request).resolve_clarification,
                 conversation_id=conversation_id,
                 user=user,
                 request_id=payload.request_id,
@@ -1638,7 +1737,7 @@ def create_app(
         assert user is not None
         try:
             clarification = await run_in_threadpool(
-                request.app.state.agent_service.synchronize_clarification_catalog,
+                agent_service_for_request(request).synchronize_clarification_catalog,
                 conversation_id=conversation_id,
                 user=user,
                 request_id=payload.request_id,
@@ -1667,7 +1766,7 @@ def create_app(
         assert user is not None
         try:
             result = await run_in_threadpool(
-                request.app.state.agent_service.register_clarification_artifact,
+                agent_service_for_request(request).register_clarification_artifact,
                 conversation_id=conversation_id,
                 user=user,
                 request_id=payload.request_id,
@@ -1716,7 +1815,7 @@ def create_app(
         assert user is not None
         try:
             result = await run_in_threadpool(
-                request.app.state.agent_service.resolve_input,
+                agent_service_for_request(request).resolve_input,
                 conversation_id=conversation_id,
                 user=user,
                 request_id=payload.request_id,
@@ -1761,7 +1860,7 @@ def create_app(
         assert user is not None
         try:
             await run_in_threadpool(
-                request.app.state.agent_service.delete_conversation,
+                agent_service_for_request(request).delete_conversation,
                 conversation_id,
                 user,
             )
@@ -1779,7 +1878,7 @@ def create_app(
         assert user is not None
         try:
             draft = await run_in_threadpool(
-                request.app.state.agent_service.preflight_action_draft,
+                agent_service_for_request(request).preflight_action_draft,
                 draft_id,
                 user,
             )
@@ -1801,7 +1900,7 @@ def create_app(
         assert user is not None
         try:
             draft = await run_in_threadpool(
-                request.app.state.agent_service.resolve_operation_handoff,
+                agent_service_for_request(request).resolve_operation_handoff,
                 draft_id=draft_id,
                 user=user,
                 target_code=target_code,
@@ -1821,7 +1920,7 @@ def create_app(
         assert user is not None
         try:
             draft = await run_in_threadpool(
-                request.app.state.agent_service.update_action_draft_inputs,
+                agent_service_for_request(request).update_action_draft_inputs,
                 draft_id,
                 user,
                 payload.inputs,

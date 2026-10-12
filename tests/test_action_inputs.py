@@ -56,6 +56,22 @@ def test_false_is_a_valid_required_boolean() -> None:
     assert missing_required_inputs(schema, values) == ()
 
 
+def test_fccs_consolidation_requires_complete_exact_pov() -> None:
+    schema = action_input_schema("operation", "fccs-consolidation")
+    values = normalize_action_inputs(
+        schema,
+        {
+            "scenario": "Actual",
+            "year": "FY27",
+            "period": "Jan",
+            "entity": "FCCS_Total Geography",
+        },
+    )
+
+    assert missing_required_inputs(schema, values) == ()
+    assert values["entity"] == "FCCS_Total Geography"
+
+
 def test_unknown_inputs_and_invalid_choices_are_rejected() -> None:
     schema = action_input_schema("operation", "data-integrations")
 

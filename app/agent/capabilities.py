@@ -28,6 +28,7 @@ from app.application.data_review import (
 )
 from app.application.reports import ReportCatalogItem, ReportWorkspaceService
 from app.application.execution_evidence import agent_execution_evidence
+from app.application.fccs_read import FCCSReadApplicationService
 from app.application.operations import OPERATION_DEFINITIONS, OperationCatalogService
 from app.application.substitution_variables import (
     SubstitutionVariableAction,
@@ -86,6 +87,7 @@ class AgentCapabilityGateway:
         business_rule_rtps: BusinessRuleRTPRegistryService | None = None,
         schedule_service: AutomationScheduleApplicationService | None = None,
         schedule_coordinator: AutomationScheduleCoordinator | None = None,
+        fccs_read: FCCSReadApplicationService | None = None,
     ) -> None:
         self._settings = settings
         self._control_center = control_center
@@ -107,6 +109,7 @@ class AgentCapabilityGateway:
         )
         self._schedule_service = schedule_service
         self._schedule_coordinator = schedule_coordinator
+        self._fccs_read = fccs_read
         self._schedule_environment_key = OracleEnvironment.from_settings(
             settings.epm_base_url,
             settings.application_name,
@@ -143,6 +146,12 @@ class AgentCapabilityGateway:
                 self._prepare_standalone_flow_action
             ),
             "prepare_schedule_action": self._prepare_schedule_action,
+            "get_fccs_overview": self._fccs_overview,
+            "list_fccs_dimensions": self._fccs_dimensions,
+            "list_fccs_jobs": self._fccs_jobs,
+            "get_fccs_job": self._fccs_job,
+            "list_fccs_journals": self._fccs_journals,
+            "get_fccs_journal": self._fccs_journal,
         }
 
     _REQUIRED_INPUTS = {
@@ -161,6 +170,15 @@ class AgentCapabilityGateway:
         ),
         "business-rules": ("Deployed business rule", "Required runtime prompts"),
         "data-maps": ("Data Map", "Clear-target choice", "Optional member overrides"),
+        "fccs-consolidation": (
+            "Live FCCS consolidation rule",
+            "Scenario, year, period, and entity",
+        ),
+        "fccs-journal-action": (
+            "Journal label",
+            "Action",
+            "Scenario, year, and period",
+        ),
     }
 
     _STANDALONE_FLOW_OPERATIONS = frozenset(
@@ -233,8 +251,67 @@ class AgentCapabilityGateway:
         return (
             AgentToolDefinition(
                 name="get_environment_summary",
-                description="Return the configured Oracle Planning application and deployment type without credentials.",
+                description="Return the active Oracle EPM application and deployment type without credentials.",
                 parameters_schema=empty,
+            ),
+            AgentToolDefinition(
+                name="get_fccs_overview",
+                description="Verify the active FCCS application and return its live, read-only Oracle overview.",
+                parameters_schema=empty,
+            ),
+            AgentToolDefinition(
+                name="list_fccs_dimensions",
+                description="List live FCCS cubes and their discoverable dimensions.",
+                parameters_schema=empty,
+            ),
+            AgentToolDefinition(
+                name="list_fccs_jobs",
+                description="List saved FCCS job definitions, optionally restricted to an exact Oracle job type.",
+                parameters_schema={
+                    "type": "object",
+                    "properties": {"job_type": {"type": "string"}},
+                    "additionalProperties": False,
+                },
+            ),
+            AgentToolDefinition(
+                name="get_fccs_job",
+                description="Read the current Oracle status of one exact FCCS job ID.",
+                parameters_schema={
+                    "type": "object",
+                    "properties": {"job_id": {"type": "integer", "minimum": 1}},
+                    "required": ["job_id"],
+                    "additionalProperties": False,
+                },
+            ),
+            AgentToolDefinition(
+                name="list_fccs_journals",
+                description="List a bounded page of FCCS journals using only supplied exact filters.",
+                parameters_schema={
+                    "type": "object",
+                    "properties": {
+                        "filters": {"type": "object", "additionalProperties": {"type": "string"}},
+                        "offset": {"type": "integer", "minimum": 0},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+                    },
+                    "additionalProperties": False,
+                },
+            ),
+            AgentToolDefinition(
+                name="get_fccs_journal",
+                description="Read one exact FCCS journal and its line items for an explicit scenario, year, and period.",
+                parameters_schema={
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string"},
+                        "scenario": {"type": "string"},
+                        "year": {"type": "string"},
+                        "period": {"type": "string"},
+                        "consolidation": {"type": "string"},
+                        "include_line_items": {"type": "boolean"},
+                    },
+                    "required": ["label", "scenario", "year", "period"],
+                    "additionalProperties": False,
+                },
             ),
             AgentToolDefinition(
                 name="list_platform_operations",
@@ -684,6 +761,13 @@ class AgentCapabilityGateway:
                 "artifact_name",
                 "input_values",
             },
+            "list_fccs_jobs": {"job_type"},
+            "get_fccs_job": {"job_id"},
+            "list_fccs_journals": {"filters", "offset", "limit"},
+            "get_fccs_journal": {
+                "label", "scenario", "year", "period", "consolidation",
+                "include_line_items",
+            },
         }
         unexpected = set(call.arguments) - allowed_arguments.get(call.name, set())
         if unexpected:
@@ -691,6 +775,75 @@ class AgentCapabilityGateway:
                 f"Unexpected arguments for '{call.name}': {', '.join(sorted(unexpected))}."
             )
         return handler(call.arguments)
+
+    def _require_fccs_read(self) -> FCCSReadApplicationService:
+        if self._fccs_read is None:
+            raise AgentCapabilityError(
+                "FCCS read capabilities are not available for the active application."
+            )
+        return self._fccs_read
+
+    def _fccs_overview(self, _: dict[str, Any]) -> dict[str, Any]:
+        snapshot = self._require_fccs_read().snapshot()
+        return {
+            "application": asdict(snapshot.connection.application),
+            "plan_types": [asdict(item) for item in snapshot.plan_types],
+            "job_definitions": [asdict(item) for item in snapshot.job_definitions],
+        }
+
+    def _fccs_dimensions(self, _: dict[str, Any]) -> dict[str, Any]:
+        items = self._require_fccs_read().plan_types()
+        return {"count": len(items), "plan_types": [asdict(item) for item in items]}
+
+    def _fccs_jobs(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        job_type = self._optional_text(arguments.get("job_type"))
+        items = self._require_fccs_read().job_definitions(job_type=job_type)
+        return {"count": len(items), "jobs": [asdict(item) for item in items]}
+
+    def _fccs_job(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        try:
+            job_id = int(arguments.get("job_id"))
+        except (TypeError, ValueError) as exc:
+            raise AgentCapabilityError("A valid FCCS job ID is required.") from exc
+        if job_id < 1:
+            raise AgentCapabilityError("A valid FCCS job ID is required.")
+        job = self._require_fccs_read().job(job_id)
+        return {
+            "job": {
+                "job_id": job.job_id,
+                "status": job.status,
+                "job_name": job.job_name,
+                "job_type": job.job_type,
+                "descriptive_status": job.descriptive_status,
+                "detailed_status": job.detailed_status,
+                "details": job.details,
+            }
+        }
+
+    def _fccs_journals(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        raw_filters = arguments.get("filters") or {}
+        if not isinstance(raw_filters, dict):
+            raise AgentCapabilityError("FCCS journal filters must be an object.")
+        items = self._require_fccs_read().journals(
+            filters={str(key): str(value) for key, value in raw_filters.items()},
+            offset=int(arguments.get("offset", 0)),
+            limit=int(arguments.get("limit", 50)),
+        )
+        return {"count": len(items), "journals": [asdict(item) for item in items]}
+
+    def _fccs_journal(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        detail = self._require_fccs_read().journal_detail(
+            self._required_text(arguments, "label", "Journal label"),
+            scenario=self._required_text(arguments, "scenario", "Scenario"),
+            year=self._required_text(arguments, "year", "Year"),
+            period=self._required_text(arguments, "period", "Period"),
+            consolidation=self._optional_text(arguments.get("consolidation")),
+            include_line_items=bool(arguments.get("include_line_items", True)),
+        )
+        return {
+            "journal": asdict(detail.journal),
+            "line_items": [dict(item) for item in detail.line_items],
+        }
 
     def _prepare_standalone_flow_action(
         self,
@@ -1760,6 +1913,24 @@ class AgentCapabilityGateway:
                 (item.name, f"{item.name} · {item.dimension}")
                 for item in catalog.definitions
             )
+        if normalized == "fccs-consolidation":
+            try:
+                definitions = self._require_fccs_read().job_definitions(
+                    job_type="RULES"
+                )
+            except AgentCapabilityError:
+                raise
+            except EPMError as exc:
+                raise AgentCapabilityError(
+                    "The live FCCS consolidation-rule catalog could not be "
+                    "loaded. Verify the active FCCS application and Oracle "
+                    "account access, then try again."
+                ) from exc
+            return tuple(
+                (item.job_name, item.job_name)
+                for item in definitions
+                if "consolidat" in item.job_name.casefold()
+            )
         if self._operation_catalog is None:
             return ()
         job_types = {
@@ -1918,6 +2089,8 @@ class AgentCapabilityGateway:
         requested = str(identifier or "").strip()
         if not requested:
             return None
+        if operation_code.strip().casefold() == "fccs-journal-action":
+            return requested
         for available in self.artifact_choices(operation_code):
             if available.casefold() == requested.casefold():
                 return available
@@ -1943,6 +2116,36 @@ class AgentCapabilityGateway:
     ) -> dict[str, Any] | None:
         """Return platform-owned guided fields for a supported operation."""
         normalized = operation_code.strip().casefold()
+        if normalized == "fccs-consolidation":
+            return {
+                "operation_code": normalized,
+                "display_name": "Run FCCS Consolidation",
+                "artifact_name": artifact_name,
+                "title": "Review the consolidation point of view",
+                "description": (
+                    "Enter the exact Scenario, Year, Period, and Entity. The "
+                    "platform verifies the selected consolidation rule again "
+                    "immediately before submitting it to Oracle."
+                ),
+                "fields": action_input_schema_payload(
+                    action_input_schema("operation", normalized)
+                ),
+            }
+        if normalized == "fccs-journal-action":
+            return {
+                "operation_code": normalized,
+                "display_name": "FCCS Journal Action",
+                "artifact_name": artifact_name,
+                "title": "Review the FCCS journal workflow action",
+                "description": (
+                    "Enter the exact journal POV and requested workflow "
+                    "transition. The platform reads the current journal again "
+                    "before presenting final approval."
+                ),
+                "fields": action_input_schema_payload(
+                    action_input_schema("operation", normalized)
+                ),
+            }
         if normalized == PIPELINE_SCHEDULE_CREATE:
             if self._operation_catalog is None:
                 raise AgentCapabilityError(
@@ -2529,10 +2732,39 @@ class AgentCapabilityGateway:
             "data-integrations",
             "data-import",
             "metadata-import",
+            "fccs-consolidation",
+            "fccs-journal-action",
             PIPELINE_SCHEDULE_CREATE,
         }:
             return {}
         supplied = values if isinstance(values, dict) else {}
+        if normalized == "fccs-consolidation":
+            try:
+                return normalize_action_inputs(
+                    action_input_schema("operation", normalized), supplied
+                )
+            except Exception as exc:
+                raise AgentCapabilityError(str(exc)) from exc
+        if normalized == "fccs-journal-action":
+            try:
+                normalized_values = normalize_action_inputs(
+                    action_input_schema("operation", normalized), supplied
+                )
+            except Exception as exc:
+                raise AgentCapabilityError(str(exc)) from exc
+            detail = self._require_fccs_read().journal_detail(
+                artifact_name,
+                scenario=str(normalized_values.get("scenario") or ""),
+                year=str(normalized_values.get("year") or ""),
+                period=str(normalized_values.get("period") or ""),
+                consolidation=(
+                    str(normalized_values.get("consolidation") or "").strip()
+                    or None
+                ),
+                include_line_items=False,
+            )
+            normalized_values["expected_status"] = detail.journal.status or ""
+            return normalized_values
         if normalized == PIPELINE_SCHEDULE_CREATE:
             return self._normalize_pipeline_schedule_inputs(
                 artifact_name,
@@ -3569,7 +3801,18 @@ class AgentCapabilityGateway:
                     return frozenset(active())
                 except TypeError:
                     pass
-        return frozenset(item.name for item in cls.definitions())
+        fccs_only = {
+            "get_fccs_overview",
+            "list_fccs_dimensions",
+            "list_fccs_jobs",
+            "get_fccs_job",
+            "list_fccs_journals",
+            "get_fccs_journal",
+        }
+        return frozenset(
+            item.name for item in cls.definitions()
+            if item.name not in fccs_only
+        )
 
     @staticmethod
     def _required_text(

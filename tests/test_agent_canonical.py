@@ -21,6 +21,7 @@ def test_every_canonical_capability_has_one_definition() -> None:
     ("operation_code", "capability"),
     [
         ("business-rules", CanonicalCapability.BUSINESS_RULE),
+        ("fccs-consolidation", CanonicalCapability.FCCS_CONSOLIDATION),
         ("data-integrations", CanonicalCapability.DATA_INTEGRATION),
         ("metadata-import", CanonicalCapability.METADATA_IMPORT),
         ("data-import", CanonicalCapability.DATA_IMPORT),
@@ -79,6 +80,10 @@ def test_structured_interpretation_accepts_only_candidate_values() -> None:
     [
         ("Push data using Revenue to Reporting Data Map", CanonicalCapability.DATA_MAP),
         ("Run Import Products metadata job", CanonicalCapability.METADATA_IMPORT),
+        ("Run Consolidation rule", CanonicalCapability.FCCS_CONSOLIDATION),
+        ("Execute consolidation", CanonicalCapability.FCCS_CONSOLIDATION),
+        ("Start consolidation", CanonicalCapability.FCCS_CONSOLIDATION),
+        ("Consolidate", CanonicalCapability.FCCS_CONSOLIDATION),
     ],
 )
 def test_explicit_platform_nouns_are_recognized_without_a_model(

@@ -511,9 +511,9 @@ def test_session_can_switch_between_deployment_planning_and_read_only_fccs(
     assert bootstrap["environment"]["business_process"] == "FCCS"
     navigation = {item["code"] for item in bootstrap["navigation"]}
     assert "fccs-overview" in navigation
-    assert "assistant" not in navigation
+    assert "assistant" in navigation
     assert client.get("/api/v1/planning-tasks").status_code == 404
-    assert client.get("/api/agent/status").status_code == 404
+    assert client.get("/api/agent/status").status_code == 200
     assert client.get("/api/v1/notifications").json()["notifications"] == []
 
     vision = next(

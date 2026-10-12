@@ -181,7 +181,10 @@ def test_registered_applications_are_isolated_by_membership_and_session(
     assert runtime_context.application_id == close.application_id
     assert runtime_context.settings.application_name == "Close"
     assert runtime_context.business_process.value == "FCCS"
-    assert runtime_context.operations == ()
+    assert [item.code for item in runtime_context.operations] == [
+        "fccs-consolidation",
+        "fccs-journal-action",
+    ]
     assert "fccs-journals" in {
         item.code for item in runtime_context.navigation
     }

@@ -84,6 +84,7 @@ from app.web.security import (
     csrf_token,
     current_user,
     current_application_context,
+    identity_access_for_request,
     planning_work_for_request,
     require_api_session,
     start_user_session,
@@ -1331,7 +1332,12 @@ async def download_job_artifact(
 async def access_control_workspace(request: Request) -> dict[str, object]:
     """Return the administrator's password-free user and role catalog."""
     user = _require_user_management(request)
-    sources = request.app.state.access_control.authentication_sources()
+    identity_access = identity_access_for_request(request)
+    identity_status = identity_access.status()
+    provider_code = str(identity_status["provider_code"])
+    sources = request.app.state.access_control.authentication_sources_for_provider(
+        provider_code
+    )
     return {
         "status": "success",
         "current_user_id": user.user_id,
@@ -1343,13 +1349,15 @@ async def access_control_workspace(request: Request) -> dict[str, object]:
                     "LOCAL_RECOVERY",
                 ),
             )
-            for account in request.app.state.access_control.list_users()
+            for account in request.app.state.access_control.list_users_for_identity_provider(
+                provider_code
+            )
         ],
         "roles": [
             _platform_role_payload(role)
             for role in request.app.state.access_control.roles()
         ],
-        "identity_sync": request.app.state.identity_access.status(),
+        "identity_sync": identity_status,
     }
 
 
@@ -1450,10 +1458,16 @@ async def remove_oracle_application(
         "planning_workspaces",
         "report_workspaces",
         "data_review_workspaces",
+        "identity_access_workspaces",
     ):
         cache = getattr(request.app.state, cache_name, None)
         if isinstance(cache, dict):
             cache.pop(application_id, None)
+    agent_services = getattr(request.app.state, "agent_services", None)
+    if isinstance(agent_services, dict):
+        service = agent_services.pop(application_id, None)
+        if service is not None:
+            service.shutdown()
     return {
         "status": "success",
         "message": (
@@ -1568,7 +1582,7 @@ async def preview_identity_synchronization(
     _require_user_management(request)
     validate_csrf(request)
     try:
-        preview = await run_in_threadpool(request.app.state.identity_access.preview)
+        preview = await run_in_threadpool(identity_access_for_request(request).preview)
     except IdentitySynchronizationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except EPMError as exc:
@@ -1586,7 +1600,7 @@ async def apply_identity_synchronization(
     validate_csrf(request)
     try:
         result, preview = await run_in_threadpool(
-            request.app.state.identity_access.synchronize,
+            identity_access_for_request(request).synchronize,
             payload.snapshot_checksum,
             initiated_by_user_id=actor.user_id,
         )
@@ -1620,7 +1634,7 @@ async def identity_role_mapping_catalog(request: Request) -> dict[str, object]:
     """Return synchronized Oracle entitlements and current role mappings."""
     _require_user_management(request)
     try:
-        catalog = request.app.state.identity_access.entitlement_catalog()
+        catalog = identity_access_for_request(request).entitlement_catalog()
     except IdentitySynchronizationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"status": "success", **catalog}
@@ -1636,7 +1650,7 @@ async def set_identity_role_mapping(
     actor = _require_user_management(request)
     validate_csrf(request)
     try:
-        mapping = request.app.state.identity_access.set_mapping(
+        mapping = identity_access_for_request(request).set_mapping(
             entitlement_id,
             payload.role_code,
             actor_user_id=actor.user_id,
@@ -1655,7 +1669,7 @@ async def remove_identity_role_mapping(
     _require_user_management(request)
     validate_csrf(request)
     try:
-        request.app.state.identity_access.remove_mapping(entitlement_id)
+        identity_access_for_request(request).remove_mapping(entitlement_id)
     except IdentitySynchronizationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"status": "success", "message": "Role mapping removed."}
@@ -1669,7 +1683,7 @@ async def preview_identity_provisioning(
     _require_user_management(request)
     validate_csrf(request)
     try:
-        preview = request.app.state.identity_access.provisioning_preview()
+        preview = identity_access_for_request(request).provisioning_preview()
     except IdentitySynchronizationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {
@@ -1687,7 +1701,7 @@ async def apply_identity_provisioning(
     actor = _require_user_management(request)
     validate_csrf(request)
     try:
-        result, preview = request.app.state.identity_access.provision(
+        result, preview = identity_access_for_request(request).provision(
             payload.provisioning_checksum,
             actor_user_id=actor.user_id,
         )

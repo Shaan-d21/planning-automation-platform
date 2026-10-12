@@ -7,9 +7,9 @@ orchestration, approvals, scheduling, execution queues, audit, notifications,
 and deployment remain shared. Each Oracle EPM business process contributes
 operations through an allow-listed product provider.
 
-The first provider is Planning. Financial Consolidation and Close (FCCS) is
-enabled for a deliberately read-only foundation and contributes no executable
-operations.
+The first provider is Planning. Financial Consolidation and Close (FCCS)
+provides a bounded read foundation plus separately governed executable
+operations for consolidation and documented journal workflow actions.
 
 ## Product selection
 
@@ -23,8 +23,8 @@ deliberate fail-closed behavior.
 
 During the transition, legacy Planning environments that omit application-type
 metadata retain the existing Planning compatibility path. An application that
-Oracle explicitly identifies as FCCS receives only the FCCS read navigation;
-Planning operations are never offered against it.
+Oracle explicitly identifies as FCCS receives FCCS navigation and FCCS agent
+tools; Planning operations are never offered against it.
 
 ## Provider contract
 
@@ -43,7 +43,8 @@ of the Planning compatibility contract. Existing imports continue to consume
 ## Current state
 
 - Planning is enabled and exposes the unchanged release operation catalog.
-- FCCS is enabled for verified read-only navigation and exposes no operations.
+- FCCS exposes verified overview, dimension, job, and journal reads plus the
+  governed `fccs-consolidation` and `fccs-journal-action` operations.
 - Runtime operation catalogs, navigation, agent tools, preflight, action
   handoff, and worker startup consume the active product composition.
 - Common EPM capabilities and shell navigation are defined independently from
@@ -57,10 +58,13 @@ of the Planning compatibility contract. Existing imports continue to consume
 - The FCCS module contains a read-only service contract and guarded API/UI for
   verified connection/application identity, plan types and dimensions, saved
   job definitions and job status, and bounded consolidation-journal retrieval.
-  It contains no FCCS write method.
-- The durable worker remains idle for a provider that exposes no executable
-  operations, preventing stale Planning work from running in an FCCS
-  deployment.
+  Its write service accepts only `SUBMIT`, `APPROVE`, `POST`, `UNPOST`, or
+  `REJECT`, re-reads the exact journal POV and reviewed status, and submits only
+  after explicit approval.
+- The FCCS consolidation service permits only live-discovered `RULES` jobs
+  identified as consolidation rules, requires exact Scenario, Year, Period,
+  and Entity values, rechecks the rule before submission, and monitors the
+  returned Oracle job to a terminal status.
 - Oracle applications now have normalized, non-secret registry records,
   explicit user memberships, and a durable active-application field on each
   platform session. Existing deployments are backfilled into one default
@@ -68,7 +72,7 @@ of the Planning compatibility contract. Existing imports continue to consume
 - The workspace catalog now exposes a fail-closed session switcher. The
   deployment application remains fully available, and registered FCCS
   applications may be selected because their Oracle services are request-
-  scoped and read-only. FCCS may reside at a different registered Oracle base
+  scoped. FCCS may reside at a different registered Oracle base
   URL: the selected workspace supplies both its verified URL and application
   name to the request context. Additional Planning applications remain visible
   but unavailable until every Planning write service is request-scoped.
@@ -84,10 +88,14 @@ of the Planning compatibility contract. Existing imports continue to consume
   capabilities, standalone operation presentation, Planning route guards, and
   FCCS read-only Oracle clients use that context instead of process-global
   product composition.
-- Planning write managers, the agent runtime, and durable workers remain bound
-  to the deployment application. Switched FCCS navigation omits the assistant,
-  and direct agent or Planning-route requests fail closed, preventing a session
-  selection from redirecting a write to the wrong Oracle application.
+- Agent and identity-access services are request-scoped and cached by the
+  active registered application. FCCS receives only its provider allow-list;
+  Planning tools remain unavailable. Durable approved work carries the active
+  application ID so the worker resolves the exact Oracle URL and application.
+- Oracle identity providers, synchronized people, entitlements, and mappings
+  are keyed by environment and application. Access Control displays the active
+  application's Oracle-linked profiles separately while retaining local
+  recovery accounts across application workspaces.
 - EPM Assistant conversations are now owned by an authorized Oracle
   application. Conversation lists, messages, approvals, clarifications,
   inputs, drafts, and deletion fail closed when the active session selects a
@@ -138,6 +146,8 @@ The FCCS read contract follows Oracle's supported public REST resources:
 - [Get Dimensions for a Plan Type](https://docs.oracle.com/en/cloud/saas/enterprise-performance-management-common/prest/GUID-185E11F9-8420-414A-B2EA-9098767FC24F.pdf)
 - [Manage Jobs](https://docs.oracle.com/en/cloud/saas/enterprise-performance-management-common/prest/manage_jobs.html)
 - [Retrieve FCCS Journals](https://docs.oracle.com/en/cloud/saas/enterprise-performance-management-common/prest/fccs_retrieve_journals.html)
+- [Perform FCCS Journal Actions](https://docs.oracle.com/en/cloud/saas/enterprise-performance-management-common/prest/fccs_perform_journal_actions.html)
+- [Execute an Oracle EPM Job](https://docs.oracle.com/en/cloud/saas/enterprise-performance-management-common/prest/execute_a_job.html)
 
 ## Incremental migration rule
 
@@ -148,17 +158,18 @@ pass the complete Planning regression suite.
 
 ## FCCS release gate
 
-FCCS selection is enabled for the read-only workspace. Production acceptance
-still requires live UAT for connection, application discovery, dimensions,
-jobs, and journals against the target FCCS environment. Write operations stay
-disabled until each operation receives its own supported Oracle contract,
-authorization policy, review flow, audit evidence, and live UAT.
+FCCS selection and product-scoped assistant reads are enabled. Production
+acceptance still requires live UAT for connection, application discovery,
+dimensions, jobs, journals, consolidation execution, and every allowed journal
+transition against the target FCCS environment. All other write operations stay disabled until each
+receives its own supported Oracle contract, authorization policy, review flow,
+audit evidence, and live UAT.
 
 ## Multi-application release gate
 
 Application registration alone does not make every application executable.
 The public switcher currently permits the deployment application and assigned
-read-only FCCS applications, including FCCS applications registered from a
+FCCS applications, including FCCS applications registered from a
 different Oracle environment URL. Every selection is persisted on the
 authenticated session and resolves both URL and application through membership
 before navigation or Oracle reads are composed. Enabling a second Planning

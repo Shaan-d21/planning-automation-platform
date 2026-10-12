@@ -57,6 +57,10 @@ from app.models.oracle_artifact import (
 from app.models.data_integration import DataIntegrationSubmission
 from app.models.data_job import DataJobSubmission
 from app.models.workflow import WorkflowStatus, WorkflowStepStatus
+from app.products.fccs.consolidation import (
+    FCCSConsolidationInput,
+    FCCSConsolidationSubmission,
+)
 from app.utils.exceptions import APIRequestError, EPMConnectionError
 
 
@@ -562,6 +566,57 @@ def test_business_rule_execution_is_durable_and_monitored(
         runtime_prompts={"Volume": "100"},
     )
     client_class.return_value.close.assert_called_once_with()
+    notification_factory.return_value.publish.assert_called_once()
+
+
+@patch("app.application.operations.create_notification_service")
+@patch("app.application.operations.JobMonitor")
+@patch("app.application.operations.FCCSConsolidationService.start")
+@patch("app.application.operations.EPMClient")
+def test_fccs_consolidation_execution_is_durable_and_monitored(
+    client_class: Mock,
+    start_consolidation: Mock,
+    monitor_class: Mock,
+    notification_factory: Mock,
+    tmp_path: Path,
+) -> None:
+    client_class.return_value.application_name = "Consolidation"
+    client_class.return_value.planning_api_root = (
+        "https://example.oraclecloud.com/rest/v3"
+    )
+    start_consolidation.return_value = FCCSConsolidationSubmission(
+        job_id=61,
+        rule_name="Consolidate",
+        scenario="Actual",
+        year="FY27",
+        period="Jan",
+        entity="FCCS_Total Geography",
+    )
+    monitor_class.return_value.wait_for_completion.return_value = JobResult(
+        job_id=61,
+        status=0,
+        descriptive_status="Completed",
+    )
+    command = FCCSConsolidationInput(
+        rule_name="Consolidate",
+        scenario="Actual",
+        year="FY27",
+        period="Jan",
+        entity="FCCS_Total Geography",
+    )
+
+    run = OperationCommandExecutor(
+        replace(_settings(tmp_path), application_name="Consolidation")
+    ).execute(
+        command,
+        execution_id="fccs-consolidation-1",
+        log_file=tmp_path / "fccs-consolidation.log",
+    )
+
+    assert run.status is WorkflowStatus.SUCCESS
+    assert run.steps[-1].details["job_id"] == 61
+    start_consolidation.assert_called_once_with(command)
+    monitor_class.return_value.wait_for_completion.assert_called_once_with(61)
     notification_factory.return_value.publish.assert_called_once()
 
 
