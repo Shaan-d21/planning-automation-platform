@@ -92,3 +92,43 @@ def test_comparison_workbook_contains_all_cell_evidence() -> None:
     assert workbook.sheetnames == ["Comparison Summary", "Cell Comparison"]
     assert workbook["Cell Comparison"]["A4"].value == "DIFFERENCE"
     assert workbook["Cell Comparison"]["F4"].value == "1"
+
+
+def test_variance_workbook_uses_scenario_direction_and_percentage() -> None:
+    cell = DataComparisonCell(
+        row_headers=("Product Revenue",),
+        column_headers=("Sep",),
+        source_value=Decimal("3500"),
+        target_value=Decimal("5000"),
+        difference=Decimal("-1500"),
+        matches=False,
+    )
+    result = DataValidationResult(
+        source_form="Budget Sep",
+        target_form="Forecast Sep",
+        compared_cells=1,
+        matched_cells=0,
+        mismatches=(),
+        tolerance=Decimal("500"),
+        cells=(cell,),
+    )
+
+    content = DataValidationExcelRenderer().render_comparison(
+        application_name="Vision",
+        source_cube="Plan1",
+        target_cube="Plan1",
+        source_pov={"Scenario": "Budget", "Year": "FY27"},
+        target_pov={"Scenario": "Forecast", "Year": "FY27"},
+        result=result,
+    )
+
+    workbook = load_workbook(BytesIO(content), data_only=True)
+    detail = workbook["Cell Comparison"]
+    assert detail["D3"].value == "Budget"
+    assert detail["E3"].value == "Forecast"
+    assert detail["F3"].value == "Forecast - Budget"
+    assert detail["G3"].value == "Variance %"
+    assert detail["F4"].value == "1500"
+    assert Decimal(str(detail["G4"].value)).quantize(Decimal("0.01")) == Decimal(
+        "42.86"
+    )

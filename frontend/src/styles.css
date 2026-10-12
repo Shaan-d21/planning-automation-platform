@@ -1918,6 +1918,13 @@ svg { width: 20px; height: 20px; }
 .assistant-comparison-refine__fields input { min-width: 0; padding: 9px 10px; border: 1px solid #bdcbea; border-radius: 8px; color: #263e60; background: #fff; font: inherit; font-size: .52rem; }
 .assistant-comparison-refine__fields input:focus { border-color: #5e83dc; outline: 3px solid rgb(67 107 205 / 12%); }
 .assistant-comparison-refine > footer { display: flex; justify-content: flex-end; gap: 8px; }
+.assistant-variance-summary { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(220px, .65fr); gap: 14px; padding: 13px; border: 1px solid #bcd0fa; border-radius: 10px; background: linear-gradient(135deg, #f2f6ff, #f8fbff); }
+.assistant-variance-summary > div { display: grid; gap: 5px; }
+.assistant-variance-summary > div > strong { color: #1e3658; font-size: .58rem; line-height: 1.5; }
+.assistant-variance-summary > div > small { color: var(--muted); font-size: .44rem; line-height: 1.5; }
+.assistant-variance-summary ol { display: grid; gap: 5px; margin: 0; padding: 0; list-style: none; }
+.assistant-variance-summary li { display: flex; justify-content: space-between; gap: 10px; padding: 7px 9px; border-radius: 7px; color: #344862; background: #fff; font-size: .45rem; }
+.assistant-variance-summary li strong { color: #a34e05; white-space: nowrap; }
 .assistant-data-review__table { max-width: 100%; overflow: auto; border: 1px solid #dbe3ee; border-radius: 10px; }
 .assistant-data-review__table table { width: 100%; min-width: 680px; border-collapse: separate; border-spacing: 0; font-size: .5rem; }
 .assistant-data-review__table th, .assistant-data-review__table td { min-width: 105px; padding: 8px 10px; border-right: 1px solid #e1e7f0; border-bottom: 1px solid #e1e7f0; color: #334861; background: #fff; text-align: right; white-space: nowrap; }
@@ -1947,6 +1954,7 @@ svg { width: 20px; height: 20px; }
   .assistant-review-resume footer { grid-column: 1 / -1; justify-content: flex-start; }
   .assistant-data-review__metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .assistant-comparison-refine__fields { grid-template-columns: 1fr; }
+  .assistant-variance-summary { grid-template-columns: 1fr; }
   .assistant-dimension-fallback__fields { grid-template-columns: 1fr; }
   .assistant-data-review > header { flex-direction: column; }
 }

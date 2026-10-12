@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from dataclasses import replace
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -2017,6 +2018,36 @@ def test_agent_variance_review_reuses_saved_layout_and_live_values(
     }
     assert compared["result"]["compared_cells"] == 2
     assert compared["result"]["matched_cells"] == 1
+
+
+def test_variance_analysis_reports_business_direction_and_top_drivers() -> None:
+    analysis = AgentCapabilityGateway._variance_analysis(
+        (
+            DataMismatch(
+                row_headers=("Product Revenue",),
+                column_headers=("Sep",),
+                source_value=3500,
+                target_value=5000,
+                difference=-1500,
+            ),
+            DataMismatch(
+                row_headers=("Units",),
+                column_headers=("Sep",),
+                source_value=1000,
+                target_value=900,
+                difference=100,
+            ),
+        ),
+        source_scenario="Budget",
+        target_scenario="Forecast",
+    )
+
+    assert analysis["direction_label"] == "Forecast - Budget"
+    assert analysis["percentage_basis"] == "Budget"
+    assert analysis["top_drivers"][0]["row_headers"] == ["Product Revenue"]
+    assert analysis["top_drivers"][0]["variance"] == 1500
+    assert analysis["top_drivers"][0]["variance_percent"] == Decimal("42.86")
+    assert "Forecast is 1,500 above Budget" in analysis["summary"]
 
 
 def test_agent_service_persists_action_draft_for_conversation(

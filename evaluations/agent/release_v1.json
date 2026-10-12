@@ -359,6 +359,22 @@
       "expected_missing_parameters": []
     },
     {
+      "id": "understand-budget-forecast-variance-case",
+      "category": "business-task-understanding",
+      "severity": "critical",
+      "kind": "task_understanding",
+      "prompt": "Show September Budget vs Forecast variance above 500 for FY27",
+      "expected_task_intent": "VARIANCE_REPORTING",
+      "expected_phase": "READY_FOR_PLAN",
+      "expected_parameters": {
+        "comparison": "Budget vs Forecast",
+        "period": "Sep",
+        "year": "FY27",
+        "threshold": 500.0
+      },
+      "expected_missing_parameters": []
+    },
+    {
       "id": "understand-explicit-forecast-seed",
       "category": "business-task-understanding",
       "severity": "critical",

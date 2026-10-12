@@ -1142,8 +1142,8 @@ class AgentTaskInterpreter:
                 AgentTaskIntent.VARIANCE_REPORTING,
                 "comparison",
             ): (
-                "Which comparison would you like: Actual vs Budget or Actual "
-                "vs Forecast?"
+                "Which comparison would you like: Actual vs Budget, Actual "
+                "vs Forecast, or Budget vs Forecast?"
             ),
             (
                 AgentTaskIntent.VARIANCE_REPORTING,

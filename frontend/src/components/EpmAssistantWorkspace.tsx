@@ -700,6 +700,24 @@ interface AgentComparisonResult {
     threshold: number;
     pov_overrides?: Record<string, string>;
   };
+  variance_analysis?: {
+    source_label: string;
+    target_label: string;
+    direction_label: string;
+    percentage_basis: string;
+    summary: string;
+    driver_count: number;
+    returned_driver_count?: number;
+    truncated: boolean;
+    top_drivers: Array<{
+      row_headers: string[];
+      column_headers: string[];
+      source_value: number | string | null;
+      target_value: number | string | null;
+      variance: number | string | null;
+      variance_percent: number | string | null;
+    }>;
+  };
 }
 
 function AgentDataReviewCard({ activity, csrfToken, onPrompt, onPrepare, busy }: {
@@ -1044,6 +1062,10 @@ function AgentComparisonCard({ comparison, csrfToken, onPrompt, onRefine, busy }
   const mismatches = comparison.result.mismatches ?? [];
   const mismatchCount = Math.max(0, comparison.result.compared_cells - comparison.result.matched_cells);
   const variance = comparison.variance_context;
+  const analysis = comparison.variance_analysis;
+  const sourceLabel = analysis?.source_label ?? "Source";
+  const targetLabel = analysis?.target_label ?? "Target";
+  const differenceLabel = analysis?.direction_label ?? "Difference";
   const sourcePov = comparison.source_request.pov ?? {};
   const targetPov = comparison.target_request.pov ?? {};
   const povDimensions = Array.from(new Set([...Object.keys(sourcePov), ...Object.keys(targetPov)]));
@@ -1092,8 +1114,9 @@ function AgentComparisonCard({ comparison, csrfToken, onPrompt, onRefine, busy }
     <header><div><span className="eyebrow">{variance ? "Live variance analysis" : "Live reconciliation"}</span><h3>{variance ? `${variance.comparison} · ${variance.period}${variance.year ? ` · ${variance.year}` : ""}` : `${comparison.source_cube} compared with ${comparison.target_cube}`}</h3><p>{variance ? `Current Oracle values were compared using the saved ${comparison.saved_view?.title || comparison.saved_view?.name || "Data Explorer"} layout. Differences at or below ${formatAgentValue(variance.threshold)} are treated as matching.` : "Source and target were read from Oracle using the reviewed intersections."}</p></div><span className={`assistant-comparison-status${mismatchCount ? " has-warning" : " is-match"}`}>{mismatchCount ? "Review required" : "All matched"}</span></header>
     {povDimensions.length > 0 && <section className="assistant-comparison-pov" aria-label="Comparison POV"><div className="assistant-comparison-pov__heading"><div><strong>Comparison POV</strong><p>These members define the current source and target intersection.</p></div>{variance && comparison.saved_view && <button type="button" className="button button--secondary" disabled={busy} onClick={() => setRefining((value) => !value)}>{refining ? "Close refinement" : "Change POV"}</button>}</div><div className="assistant-comparison-pov__table"><span className="is-heading">Dimension</span><span className="is-heading">Source</span><span className="is-heading">Target</span>{povDimensions.map((dimension) => <Fragment key={dimension}><strong>{dimension}</strong><span>{sourcePov[dimension] || "—"}</span><span>{targetPov[dimension] || "—"}</span></Fragment>)}</div></section>}
     {refining && variance && comparison.saved_view && <section className="assistant-comparison-refine" aria-label="Refine comparison POV"><header><strong>Change common POV members</strong><p>Scenario, period, and year remain controlled by the comparison above.</p></header>{editableDimensions.length ? <div className="assistant-comparison-refine__fields">{editableDimensions.map((dimension) => <label key={dimension}><span>{dimension}</span><input aria-label={`POV ${dimension}`} value={povValues[dimension] ?? ""} disabled={busy} onChange={(event) => setPovValues((current) => ({ ...current, [dimension]: event.target.value }))} /></label>)}</div> : <p className="assistant-data-review__notice"><Icon name="alert" /> This layout has no additional common POV dimensions to edit.</p>}<footer><button type="button" className="button button--secondary" disabled={busy} onClick={() => setRefining(false)}>Cancel</button><button type="button" className="button button--primary" disabled={busy || !editableDimensions.length} onClick={applyRefinement}>{busy ? "Applying..." : "Apply refinement"}</button></footer></section>}
+    {analysis && <section className="assistant-variance-summary" aria-label="Variance summary"><div><span className="eyebrow">Grounded analysis</span><strong>{analysis.summary}</strong><small>Variance direction: {analysis.direction_label}. Percentages use {analysis.percentage_basis} as the baseline. Favorable/unfavorable classification is not inferred without account semantics.</small>{analysis.truncated && <small>Top returned differences are shown; export the evidence workbook for a larger evidence set of up to 500 differences.</small>}</div>{analysis.top_drivers.length > 0 && <ol>{analysis.top_drivers.slice(0, 3).map((driver, index) => <li key={`${driver.row_headers.join("|")}-${driver.column_headers.join("|")}-${index}`}><span>{[...driver.row_headers, ...driver.column_headers].join(" · ")}</span><strong>{formatAgentValue(driver.variance)}{driver.variance_percent !== null ? ` (${formatAgentValue(driver.variance_percent)}%)` : ""}</strong></li>)}</ol>}</section>}
     <div className="assistant-data-review__metrics"><span><small>Compared</small><strong>{comparison.result.compared_cells.toLocaleString()}</strong></span><span><small>Matched</small><strong>{comparison.result.matched_cells.toLocaleString()}</strong></span><span className={mismatchCount ? "has-warning" : ""}><small>Different</small><strong>{mismatchCount.toLocaleString()}</strong></span><span><small>Tolerance</small><strong>{formatAgentValue(comparison.result.tolerance)}</strong></span></div>
-    {mismatches.length ? <div className="assistant-data-review__table"><table><thead><tr><th>Row intersection</th><th>Column intersection</th><th>Source</th><th>Target</th><th>Difference</th></tr></thead><tbody>{mismatches.slice(0, 100).map((item, index) => <tr key={`${item.row_headers.join("|")}-${item.column_headers.join("|")}-${index}`}><th>{item.row_headers.join(" · ")}</th><th>{item.column_headers.join(" · ")}</th><td>{formatAgentValue(item.source_value)}</td><td>{formatAgentValue(item.target_value)}</td><td className="is-difference">{formatAgentValue(item.difference)}</td></tr>)}</tbody></table></div> : <div className="assistant-data-review__matched"><Icon name="check" /><div><strong>No differences found</strong><p>Every compared cell matched within the selected tolerance.</p></div></div>}
+    {mismatches.length ? <div className="assistant-data-review__table"><table><thead><tr><th>Row intersection</th><th>Column intersection</th><th>{sourceLabel}</th><th>{targetLabel}</th><th>{differenceLabel}</th></tr></thead><tbody>{mismatches.slice(0, 100).map((item, index) => { const businessVariance = analysis && item.source_value !== null && item.target_value !== null ? Number(item.target_value) - Number(item.source_value) : item.difference; return <tr key={`${item.row_headers.join("|")}-${item.column_headers.join("|")}-${index}`}><th>{item.row_headers.join(" · ")}</th><th>{item.column_headers.join(" · ")}</th><td>{formatAgentValue(item.source_value)}</td><td>{formatAgentValue(item.target_value)}</td><td className="is-difference">{formatAgentValue(businessVariance)}</td></tr>; })}</tbody></table></div> : <div className="assistant-data-review__matched"><Icon name="check" /><div><strong>No differences found</strong><p>Every compared cell matched within the selected tolerance.</p></div></div>}
     {error && <div className="assistant-draft__error"><Icon name="alert" />{error}</div>}
     <footer><button type="button" className="button button--secondary" disabled={busy} onClick={() => variance && comparison.saved_view ? setRefining(true) : onPrompt("Refine the previous source-target comparison by changing ")}>Refine comparison</button><button type="button" className="button button--primary" disabled={exporting} onClick={() => void exportExcel()}>{exporting ? <><span className="spinner" /> Creating Excel...</> : <><Icon name="reports" /> Export comparison</>}</button></footer>
   </article>;

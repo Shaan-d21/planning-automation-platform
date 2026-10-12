@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime, timezone
+from decimal import Decimal
 from io import BytesIO
 from typing import Any
 
@@ -125,7 +126,25 @@ class DataValidationExcelRenderer:
         assert summary is not None
         summary.title = "Comparison Summary"
         mismatch_count = result.compared_cells - result.matched_cells
-        self._title(summary, "Oracle EPM Source-to-Target Validation", 6)
+        source_scenario = self._dimension_member(source_pov, "Scenario")
+        target_scenario = self._dimension_member(target_pov, "Scenario")
+        variance_report = bool(
+            source_scenario
+            and target_scenario
+            and source_scenario.casefold() != target_scenario.casefold()
+        )
+        source_label = source_scenario if variance_report else "Source"
+        target_label = target_scenario if variance_report else "Target"
+        difference_label = (
+            f"{target_label} - {source_label}" if variance_report else "Difference"
+        )
+        self._title(
+            summary,
+            "Oracle EPM Variance Analysis"
+            if variance_report
+            else "Oracle EPM Source-to-Target Validation",
+            6,
+        )
         self._details(
             summary,
             (
@@ -138,6 +157,14 @@ class DataValidationExcelRenderer:
                 ("Matched cells", result.matched_cells),
                 ("Differences", mismatch_count),
                 ("Tolerance", self._value(result.tolerance)),
+                *(
+                    (
+                        ("Variance direction", difference_label),
+                        ("Percentage baseline", source_label),
+                    )
+                    if variance_report
+                    else ()
+                ),
                 ("Source POV", self._mapping(source_pov)),
                 ("Target POV", self._mapping(target_pov)),
             ),
@@ -146,14 +173,21 @@ class DataValidationExcelRenderer:
         self._fit(summary)
 
         differences = workbook.create_sheet("Cell Comparison")
-        self._title(differences, "Source-to-Target Cell Comparison", 7)
+        self._title(
+            differences,
+            "Scenario Variance Detail"
+            if variance_report
+            else "Source-to-Target Cell Comparison",
+            8 if variance_report else 7,
+        )
         headers = (
             "Status",
             "Row intersection",
             "Column intersection",
-            "Source",
-            "Target",
-            "Difference",
+            source_label,
+            target_label,
+            difference_label,
+            *(("Variance %",) if variance_report else ()),
             "Tolerance",
         )
         self._table_header(differences, 3, headers)
@@ -161,13 +195,28 @@ class DataValidationExcelRenderer:
             _mismatch_cell(item) for item in result.mismatches
         )
         for row_number, cell in enumerate(cells, 4):
+            business_variance = (
+                cell.target_value - cell.source_value
+                if variance_report
+                and cell.source_value is not None
+                and cell.target_value is not None
+                else cell.difference
+            )
+            variance_percent = (
+                business_variance / abs(cell.source_value) * Decimal("100")
+                if variance_report
+                and business_variance is not None
+                and cell.source_value not in {None, Decimal("0")}
+                else None
+            )
             values = (
                 "MATCH" if cell.matches else "DIFFERENCE",
                 " | ".join(cell.row_headers),
                 " | ".join(cell.column_headers),
                 self._value(cell.source_value),
                 self._value(cell.target_value),
-                self._value(cell.difference),
+                self._value(business_variance),
+                *((self._value(variance_percent),) if variance_report else ()),
                 self._value(result.tolerance),
             )
             for column, value in enumerate(values, 1):
@@ -176,9 +225,19 @@ class DataValidationExcelRenderer:
                 self._PASS_FILL if cell.matches else self._ERROR_FILL
             )
         differences.freeze_panes = "A4"
-        differences.auto_filter.ref = f"A3:G{max(3, len(cells) + 3)}"
+        final_column = "H" if variance_report else "G"
+        differences.auto_filter.ref = (
+            f"A3:{final_column}{max(3, len(cells) + 3)}"
+        )
         self._fit(differences)
         return self._bytes(workbook)
+
+    @staticmethod
+    def _dimension_member(values: Mapping[str, str], dimension: str) -> str:
+        for name, member in values.items():
+            if str(name).casefold() == dimension.casefold():
+                return str(member).strip()
+        return ""
 
     def _title(self, sheet: Any, title: str, columns: int) -> None:
         sheet.merge_cells(start_row=1, start_column=1, end_row=1, end_column=columns)

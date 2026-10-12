@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import asdict
 from datetime import datetime
+from decimal import Decimal
 from pathlib import PurePath
 from typing import Any
 from urllib.parse import urlparse
@@ -1391,6 +1392,7 @@ class AgentCapabilityGateway:
             "period": period,
             "year": year,
             "threshold": threshold,
+            "required_dimensions": sorted(required_dimensions),
         }
 
     def _review_saved_data_view(
@@ -1452,6 +1454,16 @@ class AgentCapabilityGateway:
             max_mismatches=max_mismatches,
             include_cells=False,
         )
+        variance_analysis = self._variance_analysis(
+            comparison.result.mismatches,
+            source_scenario=source_scenario,
+            target_scenario=target_scenario,
+            total_difference_count=max(
+                0,
+                comparison.result.compared_cells
+                - comparison.result.matched_cells,
+            ),
+        )
         return {
             **asdict(comparison),
             "source_request": self._selection_payload(source),
@@ -1464,6 +1476,98 @@ class AgentCapabilityGateway:
                 "threshold": tolerance,
                 "pov_overrides": pov_overrides,
             },
+            "variance_analysis": variance_analysis,
+        }
+
+    @staticmethod
+    def _variance_analysis(
+        mismatches: Any,
+        *,
+        source_scenario: str,
+        target_scenario: str,
+        total_difference_count: int | None = None,
+    ) -> dict[str, Any]:
+        """Build deterministic variance evidence from compared Oracle cells.
+
+        Data validation stores its technical difference as source minus target.
+        Business variance is reported as target minus source so a request such
+        as ``Budget vs Forecast`` reads naturally as ``Forecast - Budget``.
+        """
+        drivers: list[dict[str, Any]] = []
+        for mismatch in mismatches:
+            source_value = mismatch.source_value
+            target_value = mismatch.target_value
+            source_number = (
+                Decimal(str(source_value)) if source_value is not None else None
+            )
+            target_number = (
+                Decimal(str(target_value)) if target_value is not None else None
+            )
+            variance = (
+                target_number - source_number
+                if source_number is not None and target_number is not None
+                else None
+            )
+            variance_percent: Decimal | None = None
+            if variance is not None and source_number not in {None, Decimal("0")}:
+                variance_percent = (
+                    variance / abs(source_number) * Decimal("100")
+                ).quantize(Decimal("0.01"))
+            drivers.append(
+                {
+                    "row_headers": list(mismatch.row_headers),
+                    "column_headers": list(mismatch.column_headers),
+                    "source_value": source_value,
+                    "target_value": target_value,
+                    "variance": variance,
+                    "variance_percent": variance_percent,
+                }
+            )
+        drivers.sort(
+            key=lambda item: abs(item["variance"])
+            if item["variance"] is not None
+            else Decimal("-1"),
+            reverse=True,
+        )
+        top_drivers = drivers[:10]
+        summary = "No differences exceeded the selected threshold."
+        if top_drivers:
+            largest = top_drivers[0]
+            intersection = " / ".join(
+                [*largest["row_headers"], *largest["column_headers"]]
+            ) or "selected intersection"
+            variance = largest["variance"]
+            direction = (
+                "above" if variance is not None and variance > 0 else "below"
+            )
+            amount = abs(variance) if variance is not None else "unavailable"
+            amount_text = f"{amount:,}" if isinstance(amount, Decimal) else amount
+            percent = largest["variance_percent"]
+            percent_text = (
+                f" ({abs(percent)}% of {source_scenario})"
+                if percent is not None
+                else ""
+            )
+            summary = (
+                f"Largest returned variance: {intersection}. "
+                f"{target_scenario} is "
+                f"{amount_text} {direction} {source_scenario}{percent_text}."
+            )
+        difference_count = (
+            max(0, total_difference_count)
+            if total_difference_count is not None
+            else len(drivers)
+        )
+        return {
+            "source_label": source_scenario,
+            "target_label": target_scenario,
+            "direction_label": f"{target_scenario} - {source_scenario}",
+            "percentage_basis": source_scenario,
+            "summary": summary,
+            "top_drivers": top_drivers,
+            "driver_count": difference_count,
+            "returned_driver_count": len(drivers),
+            "truncated": difference_count > len(top_drivers),
         }
 
     @staticmethod
@@ -1528,7 +1632,7 @@ class AgentCapabilityGateway:
         if match is None or match.group(1).casefold() == match.group(2).casefold():
             raise AgentCapabilityError(
                 "Choose two different scenarios, such as Actual vs Budget "
-                "or Actual vs Forecast."
+                "Actual vs Forecast, or Budget vs Forecast."
             )
         return match.group(1).title(), match.group(2).title()
 

@@ -2100,13 +2100,13 @@ describe("App", () => {
         if (sent === 1) return response({
           status: "success",
           message: { message_id: 2, conversation_id: "conv-variance", role: "assistant", content: "Choose the scope to analyze.", created_at: "2026-08-19T10:01:00Z" },
-          tool_activity: [{ name: "list_variance_views", arguments: { comparison: "Actual vs Budget", period: "Sep", year: "FY26", threshold: 500 }, status: "SUCCESS", summary: "Saved variance layouts returned.", result: { purpose: "variance", comparison: "Actual vs Budget", period: "Sep", year: "FY26", threshold: 500, count: 1, total_count: 1, truncated: false, views: [{ name: "monthly-variance", title: "Monthly Variance", cube: "Plan1", pov: [{ dimension: "Scenario", member: "Actual" }, { dimension: "Year", member: "FY26" }], row_dimensions: ["Account"], column_dimensions: ["Period"] }] } }],
+          tool_activity: [{ name: "list_variance_views", arguments: { comparison: "Budget vs Forecast", period: "Sep", year: "FY27", threshold: 500 }, status: "SUCCESS", summary: "Saved variance layouts returned.", result: { purpose: "variance", comparison: "Budget vs Forecast", period: "Sep", year: "FY27", threshold: 500, count: 1, total_count: 1, truncated: false, views: [{ name: "monthly-variance", title: "Monthly Variance", cube: "Plan1", pov: [{ dimension: "Scenario", member: "Budget" }, { dimension: "Year", member: "FY27" }], row_dimensions: ["Account"], column_dimensions: ["Period"] }] } }],
           action_drafts: [], approval_request: null, clarification_request: null, input_request: null
         });
         return response({
           status: "success",
           message: { message_id: 3, conversation_id: "conv-variance", role: "assistant", content: "The live variance review is ready.", created_at: "2026-08-19T10:02:00Z" },
-          tool_activity: [{ name: "review_saved_variance", arguments: { name: "monthly-variance", comparison: "Actual vs Budget", period: "Sep", year: "FY26", threshold: 500 }, status: "SUCCESS", summary: "Variance compared.", result: { source_cube: "Plan1", target_cube: "Plan1", saved_view: { name: "monthly-variance", title: "Monthly Variance" }, variance_context: { comparison: "Actual vs Budget", period: "Sep", year: "FY26", threshold: 500 }, source_request: { cube: "Plan1", pov: { Scenario: "Actual", Year: "FY26", Product: "BaseData" }, rows: [{ dimension: "Account", members: ["Revenue"] }], columns: [{ dimension: "Period", members: ["Sep"] }] }, target_request: { cube: "Plan1", pov: { Scenario: "Budget", Year: "FY26", Product: "BaseData" }, rows: [{ dimension: "Account", members: ["Revenue"] }], columns: [{ dimension: "Period", members: ["Sep"] }] }, result: { source_form: "Actual Sep", target_form: "Budget Sep", compared_cells: 1, matched_cells: 0, tolerance: 500, mismatches: [{ row_headers: ["Revenue"], column_headers: ["Sep"], source_value: 2000, target_value: 1000, difference: 1000 }] } } }],
+          tool_activity: [{ name: "review_saved_variance", arguments: { name: "monthly-variance", comparison: "Budget vs Forecast", period: "Sep", year: "FY27", threshold: 500 }, status: "SUCCESS", summary: "Variance compared.", result: { source_cube: "Plan1", target_cube: "Plan1", saved_view: { name: "monthly-variance", title: "Monthly Variance" }, variance_context: { comparison: "Budget vs Forecast", period: "Sep", year: "FY27", threshold: 500 }, variance_analysis: { source_label: "Budget", target_label: "Forecast", direction_label: "Forecast - Budget", percentage_basis: "Budget", summary: "Largest variance: Revenue / Sep. Forecast is 1,000 above Budget (50% of Budget).", driver_count: 1, truncated: false, top_drivers: [{ row_headers: ["Revenue"], column_headers: ["Sep"], source_value: 2000, target_value: 3000, variance: 1000, variance_percent: 50 }] }, source_request: { cube: "Plan1", pov: { Scenario: "Budget", Year: "FY27", Product: "BaseData" }, rows: [{ dimension: "Account", members: ["Revenue"] }], columns: [{ dimension: "Period", members: ["Sep"] }] }, target_request: { cube: "Plan1", pov: { Scenario: "Forecast", Year: "FY27", Product: "BaseData" }, rows: [{ dimension: "Account", members: ["Revenue"] }], columns: [{ dimension: "Period", members: ["Sep"] }] }, result: { source_form: "Budget Sep", target_form: "Forecast Sep", compared_cells: 1, matched_cells: 0, tolerance: 500, mismatches: [{ row_headers: ["Revenue"], column_headers: ["Sep"], source_value: 2000, target_value: 3000, difference: -1000 }] } } }],
           action_drafts: [], approval_request: null, clarification_request: null, input_request: null
         });
       }
@@ -2115,11 +2115,15 @@ describe("App", () => {
     });
     render(<App />);
 
-    fireEvent.change(await screen.findByLabelText("Message the EPM Assistant"), { target: { value: "Show September Actual vs Budget variance above 500 for FY26." } });
+    fireEvent.change(await screen.findByLabelText("Message the EPM Assistant"), { target: { value: "Show September Budget vs Forecast variance above 500 for FY27." } });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     fireEvent.click(await screen.findByRole("button", { name: /Monthly Variance/ }));
 
-    expect(await screen.findByRole("heading", { name: "Actual vs Budget · Sep · FY26" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Budget vs Forecast · Sep · FY27" })).toBeTruthy();
+    expect(screen.getAllByText("Forecast - Budget").length).toBeGreaterThan(0);
+    expect(screen.getByText(/Forecast is 1,000 above Budget/)).toBeTruthy();
+    expect(screen.getByRole("columnheader", { name: "Budget" })).toBeTruthy();
+    expect(screen.getByRole("columnheader", { name: "Forecast" })).toBeTruthy();
     expect(screen.getAllByText("1,000").length).toBeGreaterThan(0);
     expect(screen.getByRole("region", { name: "Comparison POV" })).toBeTruthy();
     expect(screen.getAllByText("BaseData").length).toBe(2);
@@ -2132,7 +2136,7 @@ describe("App", () => {
 
     await waitFor(() => expect(fetchMock.mock.calls.filter(([url, init]) => String(url).endsWith("/messages") && init?.method === "POST")).toHaveLength(3));
     const thirdRequest = fetchMock.mock.calls.filter(([url, init]) => String(url).endsWith("/messages") && init?.method === "POST")[2];
-    expect(JSON.parse(String(thirdRequest?.[1]?.body)).content).toBe("Refine variance comparison using saved Data Explorer view `monthly-variance`. Keep Actual vs Budget for Sep FY26 with threshold 500. POV overrides: Product=`Snacks`.");
+    expect(JSON.parse(String(thirdRequest?.[1]?.body)).content).toBe("Refine variance comparison using saved Data Explorer view `monthly-variance`. Keep Budget vs Forecast for Sep FY27 with threshold 500. POV overrides: Product=`Snacks`.");
   });
 
   it("keeps the selected agent cube when Oracle dimension discovery is unavailable", async () => {
